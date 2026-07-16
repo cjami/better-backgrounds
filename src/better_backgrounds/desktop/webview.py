@@ -55,14 +55,15 @@ class SecureRendererView(QWebEngineView):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create an ephemeral profile, narrow bridge, and trusted page."""
-        profile = QWebEngineProfile(parent)
+        super().__init__(parent)
+        profile = QWebEngineProfile(self)
         profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
         profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies,
         )
         profile.downloadRequested.connect(self._reject_download)
 
-        page = TrustedPage(profile, parent)
+        page = TrustedPage(profile, self)
         page.permissionRequested.connect(page.handle_permission)
         settings = page.settings()
         disabled = False
@@ -84,8 +85,8 @@ class SecureRendererView(QWebEngineView):
             disabled,
         )
 
-        super().__init__(parent)
         self._profile = profile
+        self._trusted_page = page
         self._bridge = RendererBridge(self)
         self._channel = QWebChannel(self)
         self._channel.registerObject("rendererBridge", self._bridge)

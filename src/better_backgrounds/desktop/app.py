@@ -60,7 +60,7 @@ def main() -> int:
     application.setWindowIcon(application_icon())
     application.setStyleSheet(STYLESHEET)
     window = MainWindow(command_factory=packaged_worker_command)
-    window.show()
+    window.showMaximized()
     if "--build-smoke-test" in arguments:
         window.room_ready.connect(window.close)
         window.room_ready.connect(application.quit)
