@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from platformdirs import user_cache_path, user_data_path
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -40,6 +42,13 @@ from better_backgrounds.protocol import (
     ResultEvent,
     WarningEvent,
 )
+from better_backgrounds.scene import (
+    AssetInstaller,
+    ManagedSceneResolver,
+    Viewpoint,
+    ViewpointStore,
+    load_sample_manifest,
+)
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
@@ -49,6 +58,7 @@ RendererFactory = Callable[[], QWidget]
 
 TAB_NAMES = ("Show", "Build", "Adjust", "Compare")
 DEFAULT_ROOMS = (
+    "Table Tennis Room — Sample",
     "Loft — North Window",
     "Studio — West Wall",
     "Living room",
@@ -60,6 +70,14 @@ class RunnerSignals(QObject):
     """Marshal worker-thread callbacks onto the Qt main thread."""
 
     event_received = Signal(object)
+
+
+class AssetSignals(QObject):
+    """Marshal sample install callbacks onto the Qt main thread."""
+
+    progressed = Signal(int, int)
+    completed = Signal()
+    failed = Signal(str)
 
 
 class TabHeader(QFrame):
@@ -136,6 +154,8 @@ class MainWindow(QMainWindow):
         *,
         command_factory: CommandFactory,
         renderer_factory: RendererFactory | None = None,
+        scene_cache_root: Path | None = None,
+        data_root: Path | None = None,
     ) -> None:
         """Create tabs and connect their task-specific signals."""
         super().__init__()
@@ -144,7 +164,16 @@ class MainWindow(QMainWindow):
         self._runner: JobRunner | None = None
         self._signals = RunnerSignals(self)
         self._signals.event_received.connect(self._handle_job_event)
+        self._setup_scene_services(scene_cache_root, data_root)
         self._rooms = list(DEFAULT_ROOMS)
+        self._room_ids = {
+            room: (
+                self._sample_scene.asset_id
+                if room == self._sample_scene.display_name
+                else self._room_id(room)
+            )
+            for room in self._rooms
+        }
         self._selected_room = self._rooms[0]
 
         self.setWindowTitle("Better Backgrounds")
@@ -177,14 +206,44 @@ class MainWindow(QMainWindow):
 
         self._header.tab_selected.connect(self.select_tab)
         self._show_page.room_selected.connect(self.select_room)
+        self._show_page.sample_install_requested.connect(self._install_sample)
         self._show_page.build_requested.connect(self._open_build)
         self._build_page.video_requested.connect(self._choose_video)
         self._build_page.sample_requested.connect(self._use_sample)
         self._build_page.build_requested.connect(self._start_build)
         self._build_page.cancel_requested.connect(self._cancel_build)
         self._build_page.retry_requested.connect(self._retry_build)
+        self._adjust_page.viewpoint_saved.connect(self._save_viewpoint)
+        self._show_page.configure_sample(
+            self._sample_scene.display_name,
+            size=self._sample_scene.expected_size,
+            attribution=self._sample_scene.attribution,
+            installed=self._asset_installer.is_ready(self._sample_scene),
+        )
         self.select_room(self._selected_room)
         self.select_tab(0)
+
+    def _setup_scene_services(
+        self,
+        scene_cache_root: Path | None,
+        data_root: Path | None,
+    ) -> None:
+        """Create application-owned sample cache and viewpoint persistence."""
+        self._sample_scene = load_sample_manifest().scenes[0]
+        cache_root = scene_cache_root or (
+            Path(user_cache_path("Better Backgrounds", "Better Backgrounds")) / "scenes-v1"
+        )
+        actual_data_root = data_root or Path(
+            user_data_path("Better Backgrounds", "Better Backgrounds"),
+        )
+        self._asset_installer = AssetInstaller(cache_root)
+        self._asset_resolver = ManagedSceneResolver(self._asset_installer, [self._sample_scene])
+        self._viewpoints = ViewpointStore(actual_data_root / "viewpoints-v1.json")
+        self._asset_signals = AssetSignals(self)
+        self._asset_signals.progressed.connect(self._show_sample_progress)
+        self._asset_signals.completed.connect(self._sample_installed)
+        self._asset_signals.failed.connect(self._sample_failed)
+        self._sample_installing = False
 
     @property
     def build_session(self) -> BuildSession:
@@ -197,6 +256,11 @@ class MainWindow(QMainWindow):
         return self._selected_room
 
     @property
+    def selected_room_id(self) -> str:
+        """Return the stable identifier shared by room-dependent tabs."""
+        return self._room_ids[self._selected_room]
+
+    @property
     def active_tab(self) -> int:
         """Return the visible product-tab index."""
         return self._tabs.currentIndex()
@@ -207,12 +271,11 @@ class MainWindow(QMainWindow):
         self._use_sample()
         self._start_build("success")
 
-    @staticmethod
-    def _default_renderer_factory() -> QWidget:
+    def _default_renderer_factory(self) -> QWidget:
         try:
             from better_backgrounds.desktop.webview import create_renderer_view  # noqa: PLC0415
 
-            return create_renderer_view()
+            return create_renderer_view(self._asset_resolver)
         except ImportError:
             return ScenePreview()
 
@@ -229,10 +292,63 @@ class MainWindow(QMainWindow):
         if room not in self._rooms:
             return
         self._selected_room = room
+        room_id = self._room_ids[room]
         self._header.set_room(room)
         self._show_page.set_room(room)
-        self._adjust_page.set_room(room)
+        scene = self._sample_scene if room == self._sample_scene.display_name else None
+        installed = scene is not None and self._asset_installer.is_ready(scene)
+        self._adjust_page.set_room(
+            room_id,
+            scene,
+            installed=installed,
+            viewpoint=self._viewpoints.load(room_id),
+        )
+        preview = None
+        if installed and scene is not None and scene.preview is not None:
+            preview = self._asset_installer.resource_path(scene, scene.preview)
+        self._show_page.set_preview_image(preview)
         self._compare_page.set_room(room)
+
+    @Slot()
+    def _install_sample(self) -> None:
+        if self._sample_installing or self._asset_installer.is_ready(self._sample_scene):
+            return
+        self._sample_installing = True
+        self._show_page.set_sample_downloading(0, self._sample_scene.expected_size)
+
+        def install() -> None:
+            try:
+                self._asset_installer.install(
+                    self._sample_scene,
+                    self._asset_signals.progressed.emit,
+                )
+            except (OSError, ValueError) as error:
+                self._asset_signals.failed.emit(str(error)[:300])
+            else:
+                self._asset_signals.completed.emit()
+
+        threading.Thread(target=install, name="sample-scene-install", daemon=True).start()
+
+    @Slot(int, int)
+    def _show_sample_progress(self, completed: int, total: int) -> None:
+        self._show_page.set_sample_downloading(completed, total)
+
+    @Slot()
+    def _sample_installed(self) -> None:
+        self._sample_installing = False
+        self._show_page.set_sample_ready(ready=True)
+        if self._selected_room == self._sample_scene.display_name:
+            self.select_room(self._selected_room)
+
+    @Slot(str)
+    def _sample_failed(self, message: str) -> None:
+        self._sample_installing = False
+        self._show_page.set_sample_error(f"Sample download failed: {message}")
+
+    @Slot(str, object)
+    def _save_viewpoint(self, room_id: str, viewpoint: object) -> None:
+        if isinstance(viewpoint, Viewpoint):
+            self._viewpoints.save(room_id, viewpoint)
 
     @Slot()
     def _open_build(self) -> None:
@@ -301,6 +417,7 @@ class MainWindow(QMainWindow):
             room_name = self._room_name_for(state.selection)
             if room_name not in self._rooms:
                 self._rooms.insert(0, room_name)
+                self._room_ids[room_name] = self._room_id(room_name)
             self._show_page.set_rooms(self._rooms, room_name)
             self.select_room(room_name)
             self._build_page.set_completed(room_name)
@@ -311,6 +428,13 @@ class MainWindow(QMainWindow):
         if selection.sample:
             return "Loft — North Window"
         return Path(selection.display_name).stem.replace("_", " ").strip().title()
+
+    @staticmethod
+    def _room_id(room_name: str) -> str:
+        value = "".join(
+            character.lower() if character.isalnum() else "-" for character in room_name
+        )
+        return "-".join(part for part in value.split("-") if part)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         """Clean up the complete active process tree before closing."""

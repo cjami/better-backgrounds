@@ -9,11 +9,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
       - run: uv python install 3.14
       - run: uv sync --all-groups --locked
+      - run: npm ci --no-audit --no-fund
       - run: make lint
       - run: make test
       - run: make build
@@ -26,11 +31,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
       - run: uv python install 3.14
       - run: uv sync --all-groups --locked
+      - run: npm ci --no-audit --no-fund
       - name: Install Linux desktop build libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 libxcb-cursor0 patchelf xvfb

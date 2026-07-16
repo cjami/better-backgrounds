@@ -1,8 +1,9 @@
-.PHONY: setup lint format format-check type test build desktop desktop-smoke package-desktop check
+.PHONY: setup lint format format-check type test fixture-build renderer-build renderer-test build desktop desktop-smoke package-desktop check
 
 setup:
 	uv python install 3.14
 	uv sync --all-groups
+	npm ci --cache .cache/npm --no-audit --no-fund
 	uv run pre-commit install
 
 lint:
@@ -22,8 +23,18 @@ type:
 
 test:
 	uv run pytest
+	npm test
 
-build:
+fixture-build:
+	npm run fixture:build
+
+renderer-build:
+	npm run build
+
+renderer-test:
+	npm test
+
+build: renderer-build
 	uv build
 
 desktop:

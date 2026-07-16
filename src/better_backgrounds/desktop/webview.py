@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import secrets
 from importlib.resources import files
+from mimetypes import guess_type
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QBuffer, QByteArray, QFile, QIODevice, Qt, QUrl, Signal
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import (
     QWebEngineDownloadRequest,
@@ -14,10 +15,13 @@ from PySide6.QtWebEngineCore import (
     QWebEnginePermission,
     QWebEngineProfile,
     QWebEngineSettings,
+    QWebEngineUrlRequestJob,
+    QWebEngineUrlSchemeHandler,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from better_backgrounds.desktop.bridge import RendererBridge
+from better_backgrounds.scene import APP_SCHEME, ManagedSceneResolver, SceneReference, Viewpoint
 
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
@@ -50,10 +54,65 @@ class TrustedPage(QWebEnginePage):
         permission.deny()
 
 
+class ManagedSceneSchemeHandler(QWebEngineUrlSchemeHandler):
+    """Serve only verified files named by the sample asset manifest."""
+
+    def __init__(self, resolver: ManagedSceneResolver, parent: QWebEngineProfile) -> None:
+        """Keep the resolver and response devices owned by the profile."""
+        super().__init__(parent)
+        self._resolver = resolver
+
+    def requestStarted(self, request: QWebEngineUrlRequestJob) -> None:
+        """Reply to safe GET requests and deny every other request."""
+        if request.requestMethod().data() != b"GET":
+            request.fail(QWebEngineUrlRequestJob.Error.RequestDenied)
+            return
+        path = self._resolver.resolve(request.requestUrl())
+        if path is None:
+            request.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        device = QFile(str(path), request)
+        if not device.open(QIODevice.OpenModeFlag.ReadOnly):
+            request.fail(QWebEngineUrlRequestJob.Error.RequestFailed)
+            return
+        mime_type = guess_type(path.name)[0] or "application/octet-stream"
+        request.reply(QByteArray(mime_type.encode()), device)
+
+
+class PackagedRendererSchemeHandler(QWebEngineUrlSchemeHandler):
+    """Serve the one generated renderer bundle from immutable package data."""
+
+    def requestStarted(self, request: QWebEngineUrlRequestJob) -> None:
+        """Reject every package URL except the renderer bundle."""
+        url = request.requestUrl()
+        if (
+            request.requestMethod().data() != b"GET"
+            or url.host() != "renderer"
+            or url.path() != "/renderer.js"
+            or url.hasQuery()
+            or url.hasFragment()
+        ):
+            request.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        content = files("better_backgrounds.desktop").joinpath("assets/renderer.js").read_bytes()
+        device = QBuffer(request)
+        device.setData(QByteArray(content))
+        device.open(QIODevice.OpenModeFlag.ReadOnly)
+        request.reply(QByteArray(b"text/javascript"), device)
+
+
 class SecureRendererView(QWebEngineView):
     """Load local placeholder content with no network or filesystem authority."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    scene_progressed = Signal(int, int)
+    scene_failed = Signal(str)
+    viewpoint_changed = Signal(object)
+
+    def __init__(
+        self,
+        resolver: ManagedSceneResolver | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         """Create an ephemeral profile, narrow bridge, and trusted page."""
         super().__init__(parent)
         profile = QWebEngineProfile(self)
@@ -62,6 +121,12 @@ class SecureRendererView(QWebEngineView):
             QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies,
         )
         profile.downloadRequested.connect(self._reject_download)
+        self._renderer_scheme_handler = PackagedRendererSchemeHandler(profile)
+        profile.installUrlSchemeHandler(APP_SCHEME.encode(), self._renderer_scheme_handler)
+        self._scheme_handler: ManagedSceneSchemeHandler | None = None
+        if resolver is not None:
+            self._scheme_handler = ManagedSceneSchemeHandler(resolver, profile)
+            profile.installUrlSchemeHandler(b"bbscene", self._scheme_handler)
 
         page = TrustedPage(profile, self)
         page.permissionRequested.connect(page.handle_permission)
@@ -88,12 +153,22 @@ class SecureRendererView(QWebEngineView):
         self._profile = profile
         self._trusted_page = page
         self._bridge = RendererBridge(self)
+        self._bridge.ready.connect(self._send_pending_scene)
+        self._bridge.scene_progressed.connect(
+            lambda _asset_id, loaded, total: self.scene_progressed.emit(loaded, total),
+        )
+        self._bridge.scene_failed.connect(
+            lambda error: self.scene_failed.emit(error.message),
+        )
+        self._bridge.viewpoint_received.connect(self.viewpoint_changed)
         self._channel = QWebChannel(self)
         self._channel.registerObject("rendererBridge", self._bridge)
         page.setWebChannel(self._channel)
         self.setPage(page)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.setAccessibleName("Secure reconstructed scene renderer")
+        self._scene: SceneReference | None = None
+        self._viewpoint = Viewpoint()
         self._load_placeholder()
 
     def _load_placeholder(self) -> None:
@@ -106,11 +181,37 @@ class SecureRendererView(QWebEngineView):
         html = template.replace("{{NONCE}}", nonce)
         self.setHtml(html, QUrl(f"{TRUSTED_ORIGIN}/viewer.html"))
 
+    def set_scene(self, scene: SceneReference, viewpoint: Viewpoint) -> None:
+        """Load one managed scene without recreating the browser surface."""
+        if self._scene is not None and self._scene.asset_id == scene.asset_id:
+            self.set_viewpoint(viewpoint)
+            return
+        self._scene = scene
+        self._viewpoint = viewpoint
+        self._send_pending_scene()
+
+    def set_viewpoint(self, viewpoint: Viewpoint) -> None:
+        """Apply Python-owned controls through the validated bridge."""
+        self._viewpoint = viewpoint
+        self._bridge.request_viewpoint(viewpoint)
+
+    def reset_viewpoint(self) -> None:
+        """Ask the active scene to restore its safe default preset."""
+        self._bridge.request_reset()
+
+    def _send_pending_scene(self) -> None:
+        if self._scene is not None:
+            self._bridge.request_scene(
+                self._scene.asset_id,
+                self._scene.managed_url.toString(),
+                self._viewpoint,
+            )
+
     @staticmethod
     def _reject_download(download: QWebEngineDownloadRequest) -> None:
         download.cancel()
 
 
-def create_renderer_view() -> QWidget:
+def create_renderer_view(resolver: ManagedSceneResolver | None = None) -> QWidget:
     """Create the production embedded renderer surface."""
-    return SecureRendererView()
+    return SecureRendererView(resolver)

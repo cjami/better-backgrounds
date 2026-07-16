@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from better_backgrounds.desktop.preview import ComparisonPreview
+from better_backgrounds.scene import CropRegion, SceneReference, Viewpoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -37,6 +38,7 @@ STAGE_ORDER = (
     ("scene_training", "Training spatial scene"),
     ("runtime_conversion", "Preparing runtime scene"),
 )
+COMPLETE_PROGRESS = 100
 
 
 def _label(text: str, *, object_name: str | None = None, word_wrap: bool = False) -> QLabel:
@@ -62,6 +64,7 @@ class ShowPage(QWidget):
     room_selected = Signal(str)
     build_requested = Signal()
     camera_changed = Signal(bool)
+    sample_install_requested = Signal()
 
     def __init__(
         self,
@@ -72,6 +75,7 @@ class ShowPage(QWidget):
         """Create the room picker, feed preview, and camera control."""
         super().__init__(parent)
         self._camera_active = False
+        self._sample_room = ""
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -85,9 +89,9 @@ class ShowPage(QWidget):
         feed_stack = QStackedLayout(feed_surface)
         feed_stack.setContentsMargins(0, 0, 0, 0)
         feed_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
-        preview = preview_factory()
-        preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        feed_stack.addWidget(preview)
+        self._preview = preview_factory()
+        self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        feed_stack.addWidget(self._preview)
 
         overlay = QWidget()
         overlay.setObjectName("feedOverlay")
@@ -154,6 +158,28 @@ class ShowPage(QWidget):
         self._rooms.setAccessibleName("Available rooms")
         self._rooms.currentItemChanged.connect(self._emit_room)
         sidebar_layout.addWidget(self._rooms, 1)
+
+        self._sample_panel = QFrame()
+        self._sample_panel.setObjectName("card")
+        sample_layout = QVBoxLayout(self._sample_panel)
+        sample_layout.setContentsMargins(12, 10, 12, 10)
+        sample_layout.setSpacing(6)
+        self._sample_status = _label("Sample is not installed", object_name="muted", word_wrap=True)
+        sample_layout.addWidget(self._sample_status)
+        self._sample_progress = QProgressBar()
+        self._sample_progress.setRange(0, 100)
+        self._sample_progress.setTextVisible(False)
+        self._sample_progress.setAccessibleName("Sample scene download progress")
+        self._sample_progress.hide()
+        sample_layout.addWidget(self._sample_progress)
+        self._sample_attribution = _label("", object_name="muted", word_wrap=True)
+        sample_layout.addWidget(self._sample_attribution)
+        self._sample_install = QPushButton("Download sample")
+        self._sample_install.setObjectName("primary")
+        self._sample_install.clicked.connect(self.sample_install_requested)
+        sample_layout.addWidget(self._sample_install)
+        self._sample_panel.hide()
+        sidebar_layout.addWidget(self._sample_panel)
         root.addWidget(sidebar)
 
         self.set_rooms(rooms)
@@ -193,13 +219,62 @@ class ShowPage(QWidget):
                 self._rooms.setCurrentItem(item)
                 self._rooms.blockSignals(False)  # noqa: FBT003
                 self._feed_title.setText(f"VIRTUAL CAMERA  ·  {room}")
+                self._update_sample_panel(room)
                 return
 
     def _emit_room(self, current: QListWidgetItem | None) -> None:
         if current is not None:
             room = str(current.data(Qt.ItemDataRole.UserRole))
             self._feed_title.setText(f"VIRTUAL CAMERA  ·  {room}")
+            self._update_sample_panel(room)
             self.room_selected.emit(room)
+
+    def configure_sample(
+        self,
+        room: str,
+        *,
+        size: int,
+        attribution: str,
+        installed: bool,
+    ) -> None:
+        """Describe the prepared sample and its explicit local install action."""
+        self._sample_room = room
+        self._sample_attribution.setText(f"{attribution} · CC BY 4.0")
+        size_megabytes = size / 1024 / 1024
+        self._sample_install.setText(f"Download sample ({size_megabytes:.1f} MB)")
+        self.set_sample_ready(ready=installed)
+        self._update_sample_panel(self.current_room)
+
+    def set_sample_downloading(self, completed: int, total: int) -> None:
+        """Show determinate progress for the complete verified asset set."""
+        self._sample_progress.show()
+        self._sample_progress.setValue(round(completed / total * 100))
+        self._sample_status.setText("Downloading and verifying sample…")
+        self._sample_install.setEnabled(False)
+
+    def set_sample_ready(self, *, ready: bool) -> None:
+        """Show whether the sample is available offline."""
+        self._sample_progress.hide()
+        self._sample_status.setText("Ready offline" if ready else "Sample is not installed")
+        self._sample_install.setVisible(not ready)
+        self._sample_install.setEnabled(not ready)
+
+    def set_sample_error(self, message: str) -> None:
+        """Show a recoverable sample install failure."""
+        self._sample_progress.hide()
+        self._sample_status.setText(message)
+        self._sample_install.setText("Retry sample download")
+        self._sample_install.setEnabled(True)
+        self._sample_install.show()
+
+    def set_preview_image(self, path: object | None) -> None:
+        """Forward a verified native preview to capable feed widgets."""
+        setter = getattr(self._preview, "set_scene_image", None)
+        if callable(setter):
+            setter(path)
+
+    def _update_sample_panel(self, room: str) -> None:
+        self._sample_panel.setVisible(bool(self._sample_room) and room == self._sample_room)
 
     def _toggle_camera(self) -> None:
         self._camera_active = not self._camera_active
@@ -523,6 +598,8 @@ class BuildPage(QWidget):
 class AdjustPage(QWidget):
     """Adjust the current room's viewpoint and presentation settings."""
 
+    viewpoint_saved = Signal(str, object)
+
     def __init__(
         self,
         renderer_factory: Callable[[], QWidget],
@@ -530,6 +607,13 @@ class AdjustPage(QWidget):
     ) -> None:
         """Create the renderer and Python-owned adjustment controls."""
         super().__init__(parent)
+        self._room_id = ""
+        self._viewpoint = Viewpoint()
+        self._default_viewpoint = Viewpoint()
+        self._drafts: dict[str, Viewpoint] = {}
+        self._sliders: dict[str, QSlider] = {}
+        self._slider_labels: dict[str, QLabel] = {}
+        self._loaded_scene_id = ""
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -538,25 +622,43 @@ class AdjustPage(QWidget):
         scene_layout.setContentsMargins(18, 18, 18, 18)
         scene_layout.setSpacing(12)
         overlays = QHBoxLayout()
-        for index, name in enumerate(("Depth", "Confidence", "Coverage", "Subject region")):
+        for name in ("Depth", "Confidence", "Coverage", "Subject region"):
             chip = QPushButton(name)
             chip.setObjectName("overlayChip")
             chip.setCheckable(True)
-            chip.setChecked(index > 1)
+            chip.setChecked(name == "Subject region")
+            if name != "Subject region":
+                chip.setEnabled(False)
+                chip.setToolTip("Unavailable until a reliable scene-buffer pass is selected")
             overlays.addWidget(chip)
         overlays.addStretch()
         overlays.addWidget(_label("RECONSTRUCTED VIEWPOINT  ·  SPLAT", object_name="feedBadge"))
         scene_layout.addLayout(overlays)
-        renderer = renderer_factory()
-        renderer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        scene_layout.addWidget(renderer, 1)
+        self._renderer = renderer_factory()
+        self._renderer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        scene_layout.addWidget(self._renderer, 1)
+        renderer_progress = getattr(self._renderer, "scene_progressed", None)
+        if renderer_progress is not None:
+            renderer_progress.connect(self._set_scene_progress)
+        renderer_error = getattr(self._renderer, "scene_failed", None)
+        if renderer_error is not None:
+            renderer_error.connect(self._set_scene_error)
+        renderer_viewpoint = getattr(self._renderer, "viewpoint_changed", None)
+        if renderer_viewpoint is not None:
+            renderer_viewpoint.connect(self._accept_renderer_viewpoint)
+        self._scene_status = _label("Select an installed spatial room", object_name="muted")
+        scene_layout.addWidget(self._scene_status)
         actions = QHBoxLayout()
+        self._attribution = _label("", object_name="muted", word_wrap=True)
+        actions.addWidget(self._attribution, 1)
         actions.addStretch()
         reset = QPushButton("Reset view")
         reset.setObjectName("quietAction")
+        reset.clicked.connect(self._reset_viewpoint)
         actions.addWidget(reset)
         save = QPushButton("Save settings")
         save.setObjectName("primary")
+        save.clicked.connect(self._save_viewpoint)
         actions.addWidget(save)
         scene_layout.addLayout(actions)
         root.addWidget(scene, 1)
@@ -573,14 +675,30 @@ class AdjustPage(QWidget):
             preset = QPushButton(name)
             preset.setObjectName("preset")
             preset.setProperty("active", index == 0)
+            preset.clicked.connect(
+                lambda _checked=False, preset_name=name: self._apply_preset(preset_name),
+            )
             presets.addWidget(preset)
         controls.addLayout(presets)
         self._add_slider(controls, "Field of view", 24, 90, 42)
         self._add_slider(controls, "Horizon", -100, 100, -15)
+        self._add_slider(controls, "Output crop", 0, 20, 0)
+        aspect_row = QHBoxLayout()
+        aspect_row.addWidget(_label("Output aspect", object_name="muted"))
+        self._aspect = QComboBox()
+        self._aspect.setAccessibleName("Output aspect ratio")
+        self._aspect.addItem("16:9", 16 / 9)
+        self._aspect.addItem("4:3", 4 / 3)
+        self._aspect.addItem("1:1", 1.0)
+        self._aspect.currentIndexChanged.connect(self._aspect_changed)
+        aspect_row.addWidget(self._aspect)
+        controls.addLayout(aspect_row)
         controls.addSpacing(6)
         controls.addWidget(_label("Subject", object_name="section"))
         self._add_slider(controls, "Depth in scene", 5, 50, 24)
-        self._add_slider(controls, "Virtual focus", 5, 50, 26)
+        focus = self._add_slider(controls, "Virtual focus", 5, 50, 26)
+        focus.setEnabled(False)
+        focus.setToolTip("Unavailable because this scene has no reliable depth proxy")
         controls.addSpacing(6)
         controls.addWidget(_label("Harmonisation", object_name="section"))
         self._add_slider(controls, "Scene match", 0, 100, 72)
@@ -592,12 +710,98 @@ class AdjustPage(QWidget):
         controls.addStretch()
         root.addWidget(inspector)
 
-    def set_room(self, room: str) -> None:
-        """Update the room named by the inspector."""
+    def set_room(
+        self,
+        room: str,
+        scene: SceneReference | None = None,
+        *,
+        installed: bool = False,
+        viewpoint: Viewpoint | None = None,
+    ) -> None:
+        """Restore one room draft and load its managed scene at most once."""
+        if self._room_id:
+            self._drafts[self._room_id] = self._viewpoint
+        self._room_id = room
         self.setAccessibleDescription(f"Adjust settings for {room}")
+        self._default_viewpoint = scene.default_viewpoint if scene is not None else Viewpoint()
+        self._viewpoint = self._drafts.get(room, viewpoint or self._default_viewpoint)
+        self._sync_controls()
 
-    @staticmethod
+        if scene is None:
+            self._renderer.show()
+            self._scene_status.setText("No spatial scene is registered for this room yet")
+            self._attribution.clear()
+            return
+        self._attribution.setText(f"{scene.attribution} · {scene.license_name}")
+        if not installed:
+            self._renderer.hide()
+            self._scene_status.setText("Install this sample in Show to explore its spatial scene")
+            return
+        self._renderer.show()
+        self._scene_status.setText("Loading spatial scene…")
+        method_name = "set_viewpoint" if self._loaded_scene_id == scene.asset_id else "set_scene"
+        setter = getattr(self._renderer, method_name, None)
+        if callable(setter):
+            if method_name == "set_scene":
+                setter(scene, self._viewpoint)
+                self._loaded_scene_id = scene.asset_id
+            else:
+                setter(self._viewpoint)
+
+    def _set_scene_progress(self, loaded: int, total: int) -> None:
+        progress = round(loaded / total * 100)
+        message = "Scene ready" if progress == COMPLETE_PROGRESS else f"Loading scene… {progress}%"
+        self._scene_status.setText(message)
+
+    def _set_scene_error(self, message: str) -> None:
+        self._loaded_scene_id = ""
+        self._scene_status.setText(f"Scene unavailable: {message}. Re-select the room to retry.")
+
+    def _accept_renderer_viewpoint(self, viewpoint: object) -> None:
+        if isinstance(viewpoint, Viewpoint):
+            self._viewpoint = viewpoint
+            self._drafts[self._room_id] = viewpoint
+            self._sync_controls()
+
+    def _reset_viewpoint(self) -> None:
+        self._viewpoint = self._default_viewpoint
+        self._drafts[self._room_id] = self._viewpoint
+        self._sync_controls()
+        setter = getattr(self._renderer, "set_viewpoint", None)
+        if callable(setter):
+            setter(self._viewpoint)
+        self._scene_status.setText("View reset to the safe prepared camera")
+
+    def _save_viewpoint(self) -> None:
+        if self._room_id:
+            self.viewpoint_saved.emit(self._room_id, self._viewpoint)
+            self._scene_status.setText("Viewpoint saved for this room")
+
+    def _apply_preset(self, name: str) -> None:
+        default = self._default_viewpoint
+        if name == "Eye level":
+            viewpoint = default
+        elif name == "Low":
+            position = default.position.model_copy(
+                update={"y": max(default.safe_camera_region.minimum.y, default.position.y - 0.6)},
+            )
+            viewpoint = default.model_copy(update={"position": position})
+        elif name == "High":
+            position = default.position.model_copy(
+                update={"y": min(default.safe_camera_region.maximum.y, default.position.y + 0.6)},
+            )
+            viewpoint = default.model_copy(update={"position": position})
+        else:
+            viewpoint = default.model_copy(update={"field_of_view": 90.0})
+        self._viewpoint = viewpoint
+        self._drafts[self._room_id] = viewpoint
+        self._sync_controls()
+        setter = getattr(self._renderer, "set_viewpoint", None)
+        if callable(setter):
+            setter(viewpoint)
+
     def _add_slider(
+        self,
         layout: QVBoxLayout,
         title: str,
         minimum: int,
@@ -608,6 +812,7 @@ class AdjustPage(QWidget):
         row.addWidget(_label(title, object_name="muted"))
         row.addStretch()
         value_label = _label(AdjustPage._format_slider(title, value), object_name="controlValue")
+        self._slider_labels[title] = value_label
         row.addWidget(value_label)
         layout.addLayout(row)
         slider = QSlider(Qt.Orientation.Horizontal)
@@ -615,12 +820,61 @@ class AdjustPage(QWidget):
         slider.setValue(value)
         slider.setAccessibleName(title)
         slider.valueChanged.connect(
-            lambda current, name=title, label=value_label: label.setText(
-                AdjustPage._format_slider(name, current),
-            ),
+            lambda current, name=title: self._control_changed(name, current),
         )
+        self._sliders[title] = slider
         layout.addWidget(slider)
         return slider
+
+    def _control_changed(self, title: str, value: int) -> None:
+        self._slider_labels[title].setText(self._format_slider(title, value))
+        if title == "Field of view":
+            update: dict[str, object] = {"field_of_view": float(value)}
+        elif title == "Horizon":
+            update = {"horizon": value / 10}
+        elif title == "Depth in scene":
+            update = {"subject_depth": value / 10}
+        elif title == "Virtual focus":
+            update = {"focus_depth": value / 10}
+        elif title == "Output crop":
+            inset = value / 100
+            update = {"crop": CropRegion(left=inset, top=inset, right=1 - inset, bottom=1 - inset)}
+        else:
+            return
+        self._viewpoint = self._viewpoint.model_copy(update=update)
+        self._drafts[self._room_id] = self._viewpoint
+        setter = getattr(self._renderer, "set_viewpoint", None)
+        if callable(setter):
+            setter(self._viewpoint)
+
+    def _aspect_changed(self, _index: int) -> None:
+        self._viewpoint = self._viewpoint.model_copy(
+            update={"aspect_ratio": float(self._aspect.currentData())},
+        )
+        setter = getattr(self._renderer, "set_viewpoint", None)
+        if callable(setter):
+            setter(self._viewpoint)
+
+    def _sync_controls(self) -> None:
+        values = {
+            "Field of view": round(self._viewpoint.field_of_view),
+            "Horizon": round(self._viewpoint.horizon * 10),
+            "Output crop": round(self._viewpoint.crop.left * 100),
+            "Depth in scene": round(self._viewpoint.subject_depth * 10),
+            "Virtual focus": round(self._viewpoint.focus_depth * 10),
+        }
+        for title, value in values.items():
+            slider = self._sliders[title]
+            slider.blockSignals(True)  # noqa: FBT003
+            slider.setValue(value)
+            slider.blockSignals(False)  # noqa: FBT003
+        index = min(
+            range(self._aspect.count()),
+            key=lambda item: abs(float(self._aspect.itemData(item)) - self._viewpoint.aspect_ratio),
+        )
+        self._aspect.blockSignals(True)  # noqa: FBT003
+        self._aspect.setCurrentIndex(index)
+        self._aspect.blockSignals(False)  # noqa: FBT003
 
     @staticmethod
     def _format_slider(title: str, value: int) -> str:
@@ -628,6 +882,8 @@ class AdjustPage(QWidget):
             return f"{value}°"
         if title == "Horizon":
             return f"{value / 10:.1f}°"
+        if title == "Output crop":
+            return f"{value}%"
         if title in {"Depth in scene", "Virtual focus"}:
             return f"{value / 10:.1f} m"
         return f"{value}%"

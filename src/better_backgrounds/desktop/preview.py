@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPaintEvent, QPen, QRadialGradient
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import QRect, QRectF, Qt
+from PySide6.QtGui import (
+    QColor,
+    QLinearGradient,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+)
 from PySide6.QtWidgets import QWidget
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class ScenePreview(QWidget):
@@ -13,14 +26,40 @@ class ScenePreview(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create an accessible minimum-size scene surface."""
         super().__init__(parent)
+        self._scene_image = QPixmap()
         self.setMinimumSize(480, 300)
         self.setAccessibleName("Placeholder reconstructed room preview")
+
+    def set_scene_image(self, path: Path | None) -> None:
+        """Display a verified cached room preview or the painted fallback."""
+        self._scene_image = QPixmap() if path is None else QPixmap(str(path))
+        name = (
+            "Reconstructed room preview"
+            if not self._scene_image.isNull()
+            else "Room preview unavailable"
+        )
+        self.setAccessibleName(name)
+        self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: ARG002, N802
         """Draw the Phase 2 scene placeholder."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if not self._scene_image.isNull():
+            scaled = self._scene_image.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            source = QRect(
+                max(0, (scaled.width() - self.width()) // 2),
+                max(0, (scaled.height() - self.height()) // 2),
+                self.width(),
+                self.height(),
+            )
+            painter.drawPixmap(self.rect(), scaled, source)
+            return
         room = QLinearGradient(bounds.topLeft(), bounds.bottomRight())
         room.setColorAt(0.0, QColor("#45423c"))
         room.setColorAt(0.52, QColor("#282722"))

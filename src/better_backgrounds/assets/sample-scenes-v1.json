@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "scenes": [
+    {
+      "asset_id": "table-tennis-room-v1",
+      "display_name": "Table Tennis Room — Sample",
+      "format": "sog",
+      "entrypoint": "meta.json",
+      "resources": [
+        {
+          "path": "meta.json",
+          "url": "https://d28zzqy0iyovbz.cloudfront.net/0d9e613b/v1/meta.json",
+          "size": 10262,
+          "sha256": "ca310703ccd0516e48039ab632d82783567c3cdf63fb1e94e0dcaf091dd51218"
+        },
+        {
+          "path": "means_l.webp",
+          "url": "https://d28zzqy0iyovbz.cloudfront.net/0d9e613b/v1/means_l.webp",
+          "size": 3570192,
+          "sha256": "f263ef463c2fdbed8f089f8846bb0dcc6ea5be81f2e244b97e0127c41ef81cf8"
+        },
+        {
+          "path": "means_u.webp",
+          "url": "https://d28zzqy0iyovbz.cloudfront.net/0d9e613b/v1/means_u.webp",
+          "size": 617054,
+          "sha256": "23f128f11caa8513b6422cd8deb310d12e78b34e67b4072861caadb8b5961249"
+        },
+        {
+          "path": "scales.webp",
+          "url": "https://d28zzqy0iyovbz.cloudfront.net/0d9e613b/v1/scales.webp",
+          "size": 3207806,
+          "sha256": "4c996b689577e65a4faf650e5ce87cec9cbf3dd678750bf5322d3c941fb18cc8"
+        },
+        {
+          "path": "quats.webp",
+          "url": "https://d28zzqy0iyovbz.cloudfront.net/0d9e613b/v1/quats.webp",
+          "size": 3790612,
+          "sha256": "ddc0cdd8efc41d82de2ab2c587489fe02b7a06e5ed67fa7367de42e7406cda99"
+        },
+        {
+          "path": "sh0.webp",
+          "url": "https://d28zzqy0iyovbz.cloudfront.net/0d9e613b/v1/sh0.webp",
+          "size": 3759212,
+          "sha256": "927a5f9f69df5801eed7d76ca47579fc923e618b65b27e6d910e444da515ea4a"
+        },
+        {
+          "path": "preview.webp",
+          "url": "https://s3-eu-west-1.amazonaws.com/images.playcanvas.com/splat/0d9e613b/v1/xl.webp",
+          "size": 56184,
+          "sha256": "73f91f1c1aef68e0b9cab02b3d7d3dc2d42cdef3c1ebb43332655724de5cda64"
+        }
+      ],
+      "license_name": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "attribution": "Table Tennis Room by Ethan (ethan3111)",
+      "attribution_url": "https://superspl.at/scene/0d9e613b",
+      "preview": "preview.webp",
+      "default_viewpoint": {
+        "schema_version": 1,
+        "position": {"x": -1.5355110168457031, "y": 4.598212718963623, "z": -10.610548973083496},
+        "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+        "orbit_target": {"x": -7.991799822797874, "y": 3.8889470293706365, "z": -2.104702313347179},
+        "field_of_view": 75.0,
+        "horizon": 0.0,
+        "near_clip": 0.05,
+        "far_clip": 100.0,
+        "aspect_ratio": 1.7777777777777777,
+        "crop": {"left": 0.0, "top": 0.0, "right": 1.0, "bottom": 1.0},
+        "subject_region": {"x": 0.35, "y": 0.2, "width": 0.3, "height": 0.7},
+        "scene_transform": {
+          "translation": {"x": 0.0, "y": 0.0, "z": 0.0},
+          "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+          "scale": 1.0
+        },
+        "safe_camera_region": {
+          "minimum": {"x": -4.0, "y": 2.0, "z": -14.0},
+          "maximum": {"x": 2.0, "y": 6.0, "z": -7.0}
+        },
+        "nearest_source_frame": null,
+        "subject_depth": 2.4,
+        "focus_depth": 2.6
+      }
+    }
+  ]
+}

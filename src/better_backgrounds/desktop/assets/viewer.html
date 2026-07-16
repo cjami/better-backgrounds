@@ -3,32 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'nonce-{{NONCE}}'; script-src qrc: 'nonce-{{NONCE}}'; connect-src 'none'; media-src 'none'; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>Scene placeholder</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: bbscene:; style-src 'nonce-{{NONCE}}'; script-src qrc: bbapp: 'nonce-{{NONCE}}'; connect-src bbscene:; media-src 'none'; worker-src blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Spatial scene viewer</title>
   <style nonce="{{NONCE}}">
     * { box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #15161a; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #090a0c; }
     body { font-family: system-ui, sans-serif; color: #e7e8ea; }
-    .scene { position: absolute; inset: 0; background: radial-gradient(90% 80% at 72% 16%, rgba(255,238,208,.5), transparent 45%), radial-gradient(70% 55% at 20% 92%, rgba(90,110,140,.25), transparent 60%), linear-gradient(160deg,#45423c,#17181b); }
-    .vignette { position: absolute; inset: 0; box-shadow: inset 0 0 150px 18px rgba(0,0,0,.5); }
-    .subject { position: absolute; left: 50%; top: 56%; translate: -50% -50%; width: 18%; max-width: 150px; height: 48%; border-radius: 18px; background: linear-gradient(150deg,#d9ac86,#9e7355); border: 1px solid rgba(255,220,190,.25); box-shadow: 0 0 46px rgba(255,214,170,.18); }
-    .safe { position: absolute; left: 23%; right: 23%; top: 17%; bottom: 14%; border: 1px dashed rgba(224,163,74,.48); border-radius: 50%; }
-    .label { position: absolute; top: 14px; left: 14px; padding: 7px 11px; border-radius: 8px; background: rgba(12,13,15,.72); font: 600 11px ui-monospace, monospace; color: #e0a34a; }
-    .hint { position: absolute; left: 50%; bottom: 17px; translate: -50%; color: rgba(255,255,255,.58); font-size: 12px; white-space: nowrap; }
+    canvas { position: absolute; inset: 0; width: 100%; height: 100%; outline: none; }
+    .badge { position: absolute; top: 14px; left: 14px; padding: 7px 11px; border-radius: 8px; background: rgba(12,13,15,.78); font: 600 11px ui-monospace, monospace; color: #e0a34a; }
+    .guide { position: absolute; border: 1px dashed rgba(224,163,74,.62); border-radius: 48% 48% 42% 42%; pointer-events: none; }
+    .safe { position: absolute; inset: 12%; border: 1px solid rgba(112,183,145,.23); border-radius: 18px; pointer-events: none; }
+    .hint { position: absolute; left: 50%; bottom: 17px; translate: -50%; padding: 6px 10px; border-radius: 7px; background: rgba(12,13,15,.68); color: rgba(255,255,255,.62); font-size: 12px; white-space: nowrap; pointer-events: none; }
+    .warning { position: absolute; top: 14px; left: 50%; translate: -50%; padding: 8px 12px; border-radius: 8px; background: rgba(125,70,18,.9); font-size: 12px; }
+    .loading { position: absolute; inset: 0; display: grid; place-items: center; background: radial-gradient(circle at 50% 45%, #302e29, #111216 60%); }
+    .loading[hidden], .warning[hidden] { display: none; }
+    .loading span { padding: 10px 14px; border-radius: 9px; background: rgba(8,9,11,.72); color: #e0a34a; font-size: 13px; }
   </style>
 </head>
 <body>
-  <main class="scene" aria-label="Placeholder reconstructed room">
-    <div class="vignette"></div>
-    <div class="safe"></div>
-    <div class="subject"></div>
-    <div class="label">PREPARED SCENE · PLACEHOLDER</div>
-    <div class="hint">PlayCanvas rendering arrives in Phase 3</div>
-  </main>
+  <canvas id="scene-canvas" tabindex="0" aria-label="Interactive reconstructed room"></canvas>
+  <div class="safe" aria-hidden="true"></div>
+  <div id="subject-guide" class="guide" aria-hidden="true"></div>
+  <div class="badge">SPATIAL SCENE · <span id="status">INITIALIZING</span></div>
+  <div id="safe-warning" class="warning" role="status" hidden>Capture boundary reached — reset or move back into the safe region</div>
+  <div class="hint">Drag to orbit · Shift-drag or right-drag to pan · Wheel to zoom · Arrow keys to orbit · 0 to reset</div>
+  <div id="loading" class="loading"><span>Preparing GPU renderer…</span></div>
   <script nonce="{{NONCE}}" src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script nonce="{{NONCE}}" src="bbapp://renderer/renderer.js"></script>
   <script nonce="{{NONCE}}">
     new QWebChannel(qt.webChannelTransport, function (channel) {
-      channel.objects.rendererBridge.renderer_ready();
+      BetterBackgroundsRenderer.start(channel.objects.rendererBridge);
     });
   </script>
 </body>

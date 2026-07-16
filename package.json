@@ -1,0 +1,18 @@
+{
+  "name": "better-backgrounds-renderer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "rollup --config renderer/rollup.config.mjs",
+    "fixture:build": "splat-transform -q -w -g cpu --max-workers 0 tests/fixtures/test-scene.ply tests/fixtures/test-scene.sog",
+    "test": "node --test renderer/tests"
+  },
+  "dependencies": {
+    "playcanvas": "2.20.6"
+  },
+  "devDependencies": {
+    "@playcanvas/splat-transform": "2.7.1",
+    "@rollup/plugin-node-resolve": "16.0.3",
+    "rollup": "4.62.2"
+  }
+}

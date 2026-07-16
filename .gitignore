@@ -63,6 +63,8 @@ pnpm-debug.log*
 *.part
 *.tmp
 *.temp
+!tests/fixtures/*.ply
+!tests/fixtures/*.sog
 
 # Editors
 .idea/

@@ -12,8 +12,10 @@ from better_backgrounds.desktop.app import packaged_worker_command
 from better_backgrounds.desktop.bridge import RendererBridge
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow
+from better_backgrounds.desktop.pages import AdjustPage
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.desktop.webview import navigation_is_allowed
+from better_backgrounds.scene import SceneReference, Viewpoint, load_sample_manifest
 
 if TYPE_CHECKING:
     import pytest
@@ -21,6 +23,24 @@ if TYPE_CHECKING:
 TAB_COUNT = 4
 BUILD_TAB = 1
 COMPARE_TAB = 3
+
+
+class TrackingRenderer(ScenePreview):
+    """Record scene commands without creating native WebEngine state."""
+
+    def __init__(self) -> None:
+        """Create an empty command log."""
+        super().__init__()
+        self.scenes: list[tuple[SceneReference, Viewpoint]] = []
+        self.viewpoints: list[Viewpoint] = []
+
+    def set_scene(self, scene: SceneReference, viewpoint: Viewpoint) -> None:
+        """Record one managed scene load."""
+        self.scenes.append((scene, viewpoint))
+
+    def set_viewpoint(self, viewpoint: Viewpoint) -> None:
+        """Record one camera-only update."""
+        self.viewpoints.append(viewpoint)
 
 
 def application() -> QApplication:
@@ -69,6 +89,54 @@ def test_tabs_can_be_opened_in_any_order() -> None:
     window.close()
 
 
+def test_sample_is_a_stable_room_without_forcing_navigation(tmp_path: Path) -> None:
+    """Share the sample identifier while leaving the active product tab alone."""
+    renderers: list[TrackingRenderer] = []
+
+    def renderer_factory() -> TrackingRenderer:
+        renderer = TrackingRenderer()
+        renderers.append(renderer)
+        return renderer
+
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=renderer_factory,
+        scene_cache_root=tmp_path / "cache",
+        data_root=tmp_path / "data",
+    )
+    sample_downloads = [
+        button
+        for button in window.findChildren(QPushButton)
+        if button.text().startswith("Download sample")
+    ]
+
+    assert window.selected_room == "Table Tennis Room — Sample"
+    assert window.selected_room_id == "table-tennis-room-v1"
+    assert window.active_tab == 0
+    assert len(renderers) == 1
+    assert len(sample_downloads) == 1
+    window.select_tab(2)
+    window.select_tab(0)
+    assert len(renderers) == 1
+    window.close()
+
+
+def test_adjust_reuses_scene_and_keeps_its_room_draft() -> None:
+    """Avoid a scene reload when a room is revisited in the retained page."""
+    application()
+    renderer = TrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+
+    page.set_room(scene.asset_id, scene, installed=True)
+    page.set_room("another-room")
+    page.set_room(scene.asset_id, scene, installed=True)
+
+    assert len(renderer.scenes) == 1
+    assert renderer.viewpoints[-1] == scene.default_viewpoint
+    page.close()
+
+
 def test_show_tab_has_a_clear_camera_toggle() -> None:
     """Expose explicit start and stop actions for the virtual camera."""
     window = MainWindow(command_factory=lambda _job_id, _outcome: [], renderer_factory=ScenePreview)
@@ -91,6 +159,16 @@ def test_renderer_bridge_rejects_invalid_viewpoint() -> None:
     assert bridge.submit_viewpoint(
         '{"field_of_view":42,"horizon":-1.5,"subject_depth":2.4,"focus_depth":2.6}',
     )
+
+
+def test_renderer_bridge_rejects_invalid_scene_status() -> None:
+    """Keep progress and errors bounded before they reach Python UI state."""
+    bridge = RendererBridge()
+
+    assert bridge.report_scene_progress("sample-room", 50, 100)
+    assert not bridge.report_scene_progress("sample-room", 101, 100)
+    assert bridge.report_scene_error("sample-room", "gpu_unavailable", "No GPU renderer")
+    assert not bridge.report_scene_error("sample-room", "bad code!", "No GPU renderer")
 
 
 def test_navigation_is_restricted_to_synthetic_origin() -> None:
