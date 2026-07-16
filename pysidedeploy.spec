@@ -13,8 +13,8 @@ packages = Nuitka==4.1.3
 [qt]
 qml_files =
 excluded_qml_plugins = QtQuick,QtQuick3D,QtCharts,QtTest,QtSensors
-modules = Core,Gui,WebChannel,WebEngineCore,WebEngineWidgets,Widgets
-plugins = accessiblebridge,egldeviceintegrations,generic,iconengines,imageformats,platforminputcontexts,platforms,platforms/darwin,platformthemes,styles,wayland-decoration-client,wayland-graphics-integration-client,wayland-shell-integration,xcbglintegrations
+modules = Core,Gui,Multimedia,WebChannel,WebEngineCore,WebEngineWidgets,Widgets
+plugins = accessiblebridge,egldeviceintegrations,generic,iconengines,imageformats,multimedia,platforminputcontexts,platforms,platforms/darwin,platformthemes,styles,wayland-decoration-client,wayland-graphics-integration-client,wayland-shell-integration,xcbglintegrations
 
 [android]
 wheel_pyside =

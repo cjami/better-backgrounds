@@ -4,8 +4,9 @@ Better Backgrounds is an early-stage cross-platform desktop application for
 reconstructing a room from video and using that scene as a coherent webcam
 background. The current Phase 3 foundation adds a checksummed public sample
 room, explicit offline asset installation, room-scoped viewpoint persistence,
-and a locally bundled PlayCanvas Gaussian-splat renderer to the Python-owned
-PySide6 desktop shell. It does not reconstruct scenes or access a webcam yet.
+input-camera selection, and a locally bundled PlayCanvas Gaussian-splat
+renderer to the Python-owned PySide6 desktop shell. It does not reconstruct
+scenes or capture and composite webcam frames yet.
 
 ## Requirements
 
@@ -68,6 +69,11 @@ models. Qt Widgets own application state and the tabbed UI. The embedded Qt
 WebEngine renderer can fetch only verified files through the managed `bbscene`
 scheme; it has no arbitrary filesystem, network, download, navigation, or media
 authority.
+
+Show enumerates local video inputs through Qt Multimedia, follows device
+hot-plug changes, and remembers the user's preferred camera in application
+data. Enumeration does not start capture or grant media access to the embedded
+renderer.
 
 The prepared Table Tennis Room sample is downloaded only when requested in
 Show, verified against the checked-in manifest, and then available offline. It

@@ -1,7 +1,8 @@
-"""Qt Widgets pages for the Phase 2 tabbed desktop shell."""
+"""Qt Widgets pages for the tabbed desktop application."""
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSize, Qt, Signal
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from better_backgrounds.build_session import VideoSelection
+    from better_backgrounds.input_camera import InputCamera
 
 STAGE_ORDER = (
     ("validation", "Validating video"),
@@ -64,6 +66,7 @@ class ShowPage(QWidget):
     room_selected = Signal(str)
     build_requested = Signal()
     camera_changed = Signal(bool)
+    input_camera_selected = Signal(str)
     sample_install_requested = Signal()
 
     def __init__(
@@ -145,6 +148,21 @@ class ShowPage(QWidget):
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(16, 20, 16, 20)
         sidebar_layout.setSpacing(12)
+        sidebar_layout.addWidget(_label("Input camera", object_name="section"))
+        self._input_camera = QComboBox()
+        self._input_camera.setObjectName("inputCameraSelector")
+        self._input_camera.setAccessibleName("Input camera feed")
+        self._input_camera.setToolTip("Camera used as the foreground video input")
+        self._input_camera.currentIndexChanged.connect(self._emit_input_camera)
+        sidebar_layout.addWidget(self._input_camera)
+        sidebar_layout.addWidget(
+            _label(
+                "Select the webcam that will provide the foreground feed.",
+                object_name="muted",
+                word_wrap=True,
+            ),
+        )
+        sidebar_layout.addSpacing(4)
         sidebar_header = QHBoxLayout()
         sidebar_header.addWidget(_label("Rooms", object_name="section"))
         sidebar_header.addStretch()
@@ -189,6 +207,39 @@ class ShowPage(QWidget):
         """Return whether the placeholder virtual camera is active."""
         return self._camera_active
 
+    @property
+    def current_input_camera_id(self) -> str | None:
+        """Return the stable identifier selected in the input-camera control."""
+        value = self._input_camera.currentData()
+        return value if isinstance(value, str) else None
+
+    def set_input_cameras(
+        self,
+        cameras: Sequence[InputCamera],
+        selected_device_id: str | None,
+    ) -> None:
+        """Replace the device list while preserving the effective selection."""
+        descriptions = Counter(camera.description for camera in cameras)
+        occurrences: Counter[str] = Counter()
+        self._input_camera.blockSignals(True)  # noqa: FBT003
+        self._input_camera.clear()
+        for camera in cameras:
+            occurrences[camera.description] += 1
+            label = camera.description
+            if descriptions[camera.description] > 1:
+                label = f"{label} ({occurrences[camera.description]})"
+            if camera.is_default:
+                label = f"{label} · Default"
+            self._input_camera.addItem(label, camera.device_id)
+        if not cameras:
+            self._input_camera.addItem("No camera detected")
+            self._input_camera.setEnabled(False)
+        else:
+            self._input_camera.setEnabled(True)
+            selected_index = self._input_camera.findData(selected_device_id)
+            self._input_camera.setCurrentIndex(max(0, selected_index))
+        self._input_camera.blockSignals(False)  # noqa: FBT003
+
     def set_rooms(self, rooms: Sequence[str], selected: str | None = None) -> None:
         """Replace the room list while preserving the requested selection."""
         target = selected or self.current_room
@@ -228,6 +279,11 @@ class ShowPage(QWidget):
             self._feed_title.setText(f"VIRTUAL CAMERA  ·  {room}")
             self._update_sample_panel(room)
             self.room_selected.emit(room)
+
+    def _emit_input_camera(self, _index: int) -> None:
+        device_id = self.current_input_camera_id
+        if device_id is not None:
+            self.input_camera_selected.emit(device_id)
 
     def configure_sample(
         self,
@@ -725,6 +781,10 @@ class AdjustPage(QWidget):
         self.setAccessibleDescription(f"Adjust settings for {room}")
         self._default_viewpoint = scene.default_viewpoint if scene is not None else Viewpoint()
         self._viewpoint = self._drafts.get(room, viewpoint or self._default_viewpoint)
+        if scene is not None:
+            self._viewpoint = self._viewpoint.model_copy(
+                update={"scene_transform": self._default_viewpoint.scene_transform},
+            )
         self._sync_controls()
 
         if scene is None:

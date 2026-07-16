@@ -96,6 +96,21 @@ def test_asset_install_is_atomic_and_reuses_a_valid_cache(tmp_path: Path) -> Non
     assert len(requests) == len(files)
 
 
+def test_asset_cache_survives_presentation_metadata_changes(tmp_path: Path) -> None:
+    """Do not redownload unchanged bytes when a prepared viewpoint is corrected."""
+    content = b"scene"
+    reference = scene_reference(resource("scene.sog", content))
+    installer = AssetInstaller(tmp_path, opener=lambda _url: BytesIO(content))
+    installed = installer.install(reference)
+    changed = reference.model_copy(update={"display_name": "Renamed test room"})
+    offline = AssetInstaller(
+        tmp_path,
+        opener=lambda _url: pytest.fail("presentation changes must reuse verified bytes"),
+    )
+
+    assert offline.install(changed) == installed
+
+
 def test_checked_in_sample_manifest_has_a_licensed_sog_scene() -> None:
     """Keep the prepared public sample explicit and reviewable."""
     manifest = load_sample_manifest()

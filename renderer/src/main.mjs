@@ -9,6 +9,7 @@ class SceneRenderer {
     this.camera = null;
     this.sceneEntity = null;
     this.sceneAsset = null;
+    this.sceneTransformKey = '';
     this.assetId = '';
     this.viewpoint = null;
     this.resetViewpoint = null;
@@ -22,14 +23,18 @@ class SceneRenderer {
     const canvas = document.getElementById('scene-canvas');
     try {
       const device = await pc.createGraphicsDevice(canvas, {
-        deviceTypes: [pc.DEVICETYPE_WEBGPU],
+        deviceTypes: [pc.DEVICETYPE_WEBGL2],
         antialias: false,
         powerPreference: 'high-performance',
       });
       const options = new pc.AppOptions();
       options.graphicsDevice = device;
-      options.componentSystems = [pc.CameraComponentSystem, pc.GSplatComponentSystem];
-      options.resourceHandlers = [pc.GSplatHandler];
+      options.componentSystems = [
+        pc.RenderComponentSystem,
+        pc.CameraComponentSystem,
+        pc.GSplatComponentSystem,
+      ];
+      options.resourceHandlers = [pc.TextureHandler, pc.GSplatHandler];
       this.app = new pc.AppBase(canvas);
       this.app.init(options);
       this.app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
@@ -80,6 +85,7 @@ class SceneRenderer {
       const entity = new pc.Entity(assetId);
       entity.addComponent('gsplat', { asset: loadedAsset, unified: true });
       this.sceneEntity = entity;
+      this.applySceneTransform();
       this.app.root.addChild(entity);
       this.bridge.report_scene_progress(assetId, 100, 100);
       this.setLoading(false, 'Scene ready');
@@ -100,6 +106,7 @@ class SceneRenderer {
       this.sceneAsset.unload();
     }
     this.sceneAsset = null;
+    this.sceneTransformKey = '';
   }
 
   applyViewpoint(payload, rememberAsReset = false) {
@@ -128,6 +135,7 @@ class SceneRenderer {
         crop.right - crop.left,
         crop.bottom - crop.top,
       );
+      this.applySceneTransform();
       this.updateSubjectGuide();
     } catch (error) {
       this.bridge.report_scene_error(this.assetId || 'renderer', 'viewpoint_invalid', this.safeMessage(error));
@@ -245,6 +253,24 @@ class SceneRenderer {
       width: `${region.width * 100}%`,
       height: `${region.height * 100}%`,
     });
+  }
+
+  applySceneTransform() {
+    if (!this.sceneEntity || !this.viewpoint) return;
+    const transform = this.viewpoint.scene_transform;
+    const key = JSON.stringify(transform);
+    if (key === this.sceneTransformKey) return;
+    const translation = transform.translation;
+    const orientation = transform.orientation;
+    this.sceneEntity.setLocalPosition(translation.x, translation.y, translation.z);
+    this.sceneEntity.setLocalRotation(
+      orientation.x,
+      orientation.y,
+      orientation.z,
+      orientation.w,
+    );
+    this.sceneEntity.setLocalScale(transform.scale, transform.scale, transform.scale);
+    this.sceneTransformKey = key;
   }
 
   setLoading(loading, message) {

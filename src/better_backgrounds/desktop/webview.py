@@ -19,6 +19,7 @@ from PySide6.QtWebEngineCore import (
     QWebEngineUrlSchemeHandler,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import QApplication
 
 from better_backgrounds.desktop.bridge import RendererBridge
 from better_backgrounds.scene import APP_SCHEME, ManagedSceneResolver, SceneReference, Viewpoint
@@ -115,7 +116,9 @@ class SecureRendererView(QWebEngineView):
     ) -> None:
         """Create an ephemeral profile, narrow bridge, and trusted page."""
         super().__init__(parent)
-        profile = QWebEngineProfile(self)
+        application = QApplication.instance()
+        profile = QWebEngineProfile(application)
+        self.destroyed.connect(profile.deleteLater)
         profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.MemoryHttpCache)
         profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies,

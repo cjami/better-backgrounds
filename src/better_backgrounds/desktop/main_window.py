@@ -34,6 +34,11 @@ from better_backgrounds.build_session import (
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.pages import AdjustPage, BuildPage, ComparePage, ShowPage
 from better_backgrounds.desktop.preview import ScenePreview
+from better_backgrounds.input_camera import (
+    InputCamera,
+    InputCameraSelectionStore,
+    InputCameraSource,
+)
 from better_backgrounds.job_runner import JobRunner
 from better_backgrounds.protocol import (
     CancelledEvent,
@@ -148,12 +153,14 @@ class MainWindow(QMainWindow):
     """Coordinate four independent tabs around one selected room."""
 
     room_ready = Signal()
+    input_camera_changed = Signal(str)
 
     def __init__(
         self,
         *,
         command_factory: CommandFactory,
         renderer_factory: RendererFactory | None = None,
+        camera_source: InputCameraSource | None = None,
         scene_cache_root: Path | None = None,
         data_root: Path | None = None,
     ) -> None:
@@ -165,6 +172,9 @@ class MainWindow(QMainWindow):
         self._signals = RunnerSignals(self)
         self._signals.event_received.connect(self._handle_job_event)
         self._setup_scene_services(scene_cache_root, data_root)
+        self._camera_source = camera_source or InputCameraSource(parent=self)
+        self._input_cameras: tuple[InputCamera, ...] = ()
+        self._selected_input_camera_id: str | None = None
         self._rooms = list(DEFAULT_ROOMS)
         self._room_ids = {
             room: (
@@ -206,6 +216,8 @@ class MainWindow(QMainWindow):
 
         self._header.tab_selected.connect(self.select_tab)
         self._show_page.room_selected.connect(self.select_room)
+        self._show_page.input_camera_selected.connect(self.select_input_camera)
+        self._camera_source.cameras_changed.connect(self._refresh_input_cameras)
         self._show_page.sample_install_requested.connect(self._install_sample)
         self._show_page.build_requested.connect(self._open_build)
         self._build_page.video_requested.connect(self._choose_video)
@@ -220,6 +232,7 @@ class MainWindow(QMainWindow):
             attribution=self._sample_scene.attribution,
             installed=self._asset_installer.is_ready(self._sample_scene),
         )
+        self._refresh_input_cameras()
         self.select_room(self._selected_room)
         self.select_tab(0)
 
@@ -239,6 +252,10 @@ class MainWindow(QMainWindow):
         self._asset_installer = AssetInstaller(cache_root)
         self._asset_resolver = ManagedSceneResolver(self._asset_installer, [self._sample_scene])
         self._viewpoints = ViewpointStore(actual_data_root / "viewpoints-v1.json")
+        self._input_camera_selection = InputCameraSelectionStore(
+            actual_data_root / "input-camera-v1.json",
+        )
+        self._preferred_input_camera_id = self._input_camera_selection.load()
         self._asset_signals = AssetSignals(self)
         self._asset_signals.progressed.connect(self._show_sample_progress)
         self._asset_signals.completed.connect(self._sample_installed)
@@ -261,6 +278,11 @@ class MainWindow(QMainWindow):
         return self._room_ids[self._selected_room]
 
     @property
+    def selected_input_camera_id(self) -> str | None:
+        """Return the effective foreground video-input identifier."""
+        return self._selected_input_camera_id
+
+    @property
     def active_tab(self) -> int:
         """Return the visible product-tab index."""
         return self._tabs.currentIndex()
@@ -278,6 +300,40 @@ class MainWindow(QMainWindow):
             return create_renderer_view(self._asset_resolver)
         except ImportError:
             return ScenePreview()
+
+    @Slot()
+    def _refresh_input_cameras(self) -> None:
+        """Reconcile hot-plug changes without discarding the user's preference."""
+        cameras = self._camera_source.cameras()
+        available_ids = {camera.device_id for camera in cameras}
+        if self._preferred_input_camera_id in available_ids:
+            selected = self._preferred_input_camera_id
+        elif self._selected_input_camera_id in available_ids:
+            selected = self._selected_input_camera_id
+        else:
+            default = next((camera for camera in cameras if camera.is_default), None)
+            selected = default.device_id if default is not None else None
+            if selected is None and cameras:
+                selected = cameras[0].device_id
+        changed = selected != self._selected_input_camera_id
+        self._input_cameras = cameras
+        self._selected_input_camera_id = selected
+        self._show_page.set_input_cameras(cameras, selected)
+        if changed:
+            self.input_camera_changed.emit(selected or "")
+
+    @Slot(str)
+    def select_input_camera(self, device_id: str) -> None:
+        """Persist one explicit input-camera selection and publish it to consumers."""
+        if device_id not in {camera.device_id for camera in self._input_cameras}:
+            return
+        changed = device_id != self._selected_input_camera_id
+        self._preferred_input_camera_id = device_id
+        self._selected_input_camera_id = device_id
+        self._input_camera_selection.save(device_id)
+        self._show_page.set_input_cameras(self._input_cameras, device_id)
+        if changed:
+            self.input_camera_changed.emit(device_id)
 
     @Slot(int)
     def select_tab(self, index: int) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import QApplication, QPushButton, QStackedWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QPushButton, QStackedWidget
 
 from better_backgrounds.build_session import IdleBuild
 from better_backgrounds.desktop.app import packaged_worker_command
@@ -15,7 +15,14 @@ from better_backgrounds.desktop.main_window import MainWindow
 from better_backgrounds.desktop.pages import AdjustPage
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.desktop.webview import navigation_is_allowed
-from better_backgrounds.scene import SceneReference, Viewpoint, load_sample_manifest
+from better_backgrounds.input_camera import InputCamera, InputCameraSource
+from better_backgrounds.scene import (
+    Quaternion,
+    SceneReference,
+    SceneTransform,
+    Viewpoint,
+    load_sample_manifest,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -137,6 +144,27 @@ def test_adjust_reuses_scene_and_keeps_its_room_draft() -> None:
     page.close()
 
 
+def test_adjust_keeps_asset_normalization_when_restoring_a_saved_camera() -> None:
+    """Do not let an older room preference undo the scene's import transform."""
+    application()
+    renderer = TrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    transform = SceneTransform(orientation=Quaternion(z=1.0, w=0.0))
+    scene = scene.model_copy(
+        update={
+            "default_viewpoint": scene.default_viewpoint.model_copy(
+                update={"scene_transform": transform},
+            ),
+        },
+    )
+
+    page.set_room(scene.asset_id, scene, installed=True, viewpoint=Viewpoint())
+
+    assert renderer.scenes[-1][1].scene_transform == transform
+    page.close()
+
+
 def test_show_tab_has_a_clear_camera_toggle() -> None:
     """Expose explicit start and stop actions for the virtual camera."""
     window = MainWindow(command_factory=lambda _job_id, _outcome: [], renderer_factory=ScenePreview)
@@ -148,6 +176,87 @@ def test_show_tab_has_a_clear_camera_toggle() -> None:
     assert camera.text() == "■  Stop virtual camera"
     camera.click()
     assert camera.text() == "●  Start virtual camera"
+    window.close()
+
+
+def test_show_selects_and_persists_an_input_camera(tmp_path: Path) -> None:
+    """Keep webcam selection in Python-owned application state."""
+    cameras = (
+        InputCamera(device_id="camera-a", description="Desk camera"),
+        InputCamera(device_id="camera-b", description="Monitor camera", is_default=True),
+    )
+    data_root = tmp_path / "data"
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        camera_source=InputCameraSource(lambda: cameras),
+        scene_cache_root=tmp_path / "cache",
+        data_root=data_root,
+    )
+    selector = window.findChild(QComboBox, "inputCameraSelector")
+
+    assert selector is not None
+    assert selector.currentData() == "camera-b"
+    selector.setCurrentIndex(0)
+    assert window.selected_input_camera_id == "camera-a"
+    window.close()
+
+    restored = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        camera_source=InputCameraSource(lambda: cameras),
+        scene_cache_root=tmp_path / "cache",
+        data_root=data_root,
+    )
+    restored_selector = restored.findChild(QComboBox, "inputCameraSelector")
+    assert restored_selector is not None
+    assert restored_selector.currentData() == "camera-a"
+    restored.close()
+
+
+def test_input_camera_hotplug_falls_back_without_losing_preference(tmp_path: Path) -> None:
+    """Temporarily use an available camera and restore the preferred device on return."""
+    cameras = [
+        InputCamera(device_id="camera-a", description="Desk camera"),
+        InputCamera(device_id="camera-b", description="Monitor camera", is_default=True),
+    ]
+    source = InputCameraSource(lambda: tuple(cameras))
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        camera_source=source,
+        scene_cache_root=tmp_path / "cache",
+        data_root=tmp_path / "data",
+    )
+    selector = window.findChild(QComboBox, "inputCameraSelector")
+    assert selector is not None
+    selector.setCurrentIndex(0)
+
+    cameras.pop(0)
+    source.refresh()
+    assert window.selected_input_camera_id == "camera-b"
+
+    cameras.insert(0, InputCamera(device_id="camera-a", description="Desk camera"))
+    source.refresh()
+    assert window.selected_input_camera_id == "camera-a"
+    window.close()
+
+
+def test_show_reports_when_no_input_camera_is_available(tmp_path: Path) -> None:
+    """Keep the empty-device state explicit and non-interactive."""
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        camera_source=InputCameraSource(lambda: ()),
+        scene_cache_root=tmp_path / "cache",
+        data_root=tmp_path / "data",
+    )
+    selector = window.findChild(QComboBox, "inputCameraSelector")
+
+    assert selector is not None
+    assert not selector.isEnabled()
+    assert selector.currentText() == "No camera detected"
+    assert window.selected_input_camera_id is None
     window.close()
 
 

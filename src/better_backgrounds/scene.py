@@ -8,7 +8,7 @@ import math
 import os
 import shutil
 from collections.abc import Callable, Iterable
-from contextlib import closing
+from contextlib import closing, suppress
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal, Self
@@ -287,10 +287,7 @@ class AssetInstaller:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 completed += self._download(resource, destination, completed, reference, progress)
             marker = staging / ".complete.json"
-            marker.write_text(
-                json.dumps({"schema_version": 1, "manifest": self._digest(reference)}),
-                encoding="utf-8",
-            )
+            self._write_marker(marker, self._digest(reference))
             staging.replace(target)
             self._verified[reference.asset_id] = self._digest(reference)
         except BaseException:
@@ -336,7 +333,7 @@ class AssetInstaller:
             marker_value = json.loads(marker.read_text(encoding="utf-8"))
         except OSError, ValueError, TypeError:
             return False
-        if marker_value != {"schema_version": 1, "manifest": expected_digest}:
+        if not isinstance(marker_value, dict) or marker_value.get("schema_version") not in {1, 2}:
             return False
         for resource in reference.resources:
             path = target.joinpath(*PurePosixPath(resource.path).parts)
@@ -345,6 +342,9 @@ class AssetInstaller:
             if self._file_digest(path) != resource.sha256:
                 return False
         self._verified[reference.asset_id] = expected_digest
+        if marker_value != {"schema_version": 2, "resources": expected_digest}:
+            with suppress(OSError):
+                self._write_marker(marker, expected_digest)
         return True
 
     def resource_path(self, reference: SceneReference, resource_path: str) -> Path | None:
@@ -357,8 +357,19 @@ class AssetInstaller:
 
     @staticmethod
     def _digest(reference: SceneReference) -> str:
-        value = reference.model_dump_json(round_trip=True)
+        resources = reference.model_dump(
+            mode="json",
+            include={"asset_id", "format", "entrypoint", "resources"},
+        )
+        value = json.dumps(resources, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(value.encode()).hexdigest()
+
+    @staticmethod
+    def _write_marker(path: Path, digest: str) -> None:
+        path.write_text(
+            json.dumps({"schema_version": 2, "resources": digest}),
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _file_digest(path: Path) -> str:

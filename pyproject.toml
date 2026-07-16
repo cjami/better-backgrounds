@@ -103,4 +103,5 @@ files = [
     "src/better_backgrounds/desktop/preview.py",
     "src/better_backgrounds/desktop/theme.py",
     "src/better_backgrounds/desktop/webview.py",
+    "src/better_backgrounds/input_camera.py",
 ]

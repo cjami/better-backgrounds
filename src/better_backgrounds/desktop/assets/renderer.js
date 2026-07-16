@@ -347,6 +347,198 @@ var BetterBackgroundsRenderer = (function (exports) {
 		}
 	}
 
+	const cachedResult = (func) => {
+		const uninitToken = {};
+		let result = uninitToken;
+		return () => {
+			if (result === uninitToken) {
+				result = func();
+			}
+			return result;
+		};
+	};
+	class Impl {
+		static modules = {};
+		// returns true if the running host supports wasm modules (all browsers except IE)
+		static wasmSupported = cachedResult(() => {
+			try {
+				if (typeof WebAssembly === "object" && typeof WebAssembly.instantiate === "function") {
+					const module = new WebAssembly.Module(Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0));
+					if (module instanceof WebAssembly.Module) {
+						return new WebAssembly.Instance(module) instanceof WebAssembly.Instance;
+					}
+				}
+			} catch (e) {
+			}
+			return false;
+		});
+		// load a script
+		static loadScript(url, callback) {
+			const s = document.createElement("script");
+			s.setAttribute("src", url);
+			s.onload = () => {
+				callback(null);
+			};
+			s.onerror = () => {
+				callback(`Failed to load script='${url}'`);
+			};
+			document.body.appendChild(s);
+		}
+		// load a wasm module
+		static loadWasm(moduleName, config, callback) {
+			const loadUrl = Impl.wasmSupported() && config.glueUrl && config.wasmUrl ? config.glueUrl : config.fallbackUrl;
+			if (loadUrl) {
+				Impl.loadScript(loadUrl, (err) => {
+					if (err) {
+						callback(err, null);
+					} else {
+						const module = window[moduleName];
+						window[moduleName] = void 0;
+						module({
+							locateFile: () => config.wasmUrl,
+							onAbort: () => {
+								callback("wasm module aborted.");
+							}
+						}).then((instance) => {
+							callback(null, instance);
+						});
+					}
+				});
+			} else {
+				callback("No supported wasm modules found.", null);
+			}
+		}
+		// get state object for the named module
+		static getModule(name) {
+			if (!Impl.modules.hasOwnProperty(name)) {
+				Impl.modules[name] = {
+					config: null,
+					initializing: false,
+					instance: null,
+					callbacks: []
+				};
+			}
+			return Impl.modules[name];
+		}
+		static initialize(moduleName, module) {
+			if (module.initializing) {
+				return;
+			}
+			const config = module.config;
+			if (config.glueUrl || config.wasmUrl || config.fallbackUrl) {
+				module.initializing = true;
+				Impl.loadWasm(moduleName, config, (err, instance) => {
+					if (err) {
+						if (config.errorHandler) {
+							config.errorHandler(err);
+						} else {
+							console.error(`failed to initialize module=${moduleName} error=${err}`);
+						}
+					} else {
+						module.instance = instance;
+						module.callbacks.forEach((callback) => {
+							callback(instance);
+						});
+					}
+				});
+			}
+		}
+	}
+	class WasmModule {
+		static setConfig(moduleName, config) {
+			const module = Impl.getModule(moduleName);
+			module.config = config;
+			if (module.callbacks.length > 0) {
+				Impl.initialize(moduleName, module);
+			}
+		}
+		static getConfig(moduleName) {
+			return Impl.modules?.[moduleName]?.config;
+		}
+		static getInstance(moduleName, callback) {
+			const module = Impl.getModule(moduleName);
+			if (module.instance) {
+				callback(module.instance);
+			} else {
+				module.callbacks.push(callback);
+				if (module.config) {
+					Impl.initialize(moduleName, module);
+				}
+			}
+		}
+	}
+
+	class ReadStream {
+		arraybuffer;
+		dataView;
+		offset = 0;
+		constructor(arraybuffer) {
+			this.arraybuffer = arraybuffer;
+			this.dataView = new DataView(arraybuffer);
+		}
+		get remainingBytes() {
+			return this.dataView.byteLength - this.offset;
+		}
+		reset(offset = 0) {
+			this.offset = offset;
+		}
+		skip(bytes) {
+			this.offset += bytes;
+		}
+		align(bytes) {
+			this.offset = this.offset + bytes - 1 & ~(bytes - 1);
+		}
+		_inc(amount) {
+			this.offset += amount;
+			return this.offset - amount;
+		}
+		readChar() {
+			return String.fromCharCode(this.dataView.getUint8(this.offset++));
+		}
+		readChars(numChars) {
+			let result = "";
+			for (let i = 0; i < numChars; ++i) {
+				result += this.readChar();
+			}
+			return result;
+		}
+		readU8() {
+			return this.dataView.getUint8(this.offset++);
+		}
+		readU16() {
+			return this.dataView.getUint16(this._inc(2), true);
+		}
+		readU32() {
+			return this.dataView.getUint32(this._inc(4), true);
+		}
+		readU64() {
+			return this.readU32() + 2 ** 32 * this.readU32();
+		}
+		readU32be() {
+			return this.dataView.getUint32(this._inc(4), false);
+		}
+		readArray(result) {
+			for (let i = 0; i < result.length; ++i) {
+				result[i] = this.readU8();
+			}
+		}
+		readLine() {
+			const view = this.dataView;
+			let result = "";
+			while (true) {
+				if (this.offset >= view.byteLength) {
+					break;
+				}
+				const c = String.fromCharCode(this.readU8());
+				if (c === "\n") {
+					break;
+				}
+				result += c;
+			}
+			return result;
+		}
+	}
+
 	class Tags extends EventHandler {
 		static EVENT_ADD = "add";
 		static EVENT_REMOVE = "remove";
@@ -3428,6 +3620,7 @@ var BetterBackgroundsRenderer = (function (exports) {
 	const SHADERTAG_MATERIAL = 1;
 	const STENCILOP_KEEP = 0;
 	const TEXTURELOCK_NONE = 0;
+	const TEXTURELOCK_READ = 1;
 	const TEXTURELOCK_WRITE = 2;
 	const TEXTURETYPE_DEFAULT = "default";
 	const TEXTURETYPE_RGBM = "rgbm";
@@ -8665,7 +8858,7 @@ ${src}`;
 	const UNDEF = /undef[ \t]+([^\n]+)\r?(?:\n|$)/g;
 	const IF = /(ifdef|ifndef|if)[ \t]*([^\r\n]+)\r?\n/g;
 	const ENDIF = /(endif|else|elif)(?:[ \t]+([^\r\n]*))?\r?\n?/g;
-	const IDENTIFIER = /\{?[\w-]+\}?/;
+	const IDENTIFIER$1 = /\{?[\w-]+\}?/;
 	const DEFINED = /(!|\s)?defined\(([\w-]+)\)/;
 	const DEFINED_PARENS = /!?defined\s*\([^)]*\)/g;
 	const DEFINED_BEFORE_PAREN = /!?defined\s*$/;
@@ -8771,8 +8964,8 @@ ${src}`;
 						const define = DEFINE.exec(source);
 						error || (error = define === null);
 						const expression = define[1];
-						IDENTIFIER.lastIndex = define.index;
-						const identifierValue = IDENTIFIER.exec(expression);
+						IDENTIFIER$1.lastIndex = define.index;
+						const identifierValue = IDENTIFIER$1.exec(expression);
 						const identifier = identifierValue[0];
 						let value = expression.substring(identifier.length).trim();
 						if (value === "") value = "true";
@@ -16934,6 +17127,140 @@ ${code} while rendering ${ void 0}`;
 		quad.destroy();
 	}
 
+	class BatchGroup {
+		_ui = false;
+		_sprite = false;
+		_obj = {
+			model: [],
+			element: [],
+			sprite: [],
+			render: []
+		};
+		id;
+		name;
+		dynamic;
+		maxAabbSize;
+		layers;
+		constructor(id, name, dynamic, maxAabbSize, layers = [LAYERID_WORLD]) {
+			this.id = id;
+			this.name = name;
+			this.dynamic = dynamic;
+			this.maxAabbSize = maxAabbSize;
+			this.layers = layers;
+		}
+		static MODEL = "model";
+		static ELEMENT = "element";
+		static SPRITE = "sprite";
+		static RENDER = "render";
+	}
+
+	const _invMatrix = new Mat4();
+	class SkinInstance {
+		bones;
+		constructor(skin) {
+			this._dirty = true;
+			this._rootBone = null;
+			this._skinUpdateIndex = -1;
+			this._updateBeforeCull = true;
+			if (skin) {
+				this.initSkin(skin);
+			}
+		}
+		set rootBone(rootBone) {
+			this._rootBone = rootBone;
+		}
+		get rootBone() {
+			return this._rootBone;
+		}
+		init(device, numBones) {
+			const numPixels = numBones * 3;
+			let width = Math.ceil(Math.sqrt(numPixels));
+			width = math.roundUp(width, 3);
+			const height = Math.ceil(numPixels / width);
+			this.boneTexture = new Texture(device, {
+				width,
+				height,
+				format: PIXELFORMAT_RGBA32F,
+				mipmaps: false,
+				minFilter: FILTER_NEAREST,
+				magFilter: FILTER_NEAREST,
+				name: "skin"
+			});
+			this.matrixPalette = this.boneTexture.lock({ mode: TEXTURELOCK_READ });
+			this.boneTexture.unlock();
+		}
+		destroy() {
+			if (this.boneTexture) {
+				this.boneTexture.destroy();
+				this.boneTexture = null;
+			}
+		}
+		resolve(rootBone, entity) {
+			this.rootBone = rootBone;
+			const skin = this.skin;
+			const bones = [];
+			for (let j = 0; j < skin.boneNames.length; j++) {
+				const boneName = skin.boneNames[j];
+				let bone = rootBone.findByName(boneName);
+				if (!bone) {
+					bone = entity;
+				}
+				bones.push(bone);
+			}
+			this.bones = bones;
+		}
+		initSkin(skin) {
+			this.skin = skin;
+			this.bones = [];
+			const numBones = skin.inverseBindPose.length;
+			this.init(skin.device, numBones);
+			this.matrices = [];
+			for (let i = 0; i < numBones; i++) {
+				this.matrices[i] = new Mat4();
+			}
+		}
+		uploadBones(device) {
+			this.boneTexture.upload();
+		}
+		_updateMatrices(rootNode, skinUpdateIndex) {
+			if (this._skinUpdateIndex !== skinUpdateIndex) {
+				this._skinUpdateIndex = skinUpdateIndex;
+				_invMatrix.copy(rootNode.getWorldTransform()).invert();
+				for (let i = this.bones.length - 1; i >= 0; i--) {
+					this.matrices[i].mulAffine2(_invMatrix, this.bones[i].getWorldTransform());
+					this.matrices[i].mulAffine2(this.matrices[i], this.skin.inverseBindPose[i]);
+				}
+			}
+		}
+		updateMatrices(rootNode, skinUpdateIndex) {
+			if (this._updateBeforeCull) {
+				this._updateMatrices(rootNode, skinUpdateIndex);
+			}
+		}
+		updateMatrixPalette(rootNode, skinUpdateIndex) {
+			this._updateMatrices(rootNode, skinUpdateIndex);
+			const mp = this.matrixPalette;
+			const count = this.bones.length;
+			for (let i = 0; i < count; i++) {
+				const pe = this.matrices[i].data;
+				const base = i * 12;
+				mp[base] = pe[0];
+				mp[base + 1] = pe[4];
+				mp[base + 2] = pe[8];
+				mp[base + 3] = pe[12];
+				mp[base + 4] = pe[1];
+				mp[base + 5] = pe[5];
+				mp[base + 6] = pe[9];
+				mp[base + 7] = pe[13];
+				mp[base + 8] = pe[2];
+				mp[base + 9] = pe[6];
+				mp[base + 10] = pe[10];
+				mp[base + 11] = pe[14];
+			}
+			this.uploadBones(this.skin.device);
+		}
+	}
+
 	let id$3 = 0;
 	class GeometryData {
 		constructor() {
@@ -24335,6 +24662,151 @@ ${code} while rendering ${ void 0}`;
 		}
 	}
 
+	class MorphInstance {
+		constructor(morph) {
+			this.morph = morph;
+			morph.incRefCount();
+			this.device = morph.device;
+			const maxNumTargets = morph._targets.length;
+			this.shader = this._createShader(maxNumTargets);
+			this._weights = [];
+			this._weightMap = /* @__PURE__ */ new Map();
+			for (let v = 0; v < morph._targets.length; v++) {
+				const target = morph._targets[v];
+				if (target.name) {
+					this._weightMap.set(target.name, v);
+				}
+				this.setWeight(v, target.defaultWeight);
+			}
+			this._shaderMorphWeights = new Float32Array(maxNumTargets);
+			this._shaderMorphIndex = new Uint32Array(maxNumTargets);
+			const createRT = (name, textureVar) => {
+				this[textureVar] = morph._createTexture(name, morph._renderTextureFormat);
+				return new RenderTarget({
+					colorBuffer: this[textureVar],
+					depth: false
+				});
+			};
+			if (morph.morphPositions) {
+				this.rtPositions = createRT("MorphRTPos", "texturePositions");
+			}
+			if (morph.morphNormals) {
+				this.rtNormals = createRT("MorphRTNrm", "textureNormals");
+			}
+			this._textureParams = new Float32Array([morph.morphTextureWidth, morph.morphTextureHeight]);
+			const halfSize = morph.aabb.halfExtents;
+			this._aabbSize = new Float32Array([halfSize.x * 4, halfSize.y * 4, halfSize.z * 4]);
+			const min = morph.aabb.getMin();
+			this._aabbMin = new Float32Array([min.x * 2, min.y * 2, min.z * 2]);
+			this._aabbNrmSize = new Float32Array([2, 2, 2]);
+			this._aabbNrmMin = new Float32Array([-1, -1, -1]);
+			this.aabbSizeId = this.device.scope.resolve("aabbSize");
+			this.aabbMinId = this.device.scope.resolve("aabbMin");
+			this.morphTextureId = this.device.scope.resolve("morphTexture");
+			this.morphFactor = this.device.scope.resolve("morphFactor[0]");
+			this.morphIndex = this.device.scope.resolve("morphIndex[0]");
+			this.countId = this.device.scope.resolve("count");
+			this.zeroTextures = false;
+		}
+		destroy() {
+			this.shader = null;
+			const morph = this.morph;
+			if (morph) {
+				this.morph = null;
+				morph.decRefCount();
+				if (morph.refCount < 1) {
+					morph.destroy();
+				}
+			}
+			this.rtPositions?.destroy();
+			this.rtPositions = null;
+			this.texturePositions?.destroy();
+			this.texturePositions = null;
+			this.rtNormals?.destroy();
+			this.rtNormals = null;
+			this.textureNormals?.destroy();
+			this.textureNormals = null;
+		}
+		clone() {
+			return new MorphInstance(this.morph);
+		}
+		_getWeightIndex(key) {
+			if (typeof key === "string") {
+				const index = this._weightMap.get(key);
+				return index;
+			}
+			return key;
+		}
+		getWeight(key) {
+			const index = this._getWeightIndex(key);
+			return this._weights[index];
+		}
+		setWeight(key, weight) {
+			const index = this._getWeightIndex(key);
+			this._weights[index] = weight;
+			this._dirty = true;
+		}
+		_createShader(maxCount) {
+			const defines = /* @__PURE__ */ new Map();
+			defines.set("{MORPH_TEXTURE_MAX_COUNT}", maxCount);
+			if (this.morph.intRenderFormat) defines.set("MORPH_INT", "");
+			const outputType = this.morph.intRenderFormat ? "uvec4" : "vec4";
+			return ShaderUtils.createShader(this.device, {
+				uniqueName: `TextureMorphShader_${maxCount}-${this.morph.intRenderFormat ? "int" : "float"}`,
+				attributes: { vertex_position: SEMANTIC_POSITION },
+				vertexChunk: "morphVS",
+				fragmentChunk: "morphPS",
+				fragmentDefines: defines,
+				fragmentOutputTypes: [outputType]
+			});
+		}
+		_updateTextureRenderTarget(renderTarget, activeCount, isPos) {
+			const { morph, device } = this;
+			this.setAabbUniforms(isPos);
+			this.morphTextureId.setValue(isPos ? morph.targetsTexturePositions : morph.targetsTextureNormals);
+			device.setBlendState(BlendState.NOBLEND);
+			this.countId.setValue(activeCount);
+			this.morphFactor.setValue(this._shaderMorphWeights);
+			this.morphIndex.setValue(this._shaderMorphIndex);
+			drawQuadWithShader(device, renderTarget, this.shader);
+		}
+		_updateTextureMorph(activeCount) {
+			this.device;
+			if (activeCount > 0 || !this.zeroTextures) {
+				if (this.rtPositions) {
+					this._updateTextureRenderTarget(this.rtPositions, activeCount, true);
+				}
+				if (this.rtNormals) {
+					this._updateTextureRenderTarget(this.rtNormals, activeCount, false);
+				}
+				this.zeroTextures = activeCount === 0;
+			}
+		}
+		setAabbUniforms(isPos = true) {
+			this.aabbSizeId.setValue(isPos ? this._aabbSize : this._aabbNrmSize);
+			this.aabbMinId.setValue(isPos ? this._aabbMin : this._aabbNrmMin);
+		}
+		prepareRendering(device) {
+			this.setAabbUniforms();
+		}
+		update() {
+			this._dirty = false;
+			const targets = this.morph._targets;
+			const epsilon = 1e-5;
+			const weights = this._shaderMorphWeights;
+			const indices = this._shaderMorphIndex;
+			let activeCount = 0;
+			for (let i = 0; i < targets.length; i++) {
+				if (Math.abs(this.getWeight(i)) > epsilon) {
+					weights[activeCount] = this.getWeight(i);
+					indices[activeCount] = i;
+					activeCount++;
+				}
+			}
+			this._updateTextureMorph(activeCount);
+		}
+	}
+
 	class ShaderGeneratorShader extends ShaderGenerator {
 		generateKey(options) {
 			const desc = options.shaderDesc;
@@ -25736,8 +26208,8 @@ fn writeSplat(center: vec3f, rotation: vec4f, scale: vec3f, color: vec4f) {
 		}
 	}
 
-	const primitiveUv1Padding = 8 / 64;
-	const primitiveUv1PaddingScale = 1 - primitiveUv1Padding * 2;
+	const primitiveUv1Padding$1 = 8 / 64;
+	const primitiveUv1PaddingScale$1 = 1 - primitiveUv1Padding$1 * 2;
 	class BoxGeometry extends Geometry {
 		constructor(opts = {}) {
 			super();
@@ -25816,8 +26288,8 @@ fn writeSplat(center: vec3f, rotation: vec4f, scale: vec3f, color: vec4f) {
 						positions.push(r.x, r.y, r.z);
 						normals.push(faceNormals[side][0], faceNormals[side][1], faceNormals[side][2]);
 						uvs.push(u, 1 - v);
-						u = u * primitiveUv1PaddingScale + primitiveUv1Padding;
-						v = v * primitiveUv1PaddingScale + primitiveUv1Padding;
+						u = u * primitiveUv1PaddingScale$1 + primitiveUv1Padding$1;
+						v = v * primitiveUv1PaddingScale$1 + primitiveUv1Padding$1;
 						u /= 3;
 						v /= 3;
 						u += side % 3 / 3;
@@ -30746,6 +31218,309 @@ ${props.map((prop) => prop + options[prop]).join("\n")}${LitOptionsUtils.generat
 		definePropInternal("prefilteredCubemaps", () => empty.slice(), setterFunc, getterFunc);
 	}
 	_defineMaterialProps();
+
+	const primitiveUv1Padding = 8 / 64;
+	const primitiveUv1PaddingScale = 1 - primitiveUv1Padding * 2;
+	class ConeBaseGeometry extends Geometry {
+		constructor(baseRadius, peakRadius, height, heightSegments, capSegments, roundedCaps) {
+			super();
+			const pos = new Vec3();
+			const bottomToTop = new Vec3();
+			const norm = new Vec3();
+			const top = new Vec3();
+			const bottom = new Vec3();
+			const tangent = new Vec3();
+			const positions = [];
+			const normals = [];
+			const uvs = [];
+			const uvs1 = [];
+			const indices = [];
+			let offset;
+			if (height > 0) {
+				for (let i = 0; i <= heightSegments; i++) {
+					for (let j = 0; j <= capSegments; j++) {
+						const theta = j / capSegments * 2 * Math.PI - Math.PI;
+						const sinTheta = Math.sin(theta);
+						const cosTheta = Math.cos(theta);
+						bottom.set(sinTheta * baseRadius, -height / 2, cosTheta * baseRadius);
+						top.set(sinTheta * peakRadius, height / 2, cosTheta * peakRadius);
+						pos.lerp(bottom, top, i / heightSegments);
+						bottomToTop.sub2(top, bottom).normalize();
+						tangent.set(cosTheta, 0, -sinTheta);
+						norm.cross(tangent, bottomToTop).normalize();
+						positions.push(pos.x, pos.y, pos.z);
+						normals.push(norm.x, norm.y, norm.z);
+						let u = j / capSegments;
+						let v = i / heightSegments;
+						uvs.push(u, 1 - v);
+						const _v = v;
+						v = u;
+						u = _v;
+						u = u * primitiveUv1PaddingScale + primitiveUv1Padding;
+						v = v * primitiveUv1PaddingScale + primitiveUv1Padding;
+						u /= 3;
+						uvs1.push(u, 1 - v);
+						if (i < heightSegments && j < capSegments) {
+							const first = i * (capSegments + 1) + j;
+							const second = i * (capSegments + 1) + (j + 1);
+							const third = (i + 1) * (capSegments + 1) + j;
+							const fourth = (i + 1) * (capSegments + 1) + (j + 1);
+							indices.push(first, second, third);
+							indices.push(second, fourth, third);
+						}
+					}
+				}
+			}
+			if (roundedCaps) {
+				const latitudeBands = Math.floor(capSegments / 2);
+				const longitudeBands = capSegments;
+				const capOffset = height / 2;
+				for (let lat = 0; lat <= latitudeBands; lat++) {
+					const theta = lat * Math.PI * 0.5 / latitudeBands;
+					const sinTheta = Math.sin(theta);
+					const cosTheta = Math.cos(theta);
+					for (let lon = 0; lon <= longitudeBands; lon++) {
+						const phi = lon * 2 * Math.PI / longitudeBands - Math.PI / 2;
+						const sinPhi = Math.sin(phi);
+						const cosPhi = Math.cos(phi);
+						const x = cosPhi * sinTheta;
+						const y = cosTheta;
+						const z = sinPhi * sinTheta;
+						let u = 1 - lon / longitudeBands;
+						let v = 1 - lat / latitudeBands;
+						positions.push(x * peakRadius, y * peakRadius + capOffset, z * peakRadius);
+						normals.push(x, y, z);
+						uvs.push(u, 1 - v);
+						u = u * primitiveUv1PaddingScale + primitiveUv1Padding;
+						v = v * primitiveUv1PaddingScale + primitiveUv1Padding;
+						u /= 3;
+						v /= 3;
+						u += 1 / 3;
+						uvs1.push(u, 1 - v);
+					}
+				}
+				offset = (heightSegments + 1) * (capSegments + 1);
+				for (let lat = 0; lat < latitudeBands; ++lat) {
+					for (let lon = 0; lon < longitudeBands; ++lon) {
+						const first = lat * (longitudeBands + 1) + lon;
+						const second = first + longitudeBands + 1;
+						indices.push(offset + first + 1, offset + second, offset + first);
+						indices.push(offset + first + 1, offset + second + 1, offset + second);
+					}
+				}
+				for (let lat = 0; lat <= latitudeBands; lat++) {
+					const theta = Math.PI * 0.5 + lat * Math.PI * 0.5 / latitudeBands;
+					const sinTheta = Math.sin(theta);
+					const cosTheta = Math.cos(theta);
+					for (let lon = 0; lon <= longitudeBands; lon++) {
+						const phi = lon * 2 * Math.PI / longitudeBands - Math.PI / 2;
+						const sinPhi = Math.sin(phi);
+						const cosPhi = Math.cos(phi);
+						const x = cosPhi * sinTheta;
+						const y = cosTheta;
+						const z = sinPhi * sinTheta;
+						let u = 1 - lon / longitudeBands;
+						let v = 1 - lat / latitudeBands;
+						positions.push(x * peakRadius, y * peakRadius - capOffset, z * peakRadius);
+						normals.push(x, y, z);
+						uvs.push(u, 1 - v);
+						u = u * primitiveUv1PaddingScale + primitiveUv1Padding;
+						v = v * primitiveUv1PaddingScale + primitiveUv1Padding;
+						u /= 3;
+						v /= 3;
+						u += 2 / 3;
+						uvs1.push(u, 1 - v);
+					}
+				}
+				offset = (heightSegments + 1) * (capSegments + 1) + (longitudeBands + 1) * (latitudeBands + 1);
+				for (let lat = 0; lat < latitudeBands; ++lat) {
+					for (let lon = 0; lon < longitudeBands; ++lon) {
+						const first = lat * (longitudeBands + 1) + lon;
+						const second = first + longitudeBands + 1;
+						indices.push(offset + first + 1, offset + second, offset + first);
+						indices.push(offset + first + 1, offset + second + 1, offset + second);
+					}
+				}
+			} else {
+				offset = (heightSegments + 1) * (capSegments + 1);
+				if (baseRadius > 0) {
+					for (let i = 0; i < capSegments; i++) {
+						const theta = i / capSegments * 2 * Math.PI;
+						const x = Math.sin(theta);
+						const y = -height / 2;
+						const z = Math.cos(theta);
+						let u = 1 - (x + 1) / 2;
+						let v = (z + 1) / 2;
+						positions.push(x * baseRadius, y, z * baseRadius);
+						normals.push(0, -1, 0);
+						uvs.push(u, 1 - v);
+						u = u * primitiveUv1PaddingScale + primitiveUv1Padding;
+						v = v * primitiveUv1PaddingScale + primitiveUv1Padding;
+						u /= 3;
+						v /= 3;
+						u += 1 / 3;
+						uvs1.push(u, 1 - v);
+						if (i > 1) {
+							indices.push(offset, offset + i, offset + i - 1);
+						}
+					}
+				}
+				offset += capSegments;
+				if (peakRadius > 0) {
+					for (let i = 0; i < capSegments; i++) {
+						const theta = i / capSegments * 2 * Math.PI;
+						const x = Math.sin(theta);
+						const y = height / 2;
+						const z = Math.cos(theta);
+						let u = 1 - (x + 1) / 2;
+						let v = (z + 1) / 2;
+						positions.push(x * peakRadius, y, z * peakRadius);
+						normals.push(0, 1, 0);
+						uvs.push(u, 1 - v);
+						u = u * primitiveUv1PaddingScale + primitiveUv1Padding;
+						v = v * primitiveUv1PaddingScale + primitiveUv1Padding;
+						u /= 3;
+						v /= 3;
+						u += 2 / 3;
+						uvs1.push(u, 1 - v);
+						if (i > 1) {
+							indices.push(offset, offset + i - 1, offset + i);
+						}
+					}
+				}
+			}
+			this.positions = positions;
+			this.normals = normals;
+			this.uvs = uvs;
+			this.uvs1 = uvs1;
+			this.indices = indices;
+		}
+	}
+
+	class CapsuleGeometry extends ConeBaseGeometry {
+		constructor(opts = {}) {
+			const radius = opts.radius ?? 0.3;
+			const height = opts.height ?? 1;
+			const heightSegments = opts.heightSegments ?? 1;
+			const sides = opts.sides ?? 20;
+			super(radius, radius, height - 2 * radius, heightSegments, sides, true);
+			if (opts.calculateTangents) {
+				this.tangents = calculateTangents(this.positions, this.normals, this.uvs, this.indices);
+			}
+		}
+	}
+
+	class ConeGeometry extends ConeBaseGeometry {
+		constructor(opts = {}) {
+			const baseRadius = opts.baseRadius ?? 0.5;
+			const peakRadius = opts.peakRadius ?? 0;
+			const height = opts.height ?? 1;
+			const heightSegments = opts.heightSegments ?? 5;
+			const capSegments = opts.capSegments ?? 18;
+			super(baseRadius, peakRadius, height, heightSegments, capSegments, false);
+			if (opts.calculateTangents) {
+				this.tangents = calculateTangents(this.positions, this.normals, this.uvs, this.indices);
+			}
+		}
+	}
+
+	class CylinderGeometry extends ConeBaseGeometry {
+		constructor(opts = {}) {
+			const radius = opts.radius ?? 0.5;
+			const height = opts.height ?? 1;
+			const heightSegments = opts.heightSegments ?? 5;
+			const capSegments = opts.capSegments ?? 20;
+			super(radius, radius, height, heightSegments, capSegments, false);
+			if (opts.calculateTangents) {
+				this.tangents = calculateTangents(this.positions, this.normals, this.uvs, this.indices);
+			}
+		}
+	}
+
+	class PlaneGeometry extends Geometry {
+		constructor(opts = {}) {
+			super();
+			const he = opts.halfExtents ?? new Vec2(0.5, 0.5);
+			const ws = opts.widthSegments ?? 5;
+			const ls = opts.lengthSegments ?? 5;
+			const positions = [];
+			const normals = [];
+			const uvs = [];
+			const indices = [];
+			let vcounter = 0;
+			for (let i = 0; i <= ws; i++) {
+				for (let j = 0; j <= ls; j++) {
+					const x = -he.x + 2 * he.x * i / ws;
+					const y = 0;
+					const z = -(-he.y + 2 * he.y * j / ls);
+					const u = i / ws;
+					const v = j / ls;
+					positions.push(x, y, z);
+					normals.push(0, 1, 0);
+					uvs.push(u, 1 - v);
+					if (i < ws && j < ls) {
+						indices.push(vcounter + ls + 1, vcounter + 1, vcounter);
+						indices.push(vcounter + ls + 1, vcounter + ls + 2, vcounter + 1);
+					}
+					vcounter++;
+				}
+			}
+			this.positions = positions;
+			this.normals = normals;
+			this.uvs = uvs;
+			this.uvs1 = uvs;
+			this.indices = indices;
+			if (opts.calculateTangents) {
+				this.tangents = calculateTangents(positions, normals, uvs, indices);
+			}
+		}
+	}
+
+	class TorusGeometry extends Geometry {
+		constructor(opts = {}) {
+			super();
+			const rc = opts.tubeRadius ?? 0.2;
+			const rt = opts.ringRadius ?? 0.3;
+			const sectorAngle = (opts.sectorAngle ?? 360) * math.DEG_TO_RAD;
+			const segments = opts.segments ?? 30;
+			const sides = opts.sides ?? 20;
+			const positions = [];
+			const normals = [];
+			const uvs = [];
+			const indices = [];
+			for (let i = 0; i <= sides; i++) {
+				for (let j = 0; j <= segments; j++) {
+					const x = Math.cos(sectorAngle * j / segments) * (rt + rc * Math.cos(2 * Math.PI * i / sides));
+					const y = Math.sin(2 * Math.PI * i / sides) * rc;
+					const z = Math.sin(sectorAngle * j / segments) * (rt + rc * Math.cos(2 * Math.PI * i / sides));
+					const nx = Math.cos(sectorAngle * j / segments) * Math.cos(2 * Math.PI * i / sides);
+					const ny = Math.sin(2 * Math.PI * i / sides);
+					const nz = Math.sin(sectorAngle * j / segments) * Math.cos(2 * Math.PI * i / sides);
+					const u = i / sides;
+					const v = 1 - j / segments;
+					positions.push(x, y, z);
+					normals.push(nx, ny, nz);
+					uvs.push(u, 1 - v);
+					if (i < sides && j < segments) {
+						const first = i * (segments + 1) + j;
+						const second = (i + 1) * (segments + 1) + j;
+						const third = i * (segments + 1) + (j + 1);
+						const fourth = (i + 1) * (segments + 1) + (j + 1);
+						indices.push(first, second, third);
+						indices.push(second, fourth, third);
+					}
+				}
+			}
+			this.positions = positions;
+			this.normals = normals;
+			this.uvs = uvs;
+			this.uvs1 = uvs;
+			this.indices = indices;
+			if (opts.calculateTangents) {
+				this.tangents = calculateTangents(positions, normals, uvs, indices);
+			}
+		}
+	}
 
 	class ProgramLibrary {
 		processedCache = /* @__PURE__ */ new Map();
@@ -48134,6 +48909,140 @@ fn getViewDir() {
 		}
 	}
 
+	class PrimitivesCache {
+		map = /* @__PURE__ */ new Map();
+		// destroy all created primitives when the device is destroyed
+		destroy(device) {
+			this.map.forEach((primData) => primData.mesh.destroy());
+		}
+	}
+	const _primitivesCache = new DeviceCache();
+	const getShapePrimitive = (device, type) => {
+		const cache = _primitivesCache.get(device, () => {
+			return new PrimitivesCache();
+		});
+		let primData = cache.map.get(type);
+		if (!primData) {
+			let mesh, area;
+			switch (type) {
+				case "box":
+					mesh = Mesh.fromGeometry(device, new BoxGeometry());
+					area = { x: 2, y: 2, z: 2, uv: 2 / 3 };
+					break;
+				case "capsule":
+					mesh = Mesh.fromGeometry(device, new CapsuleGeometry({ radius: 0.5, height: 2 }));
+					area = { x: Math.PI * 2, y: Math.PI, z: Math.PI * 2, uv: 1 / 3 + 1 / 3 / 3 * 2 };
+					break;
+				case "cone":
+					mesh = Mesh.fromGeometry(device, new ConeGeometry({ baseRadius: 0.5, peakRadius: 0, height: 1 }));
+					area = { x: 2.54, y: 2.54, z: 2.54, uv: 1 / 3 + 1 / 3 / 3 };
+					break;
+				case "cylinder":
+					mesh = Mesh.fromGeometry(device, new CylinderGeometry({ radius: 0.5, height: 1 }));
+					area = { x: Math.PI, y: 0.79 * 2, z: Math.PI, uv: 1 / 3 + 1 / 3 / 3 * 2 };
+					break;
+				case "plane":
+					mesh = Mesh.fromGeometry(device, new PlaneGeometry({ halfExtents: new Vec2(0.5, 0.5), widthSegments: 1, lengthSegments: 1 }));
+					area = { x: 0, y: 1, z: 0, uv: 1 };
+					break;
+				case "sphere":
+					mesh = Mesh.fromGeometry(device, new SphereGeometry({ radius: 0.5 }));
+					area = { x: Math.PI, y: Math.PI, z: Math.PI, uv: 1 };
+					break;
+				case "torus":
+					mesh = Mesh.fromGeometry(device, new TorusGeometry({ tubeRadius: 0.2, ringRadius: 0.3 }));
+					area = { x: Math.PI * 0.5 * 0.5 - Math.PI * 0.1 * 0.1, y: 0.4, z: 0.4, uv: 1 };
+					break;
+				default:
+					throw new Error(`Invalid primitive type: ${type}`);
+			}
+			mesh.incRefCount();
+			primData = { mesh, area };
+			cache.map.set(type, primData);
+		}
+		return primData;
+	};
+
+	class SkinInstanceCachedObject extends RefCountedObject {
+		constructor(skin, skinInstance) {
+			super();
+			this.skin = skin;
+			this.skinInstance = skinInstance;
+		}
+	}
+	class SkinInstanceCache {
+		// map of SkinInstances allowing those to be shared between
+		// (specifically a single glb with multiple render components)
+		// It maps a rootBone to an array of SkinInstanceCachedObject
+		// this allows us to find if a skin instance already exists for a rootbone, and a specific skin
+		static _skinInstanceCache = /* @__PURE__ */ new Map();
+		// returns cached or creates a skin instance for the skin and a rootBone, to be used by render component
+		// on the specified entity
+		static createCachedSkinInstance(skin, rootBone, entity) {
+			let skinInst = SkinInstanceCache.getCachedSkinInstance(skin, rootBone);
+			if (!skinInst) {
+				skinInst = new SkinInstance(skin);
+				skinInst.resolve(rootBone, entity);
+				SkinInstanceCache.addCachedSkinInstance(skin, rootBone, skinInst);
+			}
+			return skinInst;
+		}
+		// returns already created skin instance from skin, for use on the rootBone
+		// ref count of existing skinInstance is increased
+		static getCachedSkinInstance(skin, rootBone) {
+			let skinInstance = null;
+			const cachedObjArray = SkinInstanceCache._skinInstanceCache.get(rootBone);
+			if (cachedObjArray) {
+				const cachedObj = cachedObjArray.find((element) => element.skin === skin);
+				if (cachedObj) {
+					cachedObj.incRefCount();
+					skinInstance = cachedObj.skinInstance;
+				}
+			}
+			return skinInstance;
+		}
+		// adds skin instance to the cache, and increases ref count on it
+		static addCachedSkinInstance(skin, rootBone, skinInstance) {
+			let cachedObjArray = SkinInstanceCache._skinInstanceCache.get(rootBone);
+			if (!cachedObjArray) {
+				cachedObjArray = [];
+				SkinInstanceCache._skinInstanceCache.set(rootBone, cachedObjArray);
+			}
+			let cachedObj = cachedObjArray.find((element) => element.skin === skin);
+			if (!cachedObj) {
+				cachedObj = new SkinInstanceCachedObject(skin, skinInstance);
+				cachedObjArray.push(cachedObj);
+			}
+			cachedObj.incRefCount();
+		}
+		// removes skin instance from the cache. This decreases ref count, and when that reaches 0 it gets destroyed
+		static removeCachedSkinInstance(skinInstance) {
+			if (skinInstance) {
+				const rootBone = skinInstance.rootBone;
+				if (rootBone) {
+					const cachedObjArray = SkinInstanceCache._skinInstanceCache.get(rootBone);
+					if (cachedObjArray) {
+						const cachedObjIndex = cachedObjArray.findIndex((element) => element.skinInstance === skinInstance);
+						if (cachedObjIndex >= 0) {
+							const cachedObj = cachedObjArray[cachedObjIndex];
+							cachedObj.decRefCount();
+							if (cachedObj.refCount === 0) {
+								cachedObjArray.splice(cachedObjIndex, 1);
+								if (!cachedObjArray.length) {
+									SkinInstanceCache._skinInstanceCache.delete(rootBone);
+								}
+								if (skinInstance) {
+									skinInstance.destroy();
+									cachedObj.skinInstance = null;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	class AssetReference {
 		_evtLoadById = null;
 		_evtUnloadById = null;
@@ -48221,6 +49130,627 @@ fn getViewDir() {
 		}
 		_onUnload(asset) {
 			this._onAssetUnload.call(this._scope, this.propertyName, this.parent, asset);
+		}
+	}
+
+	class RenderComponent extends Component {
+		_type = "asset";
+		_castShadows = true;
+		_receiveShadows = true;
+		_castShadowsLightmap = true;
+		_lightmapped = false;
+		_lightmapSizeMultiplier = 1;
+		isStatic = false;
+		_batchGroupId = -1;
+		_layers = [LAYERID_WORLD];
+		// assign to the default world layer
+		_renderStyle = RENDERSTYLE_SOLID;
+		_meshInstances = [];
+		_customAabb = null;
+		_area = null;
+		_assetReference;
+		_materialReferences = [];
+		_material;
+		_rootBone = null;
+		_evtLayersChanged = null;
+		_evtLayerAdded = null;
+		_evtLayerRemoved = null;
+		_evtSetMeshes = null;
+		constructor(system, entity) {
+			super(system, entity);
+			this._assetReference = new AssetReference(
+				"asset",
+				this,
+				system.app.assets,
+				{
+					add: this._onRenderAssetAdded,
+					load: this._onRenderAssetLoad,
+					remove: this._onRenderAssetRemove,
+					unload: this._onRenderAssetUnload
+				},
+				this
+			);
+			this._material = system.defaultMaterial;
+			entity.on("remove", this.onRemoveChild, this);
+			entity.on("removehierarchy", this.onRemoveChild, this);
+			entity.on("insert", this.onInsertChild, this);
+			entity.on("inserthierarchy", this.onInsertChild, this);
+		}
+		set renderStyle(renderStyle) {
+			if (this._renderStyle !== renderStyle) {
+				this._renderStyle = renderStyle;
+				MeshInstance._prepareRenderStyleForArray(this._meshInstances, renderStyle);
+			}
+		}
+		get renderStyle() {
+			return this._renderStyle;
+		}
+		set customAabb(value) {
+			this._customAabb = value;
+			const mi = this._meshInstances;
+			if (mi) {
+				for (let i = 0; i < mi.length; i++) {
+					mi[i].setCustomAabb(this._customAabb);
+				}
+			}
+		}
+		get customAabb() {
+			return this._customAabb;
+		}
+		set type(value) {
+			if (this._type !== value) {
+				this._area = null;
+				this._type = value;
+				this.destroyMeshInstances();
+				if (value !== "asset") {
+					let material = this._material;
+					if (!material || material === this.system.defaultMaterial) {
+						material = this._materialReferences[0] && this._materialReferences[0].asset && this._materialReferences[0].asset.resource;
+					}
+					const primData = getShapePrimitive(this.system.app.graphicsDevice, value);
+					this._area = primData.area;
+					this.meshInstances = [new MeshInstance(primData.mesh, material || this.system.defaultMaterial, this.entity)];
+				}
+			}
+		}
+		get type() {
+			return this._type;
+		}
+		set meshInstances(value) {
+			this.destroyMeshInstances();
+			this._meshInstances = value;
+			if (this._meshInstances) {
+				const mi = this._meshInstances;
+				for (let i = 0; i < mi.length; i++) {
+					if (!mi[i].node) {
+						mi[i].node = this.entity;
+					}
+					mi[i].castShadow = this._castShadows;
+					mi[i].receiveShadow = this._receiveShadows;
+					mi[i].renderStyle = this._renderStyle;
+					mi[i].setLightmapped(this._lightmapped);
+					mi[i].setCustomAabb(this._customAabb);
+				}
+				if (this.enabled && this.entity.enabled) {
+					this.addToLayers();
+				}
+			}
+		}
+		get meshInstances() {
+			return this._meshInstances;
+		}
+		set lightmapped(value) {
+			if (value !== this._lightmapped) {
+				this._lightmapped = value;
+				const mi = this._meshInstances;
+				if (mi) {
+					for (let i = 0; i < mi.length; i++) {
+						mi[i].setLightmapped(value);
+					}
+				}
+			}
+		}
+		get lightmapped() {
+			return this._lightmapped;
+		}
+		set castShadows(value) {
+			if (this._castShadows !== value) {
+				const mi = this._meshInstances;
+				if (mi) {
+					const layers = this.layers;
+					const scene = this.system.app.scene;
+					if (this._castShadows && !value) {
+						for (let i = 0; i < layers.length; i++) {
+							const layer = scene.layers.getLayerById(this.layers[i]);
+							if (layer) {
+								layer.removeShadowCasters(mi);
+							}
+						}
+					}
+					for (let i = 0; i < mi.length; i++) {
+						mi[i].castShadow = value;
+					}
+					if (!this._castShadows && value) {
+						for (let i = 0; i < layers.length; i++) {
+							const layer = scene.layers.getLayerById(layers[i]);
+							if (layer) {
+								layer.addShadowCasters(mi);
+							}
+						}
+					}
+				}
+				this._castShadows = value;
+			}
+		}
+		get castShadows() {
+			return this._castShadows;
+		}
+		set receiveShadows(value) {
+			if (this._receiveShadows !== value) {
+				this._receiveShadows = value;
+				const mi = this._meshInstances;
+				if (mi) {
+					for (let i = 0; i < mi.length; i++) {
+						mi[i].receiveShadow = value;
+					}
+				}
+			}
+		}
+		get receiveShadows() {
+			return this._receiveShadows;
+		}
+		set castShadowsLightmap(value) {
+			this._castShadowsLightmap = value;
+		}
+		get castShadowsLightmap() {
+			return this._castShadowsLightmap;
+		}
+		set lightmapSizeMultiplier(value) {
+			this._lightmapSizeMultiplier = value;
+		}
+		get lightmapSizeMultiplier() {
+			return this._lightmapSizeMultiplier;
+		}
+		set layers(value) {
+			const layers = this.system.app.scene.layers;
+			let layer;
+			if (this._meshInstances) {
+				for (let i = 0; i < this._layers.length; i++) {
+					layer = layers.getLayerById(this._layers[i]);
+					if (layer) {
+						layer.removeMeshInstances(this._meshInstances);
+					}
+				}
+			}
+			this._layers.length = 0;
+			for (let i = 0; i < value.length; i++) {
+				this._layers[i] = value[i];
+			}
+			if (!this.enabled || !this.entity.enabled || !this._meshInstances) return;
+			for (let i = 0; i < this._layers.length; i++) {
+				layer = layers.getLayerById(this._layers[i]);
+				if (layer) {
+					layer.addMeshInstances(this._meshInstances);
+				}
+			}
+		}
+		get layers() {
+			return this._layers;
+		}
+		set batchGroupId(value) {
+			if (this._batchGroupId !== value) {
+				if (this.entity.enabled && this._batchGroupId >= 0) {
+					this.system.app.batcher?.remove(BatchGroup.RENDER, this.batchGroupId, this.entity);
+				}
+				if (this.entity.enabled && value >= 0) {
+					this.system.app.batcher?.insert(BatchGroup.RENDER, value, this.entity);
+				}
+				if (value < 0 && this._batchGroupId >= 0 && this.enabled && this.entity.enabled) {
+					this.addToLayers();
+				}
+				this._batchGroupId = value;
+			}
+		}
+		get batchGroupId() {
+			return this._batchGroupId;
+		}
+		set material(value) {
+			if (this._material !== value) {
+				this._material = value;
+				if (this._meshInstances && this._type !== "asset") {
+					for (let i = 0; i < this._meshInstances.length; i++) {
+						this._meshInstances[i].material = value;
+					}
+				}
+			}
+		}
+		get material() {
+			return this._material;
+		}
+		set materialAssets(value = []) {
+			if (this._materialReferences.length > value.length) {
+				for (let i = value.length; i < this._materialReferences.length; i++) {
+					this._materialReferences[i].id = null;
+				}
+				this._materialReferences.length = value.length;
+			}
+			for (let i = 0; i < value.length; i++) {
+				if (!this._materialReferences[i]) {
+					this._materialReferences.push(
+						new AssetReference(
+							i,
+							this,
+							this.system.app.assets,
+							{
+								add: this._onMaterialAdded,
+								load: this._onMaterialLoad,
+								remove: this._onMaterialRemove,
+								unload: this._onMaterialUnload
+							},
+							this
+						)
+					);
+				}
+				if (value[i]) {
+					const id = value[i] instanceof Asset ? value[i].id : value[i];
+					if (this._materialReferences[i].id !== id) {
+						this._materialReferences[i].id = id;
+					}
+					if (this._materialReferences[i].asset) {
+						this._onMaterialAdded(i, this, this._materialReferences[i].asset);
+					}
+				} else {
+					this._materialReferences[i].id = null;
+					if (this._meshInstances[i]) {
+						this._meshInstances[i].material = this.system.defaultMaterial;
+					}
+				}
+			}
+		}
+		get materialAssets() {
+			return this._materialReferences.map((ref) => {
+				return ref.id;
+			});
+		}
+		set asset(value) {
+			const id = value instanceof Asset ? value.id : value;
+			if (this._assetReference.id === id) return;
+			if (this._assetReference.asset && this._assetReference.asset.resource) {
+				this._onRenderAssetRemove();
+			}
+			this._assetReference.id = id;
+			if (this._assetReference.asset) {
+				this._onRenderAssetAdded();
+			}
+		}
+		get asset() {
+			return this._assetReference.id;
+		}
+		assignAsset(asset) {
+			const id = asset instanceof Asset ? asset.id : asset;
+			this._assetReference.id = id;
+		}
+		set rootBone(value) {
+			if (this._rootBone !== value) {
+				const isString = typeof value === "string";
+				if (this._rootBone && isString && this._rootBone.guid === value) {
+					return;
+				}
+				if (this._rootBone) {
+					this._clearSkinInstances();
+				}
+				if (value instanceof GraphNode) {
+					this._rootBone = value;
+				} else if (isString) {
+					this._rootBone = this.system.app.getEntityFromIndex(value) || null;
+					if (!this._rootBone) ;
+				} else {
+					this._rootBone = null;
+				}
+				if (this._rootBone) {
+					this._cloneSkinInstances();
+				}
+			}
+		}
+		get rootBone() {
+			return this._rootBone;
+		}
+		destroyMeshInstances() {
+			const meshInstances = this._meshInstances;
+			if (meshInstances) {
+				this.removeFromLayers();
+				this._clearSkinInstances();
+				for (let i = 0; i < meshInstances.length; i++) {
+					meshInstances[i].destroy();
+				}
+				this._meshInstances.length = 0;
+			}
+		}
+		addToLayers() {
+			const layers = this.system.app.scene.layers;
+			for (let i = 0; i < this._layers.length; i++) {
+				const layer = layers.getLayerById(this._layers[i]);
+				if (layer) {
+					layer.addMeshInstances(this._meshInstances);
+				}
+			}
+		}
+		removeFromLayers() {
+			if (this._meshInstances && this._meshInstances.length) {
+				const layers = this.system.app.scene.layers;
+				for (let i = 0; i < this._layers.length; i++) {
+					const layer = layers.getLayerById(this._layers[i]);
+					if (layer) {
+						layer.removeMeshInstances(this._meshInstances);
+					}
+				}
+			}
+		}
+		onRemoveChild() {
+			this.removeFromLayers();
+		}
+		onInsertChild() {
+			if (this._meshInstances && this.enabled && this.entity.enabled) {
+				this.addToLayers();
+			}
+		}
+		onBeforeRemove() {
+			this.destroyMeshInstances();
+			this.asset = null;
+			this.materialAsset = null;
+			this._assetReference.id = null;
+			for (let i = 0; i < this._materialReferences.length; i++) {
+				this._materialReferences[i].id = null;
+			}
+			this.entity.off("remove", this.onRemoveChild, this);
+			this.entity.off("insert", this.onInsertChild, this);
+		}
+		onLayersChanged(oldComp, newComp) {
+			this.addToLayers();
+			oldComp.off("add", this.onLayerAdded, this);
+			oldComp.off("remove", this.onLayerRemoved, this);
+			newComp.on("add", this.onLayerAdded, this);
+			newComp.on("remove", this.onLayerRemoved, this);
+		}
+		onLayerAdded(layer) {
+			const index = this.layers.indexOf(layer.id);
+			if (index < 0) return;
+			layer.addMeshInstances(this._meshInstances);
+		}
+		onLayerRemoved(layer) {
+			const index = this.layers.indexOf(layer.id);
+			if (index < 0) return;
+			layer.removeMeshInstances(this._meshInstances);
+		}
+		onEnable() {
+			const app = this.system.app;
+			const scene = app.scene;
+			const layers = scene.layers;
+			if (this._rootBone) {
+				this._cloneSkinInstances();
+			}
+			this._evtLayersChanged = scene.on("set:layers", this.onLayersChanged, this);
+			if (layers) {
+				this._evtLayerAdded = layers.on("add", this.onLayerAdded, this);
+				this._evtLayerRemoved = layers.on("remove", this.onLayerRemoved, this);
+			}
+			const isAsset = this._type === "asset";
+			if (this._meshInstances && this._meshInstances.length) {
+				this.addToLayers();
+			} else if (isAsset && this.asset) {
+				this._onRenderAssetAdded();
+			}
+			for (let i = 0; i < this._materialReferences.length; i++) {
+				if (this._materialReferences[i].asset) {
+					this.system.app.assets.load(this._materialReferences[i].asset);
+				}
+			}
+			if (this._batchGroupId >= 0) {
+				app.batcher?.insert(BatchGroup.RENDER, this.batchGroupId, this.entity);
+			}
+		}
+		onDisable() {
+			const app = this.system.app;
+			const scene = app.scene;
+			const layers = scene.layers;
+			this._evtLayersChanged?.off();
+			this._evtLayersChanged = null;
+			if (this._rootBone) {
+				this._clearSkinInstances();
+			}
+			if (layers) {
+				this._evtLayerAdded?.off();
+				this._evtLayerAdded = null;
+				this._evtLayerRemoved?.off();
+				this._evtLayerRemoved = null;
+			}
+			if (this._batchGroupId >= 0) {
+				app.batcher?.remove(BatchGroup.RENDER, this.batchGroupId, this.entity);
+			}
+			this.removeFromLayers();
+		}
+		hide() {
+			if (this._meshInstances) {
+				for (let i = 0; i < this._meshInstances.length; i++) {
+					this._meshInstances[i].visible = false;
+				}
+			}
+		}
+		show() {
+			if (this._meshInstances) {
+				for (let i = 0; i < this._meshInstances.length; i++) {
+					this._meshInstances[i].visible = true;
+				}
+			}
+		}
+		_onRenderAssetAdded() {
+			if (!this._assetReference.asset) return;
+			if (this._assetReference.asset.resource) {
+				this._onRenderAssetLoad();
+			} else if (this.enabled && this.entity.enabled) {
+				this.system.app.assets.load(this._assetReference.asset);
+			}
+		}
+		_onRenderAssetLoad() {
+			this.destroyMeshInstances();
+			if (this._assetReference.asset) {
+				const render = this._assetReference.asset.resource;
+				this._evtSetMeshes?.off();
+				this._evtSetMeshes = render.on("set:meshes", this._onSetMeshes, this);
+				if (render.meshes) {
+					this._onSetMeshes(render.meshes);
+				}
+			}
+		}
+		_onSetMeshes(meshes) {
+			this._cloneMeshes(meshes);
+		}
+		_clearSkinInstances() {
+			for (let i = 0; i < this._meshInstances.length; i++) {
+				const meshInstance = this._meshInstances[i];
+				SkinInstanceCache.removeCachedSkinInstance(meshInstance.skinInstance);
+				meshInstance.skinInstance = null;
+			}
+		}
+		_cloneSkinInstances() {
+			if (this._meshInstances.length && this._rootBone instanceof GraphNode) {
+				for (let i = 0; i < this._meshInstances.length; i++) {
+					const meshInstance = this._meshInstances[i];
+					const mesh = meshInstance.mesh;
+					if (mesh.skin && !meshInstance.skinInstance) {
+						meshInstance.skinInstance = SkinInstanceCache.createCachedSkinInstance(mesh.skin, this._rootBone, this.entity);
+					}
+				}
+			}
+		}
+		_cloneMeshes(meshes) {
+			if (meshes && meshes.length) {
+				const meshInstances = [];
+				for (let i = 0; i < meshes.length; i++) {
+					const mesh = meshes[i];
+					const material = this._materialReferences[i] && this._materialReferences[i].asset && this._materialReferences[i].asset.resource;
+					const meshInst = new MeshInstance(mesh, material || this.system.defaultMaterial, this.entity);
+					meshInstances.push(meshInst);
+					if (mesh.morph) {
+						meshInst.morphInstance = new MorphInstance(mesh.morph);
+					}
+				}
+				this.meshInstances = meshInstances;
+				this._cloneSkinInstances();
+			}
+		}
+		_onRenderAssetUnload() {
+			if (this._type === "asset") {
+				this.destroyMeshInstances();
+			}
+		}
+		_onRenderAssetRemove() {
+			this._evtSetMeshes?.off();
+			this._evtSetMeshes = null;
+			this._onRenderAssetUnload();
+		}
+		_onMaterialAdded(index, component, asset) {
+			if (asset.resource) {
+				this._onMaterialLoad(index, component, asset);
+			} else {
+				if (this.enabled && this.entity.enabled) {
+					this.system.app.assets.load(asset);
+				}
+			}
+		}
+		_updateMainMaterial(index, material) {
+			if (index === 0) {
+				this.material = material;
+			}
+		}
+		_onMaterialLoad(index, component, asset) {
+			if (this._meshInstances[index]) {
+				this._meshInstances[index].material = asset.resource;
+			}
+			this._updateMainMaterial(index, asset.resource);
+		}
+		_onMaterialRemove(index, component, asset) {
+			if (this._meshInstances[index]) {
+				this._meshInstances[index].material = this.system.defaultMaterial;
+			}
+			this._updateMainMaterial(index, this.system.defaultMaterial);
+		}
+		_onMaterialUnload(index, component, asset) {
+			if (this._meshInstances[index]) {
+				this._meshInstances[index].material = this.system.defaultMaterial;
+			}
+			this._updateMainMaterial(index, this.system.defaultMaterial);
+		}
+		resolveDuplicatedEntityReferenceProperties(oldRender, duplicatedIdsMap) {
+			if (oldRender.rootBone) {
+				this.rootBone = duplicatedIdsMap[oldRender.rootBone.guid];
+			}
+		}
+	}
+
+	const _properties$2 = [
+		"material",
+		"meshInstances",
+		"asset",
+		"materialAssets",
+		"castShadows",
+		"receiveShadows",
+		"castShadowsLightmap",
+		"lightmapped",
+		"lightmapSizeMultiplier",
+		"renderStyle",
+		"type",
+		"layers",
+		"isStatic",
+		"batchGroupId",
+		"rootBone"
+	];
+	class RenderComponentSystem extends ComponentSystem {
+		constructor(app) {
+			super(app);
+			this.id = "render";
+			this.ComponentType = RenderComponent;
+			this.defaultMaterial = getDefaultMaterial(app.graphicsDevice);
+			this.on("beforeremove", this.onBeforeRemove, this);
+		}
+		initializeComponentData(component, _data, properties) {
+			if (_data.batchGroupId === null || _data.batchGroupId === void 0) {
+				_data.batchGroupId = -1;
+			}
+			if (_data.layers && _data.layers.length) {
+				_data.layers = _data.layers.slice(0);
+			}
+			for (let i = 0; i < _properties$2.length; i++) {
+				if (_data.hasOwnProperty(_properties$2[i])) {
+					component[_properties$2[i]] = _data[_properties$2[i]];
+				}
+			}
+			if (_data.aabbCenter && _data.aabbHalfExtents) {
+				component.customAabb = new BoundingBox(new Vec3(_data.aabbCenter), new Vec3(_data.aabbHalfExtents));
+			}
+			super.initializeComponentData(component, _data);
+		}
+		cloneComponent(entity, clone) {
+			const data = {};
+			for (let i = 0; i < _properties$2.length; i++) {
+				data[_properties$2[i]] = entity.render[_properties$2[i]];
+			}
+			data.enabled = entity.render.enabled;
+			delete data.meshInstances;
+			const component = this.addComponent(clone, data);
+			const srcMeshInstances = entity.render.meshInstances;
+			const meshes = srcMeshInstances.map((mi) => mi.mesh);
+			component._onSetMeshes(meshes);
+			for (let m = 0; m < srcMeshInstances.length; m++) {
+				component.meshInstances[m].material = srcMeshInstances[m].material;
+			}
+			if (entity.render.customAabb) {
+				component.customAabb = entity.render.customAabb.clone();
+			}
+			return component;
+		}
+		onBeforeRemove(entity, component) {
+			component.onBeforeRemove();
 		}
 	}
 
@@ -59480,6 +61010,1424 @@ fn getColor() -> vec4f {
 		}
 	}
 
+	function BasisWorker() {
+		const BASIS_FORMAT = {
+			cTFETC1: 0,
+			// etc1
+			cTFETC2: 1,
+			// etc2
+			cTFBC1: 2,
+			// dxt1
+			cTFBC3: 3,
+			// dxt5
+			cTFPVRTC1_4_RGB: 8,
+			// PVRTC1 rgb
+			cTFPVRTC1_4_RGBA: 9,
+			// PVRTC1 rgba
+			cTFASTC_4x4: 10,
+			// ASTC
+			cTFATC_RGB: 11,
+			// ATC rgb
+			cTFATC_RGBA_INTERPOLATED_ALPHA: 12,
+			// ATC rgba
+			// uncompressed (fallback) formats
+			cTFRGBA32: 13,
+			// rgba 8888
+			cTFRGB565: 14,
+			// rgb 565
+			cTFRGBA4444: 16
+			// rgba 4444
+		};
+		const opaqueMapping = {
+			astc: BASIS_FORMAT.cTFASTC_4x4,
+			dxt: BASIS_FORMAT.cTFBC1,
+			etc1: BASIS_FORMAT.cTFETC1,
+			etc2: BASIS_FORMAT.cTFETC1,
+			pvr: BASIS_FORMAT.cTFPVRTC1_4_RGB,
+			atc: BASIS_FORMAT.cTFATC_RGB,
+			none: BASIS_FORMAT.cTFRGB565
+		};
+		const alphaMapping = {
+			astc: BASIS_FORMAT.cTFASTC_4x4,
+			dxt: BASIS_FORMAT.cTFBC3,
+			etc1: BASIS_FORMAT.cTFRGBA4444,
+			etc2: BASIS_FORMAT.cTFETC2,
+			pvr: BASIS_FORMAT.cTFPVRTC1_4_RGBA,
+			atc: BASIS_FORMAT.cTFATC_RGBA_INTERPOLATED_ALPHA,
+			none: BASIS_FORMAT.cTFRGBA4444
+		};
+		const PIXEL_FORMAT = {
+			ETC1: 21,
+			ETC2_RGB: 22,
+			ETC2_RGBA: 23,
+			DXT1: 8,
+			DXT5: 10,
+			PVRTC_4BPP_RGB_1: 26,
+			PVRTC_4BPP_RGBA_1: 27,
+			ASTC_4x4: 28,
+			ATC_RGB: 29,
+			ATC_RGBA: 30,
+			R8_G8_B8_A8: 7,
+			R5_G6_B5: 3,
+			R4_G4_B4_A4: 5
+		};
+		const basisToEngineMapping = (basisFormat, deviceDetails) => {
+			switch (basisFormat) {
+				case BASIS_FORMAT.cTFETC1:
+					return deviceDetails.formats.etc2 ? PIXEL_FORMAT.ETC2_RGB : PIXEL_FORMAT.ETC1;
+				case BASIS_FORMAT.cTFETC2:
+					return PIXEL_FORMAT.ETC2_RGBA;
+				case BASIS_FORMAT.cTFBC1:
+					return PIXEL_FORMAT.DXT1;
+				case BASIS_FORMAT.cTFBC3:
+					return PIXEL_FORMAT.DXT5;
+				case BASIS_FORMAT.cTFPVRTC1_4_RGB:
+					return PIXEL_FORMAT.PVRTC_4BPP_RGB_1;
+				case BASIS_FORMAT.cTFPVRTC1_4_RGBA:
+					return PIXEL_FORMAT.PVRTC_4BPP_RGBA_1;
+				case BASIS_FORMAT.cTFASTC_4x4:
+					return PIXEL_FORMAT.ASTC_4x4;
+				case BASIS_FORMAT.cTFATC_RGB:
+					return PIXEL_FORMAT.ATC_RGB;
+				case BASIS_FORMAT.cTFATC_RGBA_INTERPOLATED_ALPHA:
+					return PIXEL_FORMAT.ATC_RGBA;
+				case BASIS_FORMAT.cTFRGBA32:
+					return PIXEL_FORMAT.R8_G8_B8_A8;
+				case BASIS_FORMAT.cTFRGB565:
+					return PIXEL_FORMAT.R5_G6_B5;
+				case BASIS_FORMAT.cTFRGBA4444:
+					return PIXEL_FORMAT.R4_G4_B4_A4;
+			}
+		};
+		const unswizzleGGGR = (data) => {
+			const genB = function(R, G) {
+				const r = R * (2 / 255) - 1;
+				const g = G * (2 / 255) - 1;
+				const b = Math.sqrt(1 - Math.min(1, r * r + g * g));
+				return Math.max(0, Math.min(255, Math.floor((b + 1) * 0.5 * 255)));
+			};
+			for (let offset = 0; offset < data.length; offset += 4) {
+				const R = data[offset + 3];
+				const G = data[offset + 1];
+				data[offset + 0] = R;
+				data[offset + 2] = genB(R, G);
+				data[offset + 3] = 255;
+			}
+			return data;
+		};
+		const pack565 = (data) => {
+			const result = new Uint16Array(data.length / 4);
+			for (let offset = 0; offset < data.length; offset += 4) {
+				const R = data[offset + 0];
+				const G = data[offset + 1];
+				const B = data[offset + 2];
+				result[offset / 4] = (R & 248) << 8 | // 5
+				(G & 252) << 3 | // 6
+				B >> 3;
+			}
+			return result;
+		};
+		const isPOT = (width, height) => {
+			return (width & width - 1) === 0 && (height & height - 1) === 0;
+		};
+		const performanceNow = () => {
+			return typeof performance !== "undefined" ? performance.now() : 0;
+		};
+		let basis;
+		let rgbPriority;
+		let rgbaPriority;
+		const chooseTargetFormat = (deviceDetails, hasAlpha, isUASTC) => {
+			if (isUASTC) {
+				if (deviceDetails.formats.astc) {
+					return "astc";
+				}
+			} else {
+				if (hasAlpha) {
+					if (deviceDetails.formats.etc2) {
+						return "etc2";
+					}
+				} else {
+					if (deviceDetails.formats.etc2) {
+						return "etc2";
+					}
+					if (deviceDetails.formats.etc1) {
+						return "etc1";
+					}
+				}
+			}
+			const testInOrder = (priority) => {
+				for (let i = 0; i < priority.length; ++i) {
+					const format = priority[i];
+					if (deviceDetails.formats[format]) {
+						return format;
+					}
+				}
+				return "none";
+			};
+			return testInOrder(hasAlpha ? rgbaPriority : rgbPriority);
+		};
+		const dimensionsValid = (width, height, format) => {
+			switch (format) {
+				// etc1, 2
+				case BASIS_FORMAT.cTFETC1:
+				case BASIS_FORMAT.cTFETC2:
+					return true;
+				// dxt1, 5
+				case BASIS_FORMAT.cTFBC1:
+				case BASIS_FORMAT.cTFBC3:
+					return (width & 3) === 0 && (height & 3) === 0;
+				// pvrtc
+				case BASIS_FORMAT.cTFPVRTC1_4_RGB:
+				case BASIS_FORMAT.cTFPVRTC1_4_RGBA:
+					return isPOT(width, height);
+				// astc
+				case BASIS_FORMAT.cTFASTC_4x4:
+					return true;
+				// atc
+				case BASIS_FORMAT.cTFATC_RGB:
+				case BASIS_FORMAT.cTFATC_RGBA_INTERPOLATED_ALPHA:
+					return true;
+			}
+			return false;
+		};
+		const transcodeKTX2 = (url, data, options) => {
+			if (!basis.KTX2File) {
+				throw new Error("Basis transcoder module does not include support for KTX2.");
+			}
+			const funcStart = performanceNow();
+			const basisFile = new basis.KTX2File(new Uint8Array(data));
+			const width = basisFile.getWidth();
+			const height = basisFile.getHeight();
+			const levels = basisFile.getLevels();
+			const hasAlpha = !!basisFile.getHasAlpha();
+			const isUASTC = basisFile.isUASTC && basisFile.isUASTC();
+			if (!width || !height || !levels) {
+				basisFile.close();
+				basisFile.delete();
+				throw new Error(`Invalid image dimensions url=${url} width=${width} height=${height} levels=${levels}`);
+			}
+			const format = chooseTargetFormat(options.deviceDetails, hasAlpha, isUASTC);
+			const unswizzle = !!options.isGGGR && format === "pvr";
+			let basisFormat;
+			if (unswizzle) {
+				basisFormat = BASIS_FORMAT.cTFRGBA32;
+			} else {
+				basisFormat = hasAlpha ? alphaMapping[format] : opaqueMapping[format];
+				if (!dimensionsValid(width, height, basisFormat)) {
+					basisFormat = hasAlpha ? BASIS_FORMAT.cTFRGBA32 : BASIS_FORMAT.cTFRGB565;
+				}
+			}
+			if (!basisFile.startTranscoding()) {
+				basisFile.close();
+				basisFile.delete();
+				throw new Error(`Failed to start transcoding url=${url}`);
+			}
+			let i;
+			const levelData = [];
+			for (let mip = 0; mip < levels; ++mip) {
+				const dstSize = basisFile.getImageTranscodedSizeInBytes(mip, 0, 0, basisFormat);
+				const dst = new Uint8Array(dstSize);
+				if (!basisFile.transcodeImage(dst, mip, 0, 0, basisFormat, 0, -1, -1)) {
+					basisFile.close();
+					basisFile.delete();
+					throw new Error(`Failed to transcode image url=${url}`);
+				}
+				const is16BitFormat = basisFormat === BASIS_FORMAT.cTFRGB565 || basisFormat === BASIS_FORMAT.cTFRGBA4444;
+				levelData.push(is16BitFormat ? new Uint16Array(dst.buffer) : dst);
+			}
+			basisFile.close();
+			basisFile.delete();
+			if (unswizzle) {
+				basisFormat = BASIS_FORMAT.cTFRGB565;
+				for (i = 0; i < levelData.length; ++i) {
+					levelData[i] = pack565(unswizzleGGGR(levelData[i]));
+				}
+			}
+			return {
+				format: basisToEngineMapping(basisFormat, options.deviceDetails),
+				width,
+				height,
+				levels: levelData,
+				cubemap: false,
+				transcodeTime: performanceNow() - funcStart,
+				url,
+				unswizzledGGGR: unswizzle
+			};
+		};
+		const transcodeBasis = (url, data, options) => {
+			const funcStart = performanceNow();
+			const basisFile = new basis.BasisFile(new Uint8Array(data));
+			const width = basisFile.getImageWidth(0, 0);
+			const height = basisFile.getImageHeight(0, 0);
+			const images = basisFile.getNumImages();
+			const levels = basisFile.getNumLevels(0);
+			const hasAlpha = !!basisFile.getHasAlpha();
+			const isUASTC = basisFile.isUASTC && basisFile.isUASTC();
+			if (!width || !height || !images || !levels) {
+				basisFile.close();
+				basisFile.delete();
+				throw new Error(`Invalid image dimensions url=${url} width=${width} height=${height} images=${images} levels=${levels}`);
+			}
+			const format = chooseTargetFormat(options.deviceDetails, hasAlpha, isUASTC);
+			const unswizzle = !!options.isGGGR && format === "pvr";
+			let basisFormat;
+			if (unswizzle) {
+				basisFormat = BASIS_FORMAT.cTFRGBA32;
+			} else {
+				basisFormat = hasAlpha ? alphaMapping[format] : opaqueMapping[format];
+				if (!dimensionsValid(width, height, basisFormat)) {
+					basisFormat = hasAlpha ? BASIS_FORMAT.cTFRGBA32 : BASIS_FORMAT.cTFRGB565;
+				}
+			}
+			if (!basisFile.startTranscoding()) {
+				basisFile.close();
+				basisFile.delete();
+				throw new Error(`Failed to start transcoding url=${url}`);
+			}
+			let i;
+			const levelData = [];
+			for (let mip = 0; mip < levels; ++mip) {
+				const dstSize = basisFile.getImageTranscodedSizeInBytes(0, mip, basisFormat);
+				const dst = new Uint8Array(dstSize);
+				if (!basisFile.transcodeImage(dst, 0, mip, basisFormat, 0, 0)) {
+					if (mip === levels - 1 && dstSize === levelData[mip - 1].buffer.byteLength) {
+						dst.set(new Uint8Array(levelData[mip - 1].buffer));
+						console.warn(`Failed to transcode last mipmap level, using previous level instead url=${url}`);
+					} else {
+						basisFile.close();
+						basisFile.delete();
+						throw new Error(`Failed to transcode image url=${url}`);
+					}
+				}
+				const is16BitFormat = basisFormat === BASIS_FORMAT.cTFRGB565 || basisFormat === BASIS_FORMAT.cTFRGBA4444;
+				levelData.push(is16BitFormat ? new Uint16Array(dst.buffer) : dst);
+			}
+			basisFile.close();
+			basisFile.delete();
+			if (unswizzle) {
+				basisFormat = BASIS_FORMAT.cTFRGB565;
+				for (i = 0; i < levelData.length; ++i) {
+					levelData[i] = pack565(unswizzleGGGR(levelData[i]));
+				}
+			}
+			return {
+				format: basisToEngineMapping(basisFormat, options.deviceDetails),
+				width,
+				height,
+				levels: levelData,
+				cubemap: false,
+				transcodeTime: performanceNow() - funcStart,
+				url,
+				unswizzledGGGR: unswizzle
+			};
+		};
+		const transcode = (url, data, options) => {
+			return options.isKTX2 ? transcodeKTX2(url, data, options) : transcodeBasis(url, data, options);
+		};
+		const workerTranscode = (url, data, options) => {
+			try {
+				const result = transcode(url, data, options);
+				result.levels = result.levels.map((v) => v.buffer);
+				self.postMessage({ url, data: result }, result.levels);
+			} catch (err) {
+				self.postMessage({ url, err }, null);
+			}
+		};
+		const workerInit = (config, callback) => {
+			const instantiateWasmFunc = (imports, successCallback) => {
+				WebAssembly.instantiate(config.module, imports).then((result) => {
+					successCallback(result);
+				}).catch((reason) => {
+					console.error(`instantiate failed + ${reason}`);
+				});
+				return {};
+			};
+			self.BASIS(config.module ? { instantiateWasm: instantiateWasmFunc } : null).then((instance) => {
+				instance.initializeBasis();
+				basis = instance;
+				rgbPriority = config.rgbPriority;
+				rgbaPriority = config.rgbaPriority;
+				callback(null);
+			});
+		};
+		const queue = [];
+		self.onmessage = (message) => {
+			const data = message.data;
+			switch (data.type) {
+				case "init":
+					workerInit(data.config, () => {
+						for (let i = 0; i < queue.length; ++i) {
+							workerTranscode(queue[i].url, queue[i].data, queue[i].options);
+						}
+						queue.length = 0;
+					});
+					break;
+				case "transcode":
+					if (basis) {
+						workerTranscode(data.url, data.data, data.options);
+					} else {
+						queue.push(data);
+					}
+					break;
+			}
+		};
+	}
+
+	const getCompressionFormats = (device) => {
+		return {
+			astc: !!device.extCompressedTextureASTC,
+			atc: !!device.extCompressedTextureATC,
+			dxt: !!device.extCompressedTextureS3TC,
+			etc1: !!device.extCompressedTextureETC1,
+			etc2: !!device.extCompressedTextureETC,
+			pvr: !!device.extCompressedTexturePVRTC
+		};
+	};
+	const prepareWorkerModules = (config, callback) => {
+		const getWorkerBlob = (basisCode) => {
+			const code = [
+				"/* basis */",
+				basisCode,
+				"",
+				`(${BasisWorker.toString()})()
+
+`
+			].join("\n");
+			return new Blob([code], { type: "application/javascript" });
+		};
+		const wasmSupported = () => {
+			try {
+				if (typeof WebAssembly === "object" && typeof WebAssembly.instantiate === "function") {
+					const module = new WebAssembly.Module(Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0));
+					if (module instanceof WebAssembly.Module) {
+						return new WebAssembly.Instance(module) instanceof WebAssembly.Instance;
+					}
+				}
+			} catch (e) {
+			}
+			return false;
+		};
+		const sendResponse = (basisCode, module) => {
+			callback(null, {
+				workerUrl: URL.createObjectURL(getWorkerBlob(basisCode)),
+				module,
+				rgbPriority: config.rgbPriority,
+				rgbaPriority: config.rgbaPriority
+			});
+		};
+		const options = {
+			cache: true,
+			responseType: "text",
+			retry: config.maxRetries > 0,
+			maxRetries: config.maxRetries
+		};
+		if (config.glueUrl && config.wasmUrl && wasmSupported()) {
+			let basisCode = null;
+			let module = null;
+			http.get(config.glueUrl, options, (err, response) => {
+				if (err) {
+					callback(err);
+				} else {
+					if (module) {
+						sendResponse(response, module);
+					} else {
+						basisCode = response;
+					}
+				}
+			});
+			const fetchPromise = fetch(config.wasmUrl);
+			const compileManual = () => {
+				fetchPromise.then((result) => result.arrayBuffer()).then((buffer) => WebAssembly.compile(buffer)).then((module_) => {
+					if (basisCode) {
+						sendResponse(basisCode, module_);
+					} else {
+						module = module_;
+					}
+				}).catch((err) => {
+					callback(err, null);
+				});
+			};
+			if (WebAssembly.compileStreaming) {
+				WebAssembly.compileStreaming(fetchPromise).then((module_) => {
+					if (basisCode) {
+						sendResponse(basisCode, module_);
+					} else {
+						module = module_;
+					}
+				}).catch((err) => {
+					compileManual();
+				});
+			} else {
+				compileManual();
+			}
+		} else {
+			http.get(config.fallbackUrl, options, (err, response) => {
+				if (err) {
+					callback(err, null);
+				} else {
+					sendResponse(response, null);
+				}
+			});
+		}
+	};
+	class BasisQueue {
+		constructor() {
+			this.callbacks = {};
+			this.queue = [];
+			this.clients = [];
+		}
+		enqueueJob(url, data, callback, options) {
+			if (this.callbacks.hasOwnProperty(url)) {
+				this.callbacks[url].push(callback);
+			} else {
+				this.callbacks[url] = [callback];
+				const job = {
+					url,
+					data,
+					options
+				};
+				if (this.clients.length > 0) {
+					this.clients.shift().run(job);
+				} else {
+					this.queue.push(job);
+				}
+			}
+		}
+		enqueueClient(client) {
+			if (this.queue.length > 0) {
+				client.run(this.queue.shift());
+			} else {
+				this.clients.push(client);
+			}
+		}
+		handleResponse(url, err, data) {
+			const callback = this.callbacks[url];
+			if (err) {
+				for (let i = 0; i < callback.length; ++i) {
+					callback[i](err);
+				}
+			} else {
+				if (data.format === PIXELFORMAT_RGB565 || data.format === PIXELFORMAT_RGBA4) {
+					data.levels = data.levels.map((v) => {
+						return new Uint16Array(v);
+					});
+				} else {
+					data.levels = data.levels.map((v) => {
+						return new Uint8Array(v);
+					});
+				}
+				for (let i = 0; i < callback.length; ++i) {
+					callback[i](null, data);
+				}
+			}
+			delete this.callbacks[url];
+		}
+	}
+	class BasisClient {
+		constructor(queue2, config, eager) {
+			this.queue = queue2;
+			this.worker = new Worker(config.workerUrl);
+			this.worker.addEventListener("message", (message) => {
+				const data = message.data;
+				this.queue.handleResponse(data.url, data.err, data.data);
+				if (!this.eager) {
+					this.queue.enqueueClient(this);
+				}
+			});
+			this.worker.postMessage({ type: "init", config });
+			this.eager = eager;
+		}
+		run(job) {
+			const transfer = [];
+			if (job.data instanceof ArrayBuffer) {
+				transfer.push(job.data);
+			}
+			this.worker.postMessage({
+				type: "transcode",
+				url: job.url,
+				format: job.format,
+				data: job.data,
+				options: job.options
+			}, transfer);
+			if (this.eager) {
+				this.queue.enqueueClient(this);
+			}
+		}
+	}
+	const defaultNumWorkers = 1;
+	const defaultRgbPriority = ["etc2", "etc1", "astc", "dxt", "pvr", "atc"];
+	const defaultRgbaPriority = ["astc", "dxt", "etc2", "pvr", "atc"];
+	const defaultMaxRetries = 5;
+	const queue = new BasisQueue();
+	let lazyConfig = null;
+	let initializing = false;
+	function basisInitialize(config) {
+		if (initializing) {
+			return;
+		}
+		if (!config) {
+			config = lazyConfig || {};
+		} else if (config.lazyInit) {
+			lazyConfig = config;
+			return;
+		}
+		if (!config.glueUrl || !config.wasmUrl || !config.fallbackUrl) {
+			const moduleConfig = WasmModule.getConfig("BASIS");
+			if (moduleConfig) {
+				config = {
+					glueUrl: moduleConfig.glueUrl,
+					wasmUrl: moduleConfig.wasmUrl,
+					fallbackUrl: moduleConfig.fallbackUrl,
+					numWorkers: moduleConfig.numWorkers
+				};
+			}
+		}
+		if (config.glueUrl || config.wasmUrl || config.fallbackUrl) {
+			initializing = true;
+			const numWorkers = Math.max(1, Math.min(16, config.numWorkers || defaultNumWorkers));
+			const eagerWorkers = config.numWorkers === 1 || (config.hasOwnProperty("eagerWorkers") ? config.eagerWorkers : true);
+			config.rgbPriority = config.rgbPriority || defaultRgbPriority;
+			config.rgbaPriority = config.rgbaPriority || defaultRgbaPriority;
+			config.maxRetries = config.hasOwnProperty("maxRetries") ? config.maxRetries : defaultMaxRetries;
+			prepareWorkerModules(config, (err, clientConfig) => {
+				if (err) {
+					console.error(`failed to initialize basis worker: ${err}`);
+				} else {
+					for (let i = 0; i < numWorkers; ++i) {
+						queue.enqueueClient(new BasisClient(queue, clientConfig, eagerWorkers));
+					}
+				}
+			});
+		}
+	}
+	let deviceDetails = null;
+	function basisTranscode(device, url, data, callback, options) {
+		basisInitialize();
+		if (!deviceDetails) {
+			deviceDetails = {
+				formats: getCompressionFormats(device)
+			};
+		}
+		queue.enqueueJob(url, data, callback, {
+			deviceDetails,
+			isGGGR: !!options?.isGGGR,
+			isKTX2: !!options?.isKTX2
+		});
+		return initializing;
+	}
+
+	class TextureParser {
+		load(url, callback, asset) {
+			throw new Error("not implemented");
+		}
+		/* eslint-disable jsdoc/require-returns-check */
+		open(url, data, device) {
+			throw new Error("not implemented");
+		}
+		/* eslint-enable jsdoc/require-returns-check */
+	}
+
+	class BasisParser extends TextureParser {
+		constructor(registry, device) {
+			super();
+			this.device = device;
+			this.maxRetries = 0;
+		}
+		load(url, callback, asset) {
+			const device = this.device;
+			const transcode = (data) => {
+				const basisModuleFound = basisTranscode(
+					device,
+					url.load,
+					data,
+					callback,
+					{ isGGGR: (asset?.file?.variants?.basis?.opt & 8) !== 0 }
+				);
+				if (!basisModuleFound) {
+					callback(`Basis module not found. Asset [${asset.name}](${asset.getFileUrl()}) basis texture variant will not be loaded.`);
+				}
+			};
+			Asset.fetchArrayBuffer(url.load, (err, result) => {
+				if (err) {
+					callback(err);
+				} else {
+					transcode(result);
+				}
+			}, asset, this.maxRetries);
+		}
+		// our async transcode call provides the neat structure we need to create the texture instance
+		open(url, data, device, textureOptions = {}) {
+			const format = textureOptions.srgb ? pixelFormatLinearToGamma(data.format) : data.format;
+			const texture = new Texture(device, {
+				name: url,
+				addressU: data.cubemap ? ADDRESS_CLAMP_TO_EDGE : ADDRESS_REPEAT,
+				addressV: data.cubemap ? ADDRESS_CLAMP_TO_EDGE : ADDRESS_REPEAT,
+				width: data.width,
+				height: data.height,
+				format,
+				cubemap: data.cubemap,
+				levels: data.levels,
+				...textureOptions
+			});
+			texture.upload();
+			return texture;
+		}
+	}
+
+	class ImgParser extends TextureParser {
+		constructor(registry, device) {
+			super();
+			this.crossOrigin = registry.prefix ? "anonymous" : null;
+			this.maxRetries = 0;
+			this.device = device;
+		}
+		load(url, callback, asset) {
+			const hasContents = !!asset?.file?.contents;
+			if (hasContents) {
+				if (this.device.supportsImageBitmap) {
+					this._loadImageBitmapFromBlob(new Blob([asset.file.contents]), callback);
+					return;
+				}
+				url = {
+					load: URL.createObjectURL(new Blob([asset.file.contents])),
+					original: url.original
+				};
+			}
+			const handler = (err, result) => {
+				if (hasContents) {
+					URL.revokeObjectURL(url.load);
+				}
+				callback(err, result);
+			};
+			let crossOrigin;
+			if (asset && asset.options && asset.options.hasOwnProperty("crossOrigin")) {
+				crossOrigin = asset.options.crossOrigin;
+			} else if (ABSOLUTE_URL.test(url.load)) {
+				crossOrigin = this.crossOrigin;
+			}
+			if (this.device.supportsImageBitmap) {
+				this._loadImageBitmap(url.load, url.original, crossOrigin, handler, asset);
+			} else {
+				this._loadImage(url.load, url.original, crossOrigin, handler, asset);
+			}
+		}
+		open(url, data, device, textureOptions = {}) {
+			const texture = new Texture(device, {
+				name: url,
+				width: data.width,
+				height: data.height,
+				format: textureOptions.srgb ? PIXELFORMAT_SRGBA8 : PIXELFORMAT_RGBA8,
+				...textureOptions
+			});
+			texture.setSource(data);
+			return texture;
+		}
+		_loadImage(url, originalUrl, crossOrigin, callback, asset) {
+			const image = new Image();
+			if (crossOrigin) {
+				image.crossOrigin = crossOrigin;
+			}
+			let retries = 0;
+			const maxRetries = this.maxRetries;
+			let retryTimeout;
+			const dummySize = 1024 * 1024;
+			asset?.fire("progress", 0, dummySize);
+			image.onload = function() {
+				asset?.fire("progress", dummySize, dummySize);
+				callback(null, image);
+			};
+			image.onerror = function() {
+				if (retryTimeout) return;
+				if (maxRetries > 0 && ++retries <= maxRetries) {
+					const retryDelay = Math.pow(2, retries) * 100;
+					console.log(`Error loading Texture from: '${originalUrl}' - Retrying in ${retryDelay}ms...`);
+					const idx = url.indexOf("?");
+					const separator = idx >= 0 ? "&" : "?";
+					retryTimeout = setTimeout(() => {
+						image.src = `${url + separator}retry=${Date.now()}`;
+						retryTimeout = null;
+					}, retryDelay);
+				} else {
+					callback(`Error loading Texture from: '${originalUrl}'`);
+				}
+			};
+			image.src = url;
+		}
+		_loadImageBitmap(url, originalUrl, crossOrigin, callback, asset) {
+			const options = {
+				cache: true,
+				responseType: "blob",
+				retry: this.maxRetries > 0,
+				maxRetries: this.maxRetries,
+				progress: asset
+			};
+			http.get(url, options, (err, blob) => {
+				if (err) {
+					callback(err);
+				} else {
+					this._loadImageBitmapFromBlob(blob, callback);
+				}
+			});
+		}
+		_loadImageBitmapFromBlob(blob, callback) {
+			createImageBitmap(blob, {
+				premultiplyAlpha: "none",
+				colorSpaceConversion: "none"
+			}).then((imageBitmap) => callback(null, imageBitmap)).catch((e) => callback(e));
+		}
+	}
+
+	const IDENTIFIER = [1481919403, 3140563232, 169478669];
+	const KNOWN_FORMATS = {
+		// compressed formats
+		33776: PIXELFORMAT_DXT1,
+		33778: PIXELFORMAT_DXT3,
+		33779: PIXELFORMAT_DXT5,
+		36196: PIXELFORMAT_ETC1,
+		37492: PIXELFORMAT_ETC2_RGB,
+		37496: PIXELFORMAT_ETC2_RGBA,
+		35840: PIXELFORMAT_PVRTC_4BPP_RGB_1,
+		35841: PIXELFORMAT_PVRTC_2BPP_RGB_1,
+		35842: PIXELFORMAT_PVRTC_4BPP_RGBA_1,
+		35843: PIXELFORMAT_PVRTC_2BPP_RGBA_1,
+		// uncompressed formats
+		32849: PIXELFORMAT_RGB8,
+		// GL_RGB8
+		32856: PIXELFORMAT_RGBA8,
+		// GL_RGBA8
+		35905: PIXELFORMAT_SRGB8,
+		// GL_SRGB8
+		35907: PIXELFORMAT_SRGBA8,
+		// GL_SRGB8_ALPHA8
+		35898: PIXELFORMAT_111110F,
+		// GL_R11F_G11F_B10F
+		34843: PIXELFORMAT_RGB16F,
+		// GL_RGB16F
+		34842: PIXELFORMAT_RGBA16F
+		// GL_RGBA16F
+	};
+	function createContainer(pixelFormat, buffer, byteOffset, byteSize) {
+		return pixelFormat === PIXELFORMAT_111110F ? new Uint32Array(buffer, byteOffset, byteSize / 4) : new Uint8Array(buffer, byteOffset, byteSize);
+	}
+	class KtxParser extends TextureParser {
+		constructor(registry) {
+			super();
+			this.maxRetries = 0;
+		}
+		load(url, callback, asset) {
+			Asset.fetchArrayBuffer(url.load, callback, asset, this.maxRetries);
+		}
+		open(url, data, device, textureOptions = {}) {
+			const textureData = this.parse(data);
+			if (!textureData) {
+				return null;
+			}
+			const format = textureOptions.srgb ? pixelFormatLinearToGamma(textureData.format) : textureData.format;
+			const texture = new Texture(device, {
+				name: url,
+				addressU: textureData.cubemap ? ADDRESS_CLAMP_TO_EDGE : ADDRESS_REPEAT,
+				addressV: textureData.cubemap ? ADDRESS_CLAMP_TO_EDGE : ADDRESS_REPEAT,
+				width: textureData.width,
+				height: textureData.height,
+				format,
+				cubemap: textureData.cubemap,
+				levels: textureData.levels,
+				...textureOptions
+			});
+			texture.upload();
+			return texture;
+		}
+		parse(data) {
+			const dataU32 = new Uint32Array(data);
+			if (IDENTIFIER[0] !== dataU32[0] || IDENTIFIER[1] !== dataU32[1] || IDENTIFIER[2] !== dataU32[2]) {
+				return null;
+			}
+			const header = {
+				endianness: dataU32[3],
+				// todo: Use this information
+				glType: dataU32[4],
+				glTypeSize: dataU32[5],
+				glFormat: dataU32[6],
+				glInternalFormat: dataU32[7],
+				glBaseInternalFormat: dataU32[8],
+				pixelWidth: dataU32[9],
+				pixelHeight: dataU32[10],
+				pixelDepth: dataU32[11],
+				numberOfArrayElements: dataU32[12],
+				numberOfFaces: dataU32[13],
+				numberOfMipmapLevels: dataU32[14],
+				bytesOfKeyValueData: dataU32[15]
+			};
+			if (header.pixelDepth > 1) {
+				return null;
+			}
+			if (header.numberOfArrayElements !== 0) {
+				return null;
+			}
+			const format = KNOWN_FORMATS[header.glInternalFormat];
+			if (format === void 0) {
+				return null;
+			}
+			let offset = 16 + header.bytesOfKeyValueData / 4;
+			const isCubemap = header.numberOfFaces > 1;
+			const levels = [];
+			for (let mipmapLevel = 0; mipmapLevel < (header.numberOfMipmapLevels || 1); mipmapLevel++) {
+				const imageSizeInBytes = dataU32[offset++];
+				if (isCubemap) {
+					levels.push([]);
+				}
+				const target = isCubemap ? levels[mipmapLevel] : levels;
+				for (let face = 0; face < (isCubemap ? 6 : 1); ++face) {
+					target.push(createContainer(format, data, offset * 4, imageSizeInBytes));
+					offset += imageSizeInBytes + 3 >> 2;
+				}
+			}
+			return {
+				format,
+				width: header.pixelWidth,
+				height: header.pixelHeight,
+				levels,
+				cubemap: isCubemap
+			};
+		}
+	}
+
+	const KHRConstants = {
+		KHR_DF_MODEL_UASTC: 166
+	};
+	class Ktx2Parser extends TextureParser {
+		constructor(registry, device) {
+			super();
+			this.maxRetries = 0;
+			this.device = device;
+		}
+		load(url, callback, asset) {
+			Asset.fetchArrayBuffer(url.load, (err, result) => {
+				if (err) {
+					callback(err, result);
+				} else {
+					this.parse(result, url, callback, asset);
+				}
+			}, asset, this.maxRetries);
+		}
+		open(url, data, device, textureOptions = {}) {
+			const format = textureOptions.srgb ? pixelFormatLinearToGamma(data.format) : data.format;
+			const texture = new Texture(device, {
+				name: url,
+				addressU: data.cubemap ? ADDRESS_CLAMP_TO_EDGE : ADDRESS_REPEAT,
+				addressV: data.cubemap ? ADDRESS_CLAMP_TO_EDGE : ADDRESS_REPEAT,
+				width: data.width,
+				height: data.height,
+				format,
+				cubemap: data.cubemap,
+				levels: data.levels,
+				...textureOptions
+			});
+			texture.upload();
+			return texture;
+		}
+		parse(arraybuffer, url, callback, asset) {
+			const rs = new ReadStream(arraybuffer);
+			const magic = [rs.readU32be(), rs.readU32be(), rs.readU32be()];
+			if (magic[0] !== 2873840728 || magic[1] !== 540160187 || magic[2] !== 218765834) {
+				return null;
+			}
+			const header = {
+				vkFormat: rs.readU32(),
+				typeSize: rs.readU32(),
+				pixelWidth: rs.readU32(),
+				pixelHeight: rs.readU32(),
+				pixelDepth: rs.readU32(),
+				layerCount: rs.readU32(),
+				faceCount: rs.readU32(),
+				levelCount: rs.readU32(),
+				supercompressionScheme: rs.readU32()
+			};
+			const index = {
+				dfdByteOffset: rs.readU32(),
+				dfdByteLength: rs.readU32(),
+				kvdByteOffset: rs.readU32(),
+				kvdByteLength: rs.readU32(),
+				sgdByteOffset: rs.readU64(),
+				sgdByteLength: rs.readU64()
+			};
+			const levels = [];
+			for (let i = 0; i < Math.max(1, header.levelCount); ++i) {
+				levels.push({
+					byteOffset: rs.readU64(),
+					byteLength: rs.readU64(),
+					uncompressedByteLength: rs.readU64()
+				});
+			}
+			const dfdTotalSize = rs.readU32();
+			if (dfdTotalSize !== index.kvdByteOffset - index.dfdByteOffset) {
+				return null;
+			}
+			rs.skip(8);
+			const colorModel = rs.readU8();
+			rs.skip(index.dfdByteLength - 9);
+			rs.skip(index.kvdByteLength);
+			if (header.supercompressionScheme === 1 || colorModel === KHRConstants.KHR_DF_MODEL_UASTC) {
+				const basisModuleFound = basisTranscode(
+					this.device,
+					url.load,
+					arraybuffer,
+					callback,
+					{
+						isGGGR: (asset?.file?.variants?.basis?.opt & 8) !== 0,
+						isKTX2: true
+					}
+				);
+				if (!basisModuleFound) {
+					callback(`Basis module not found. Asset [${asset.name}](${asset.getFileUrl()}) basis texture variant will not be loaded.`);
+				}
+			} else {
+				callback("unsupported KTX2 pixel format");
+			}
+		}
+	}
+
+	class DdsParser extends TextureParser {
+		constructor(registry) {
+			super();
+			this.maxRetries = 0;
+		}
+		load(url, callback, asset) {
+			Asset.fetchArrayBuffer(url.load, callback, asset, this.maxRetries);
+		}
+		open(url, data, device, textureOptions = {}) {
+			const header = new Uint32Array(data, 0, 128 / 4);
+			const width = header[4];
+			const height = header[3];
+			const mips = Math.max(header[7], 1);
+			const isFourCc = header[20] === 4;
+			const fcc = header[21];
+			const bpp = header[22];
+			const isCubemap = header[28] === 65024;
+			const FCC_DXT1 = 827611204;
+			const FCC_DXT5 = 894720068;
+			const FCC_FP16 = 113;
+			const FCC_FP32 = 116;
+			const FCC_ETC1 = 826496069;
+			const FCC_PVRTC_2BPP_RGB_1 = 825438800;
+			const FCC_PVRTC_2BPP_RGBA_1 = 825504336;
+			const FCC_PVRTC_4BPP_RGB_1 = 825439312;
+			const FCC_PVRTC_4BPP_RGBA_1 = 825504848;
+			let compressed = false;
+			let etc1 = false;
+			let pvrtc2 = false;
+			let pvrtc4 = false;
+			let format = null;
+			let componentSize = 1;
+			let texture;
+			if (isFourCc) {
+				if (fcc === FCC_DXT1) {
+					format = PIXELFORMAT_DXT1;
+					compressed = true;
+				} else if (fcc === FCC_DXT5) {
+					format = PIXELFORMAT_DXT5;
+					compressed = true;
+				} else if (fcc === FCC_FP16) {
+					format = PIXELFORMAT_RGBA16F;
+					componentSize = 2;
+				} else if (fcc === FCC_FP32) {
+					format = PIXELFORMAT_RGBA32F;
+					componentSize = 4;
+				} else if (fcc === FCC_ETC1) {
+					format = PIXELFORMAT_ETC1;
+					compressed = true;
+					etc1 = true;
+				} else if (fcc === FCC_PVRTC_2BPP_RGB_1 || fcc === FCC_PVRTC_2BPP_RGBA_1) {
+					format = fcc === FCC_PVRTC_2BPP_RGB_1 ? PIXELFORMAT_PVRTC_2BPP_RGB_1 : PIXELFORMAT_PVRTC_2BPP_RGBA_1;
+					compressed = true;
+					pvrtc2 = true;
+				} else if (fcc === FCC_PVRTC_4BPP_RGB_1 || fcc === FCC_PVRTC_4BPP_RGBA_1) {
+					format = fcc === FCC_PVRTC_4BPP_RGB_1 ? PIXELFORMAT_PVRTC_4BPP_RGB_1 : PIXELFORMAT_PVRTC_4BPP_RGBA_1;
+					compressed = true;
+					pvrtc4 = true;
+				}
+			} else {
+				if (bpp === 32) {
+					format = PIXELFORMAT_RGBA8;
+				}
+			}
+			if (!format) {
+				texture = new Texture(device, {
+					width: 4,
+					height: 4,
+					format: PIXELFORMAT_RGB8,
+					name: "dds-legacy-empty"
+				});
+				return texture;
+			}
+			texture = new Texture(device, {
+				name: url,
+				addressU: isCubemap ? ADDRESS_CLAMP_TO_EDGE : ADDRESS_REPEAT,
+				addressV: isCubemap ? ADDRESS_CLAMP_TO_EDGE : ADDRESS_REPEAT,
+				width,
+				height,
+				format,
+				cubemap: isCubemap,
+				mipmaps: mips > 1,
+				...textureOptions
+			});
+			let offset = 128;
+			const faces = isCubemap ? 6 : 1;
+			let mipSize;
+			const DXT_BLOCK_WIDTH = 4;
+			const DXT_BLOCK_HEIGHT = 4;
+			const blockSize = fcc === FCC_DXT1 ? 8 : 16;
+			let numBlocksAcross, numBlocksDown, numBlocks;
+			for (let face = 0; face < faces; face++) {
+				let mipWidth = width;
+				let mipHeight = height;
+				for (let i = 0; i < mips; i++) {
+					if (compressed) {
+						if (etc1) {
+							mipSize = Math.floor((mipWidth + 3) / 4) * Math.floor((mipHeight + 3) / 4) * 8;
+						} else if (pvrtc2) {
+							mipSize = Math.max(mipWidth, 16) * Math.max(mipHeight, 8) / 4;
+						} else if (pvrtc4) {
+							mipSize = Math.max(mipWidth, 8) * Math.max(mipHeight, 8) / 2;
+						} else {
+							numBlocksAcross = Math.floor((mipWidth + DXT_BLOCK_WIDTH - 1) / DXT_BLOCK_WIDTH);
+							numBlocksDown = Math.floor((mipHeight + DXT_BLOCK_HEIGHT - 1) / DXT_BLOCK_HEIGHT);
+							numBlocks = numBlocksAcross * numBlocksDown;
+							mipSize = numBlocks * blockSize;
+						}
+					} else {
+						mipSize = mipWidth * mipHeight * 4;
+					}
+					const mipBuff = format === PIXELFORMAT_RGBA32F ? new Float32Array(data, offset, mipSize) : format === PIXELFORMAT_RGBA16F ? new Uint16Array(data, offset, mipSize) : new Uint8Array(data, offset, mipSize);
+					if (!isCubemap) {
+						texture._levels[i] = mipBuff;
+					} else {
+						if (!texture._levels[i]) texture._levels[i] = [];
+						texture._levels[i][face] = mipBuff;
+					}
+					offset += mipSize * componentSize;
+					mipWidth = Math.max(mipWidth * 0.5, 1);
+					mipHeight = Math.max(mipHeight * 0.5, 1);
+				}
+			}
+			texture.upload();
+			return texture;
+		}
+	}
+
+	class HdrParser extends TextureParser {
+		constructor(registry) {
+			super();
+			this.maxRetries = 0;
+		}
+		load(url, callback, asset) {
+			Asset.fetchArrayBuffer(url.load, callback, asset, this.maxRetries);
+			if (asset.data && !asset.data.type) {
+				asset.data.type = TEXTURETYPE_RGBE;
+			}
+		}
+		open(url, data, device, textureOptions = {}) {
+			const textureData = this.parse(data);
+			if (!textureData) {
+				return null;
+			}
+			const texture = new Texture(device, {
+				name: url,
+				addressU: ADDRESS_REPEAT,
+				addressV: ADDRESS_CLAMP_TO_EDGE,
+				minFilter: FILTER_NEAREST,
+				magFilter: FILTER_NEAREST,
+				width: textureData.width,
+				height: textureData.height,
+				levels: textureData.levels,
+				format: PIXELFORMAT_RGBA8,
+				type: TEXTURETYPE_RGBE,
+				// RGBE can't be filtered, so mipmaps are out of the question! (unless we generated them ourselves)
+				mipmaps: false,
+				...textureOptions
+			});
+			texture.upload();
+			return texture;
+		}
+		// https://floyd.lbl.gov/radiance/refer/filefmts.pdf with help from http://www.graphics.cornell.edu/~bjw/rgbe/rgbe.c
+		parse(data) {
+			const readStream = new ReadStream(data);
+			const magic = readStream.readLine();
+			if (!magic.startsWith("#?RADIANCE")) {
+				return null;
+			}
+			const variables = {};
+			while (true) {
+				const line = readStream.readLine();
+				if (line.length === 0) {
+					break;
+				} else {
+					const parts = line.split("=");
+					if (parts.length === 2) {
+						variables[parts[0]] = parts[1];
+					}
+				}
+			}
+			if (!variables.hasOwnProperty("FORMAT")) {
+				return null;
+			}
+			const resolution = readStream.readLine().split(" ");
+			if (resolution.length !== 4) {
+				return null;
+			}
+			const height = parseInt(resolution[1], 10);
+			const width = parseInt(resolution[3], 10);
+			const pixels = this._readPixels(readStream, width, height, resolution[0] === "-Y");
+			if (!pixels) {
+				return null;
+			}
+			return {
+				width,
+				height,
+				levels: [pixels]
+			};
+		}
+		_readPixels(readStream, width, height, flipY) {
+			if (width < 8 || width > 32767) {
+				return this._readPixelsFlat(readStream, width, height);
+			}
+			const rgbe = [0, 0, 0, 0];
+			readStream.readArray(rgbe);
+			if (rgbe[0] !== 2 || rgbe[1] !== 2 || (rgbe[2] & 128) !== 0) {
+				readStream.skip(-4);
+				return this._readPixelsFlat(readStream, width, height);
+			}
+			const buffer = new ArrayBuffer(width * height * 4);
+			const view = new Uint8Array(buffer);
+			let scanstart = flipY ? 0 : width * 4 * (height - 1);
+			let x, y, i, channel, count, value;
+			for (y = 0; y < height; ++y) {
+				if (y) {
+					readStream.readArray(rgbe);
+				}
+				if ((rgbe[2] << 8) + rgbe[3] !== width) {
+					return null;
+				}
+				for (channel = 0; channel < 4; ++channel) {
+					x = 0;
+					while (x < width) {
+						count = readStream.readU8();
+						if (count > 128) {
+							count -= 128;
+							if (x + count > width) {
+								return null;
+							}
+							value = readStream.readU8();
+							for (i = 0; i < count; ++i) {
+								view[scanstart + channel + 4 * x++] = value;
+							}
+						} else {
+							if (count === 0 || x + count > width) {
+								return null;
+							}
+							for (i = 0; i < count; ++i) {
+								view[scanstart + channel + 4 * x++] = readStream.readU8();
+							}
+						}
+					}
+				}
+				scanstart += width * 4 * (flipY ? 1 : -1);
+			}
+			return view;
+		}
+		_readPixelsFlat(readStream, width, height) {
+			return readStream.remainingBytes === width * height * 4 ? new Uint8Array(readStream.arraybuffer, readStream.offset) : null;
+		}
+	}
+
+	const JSON_ADDRESS_MODE = {
+		"repeat": ADDRESS_REPEAT,
+		"clamp": ADDRESS_CLAMP_TO_EDGE,
+		"mirror": ADDRESS_MIRRORED_REPEAT
+	};
+	const JSON_FILTER_MODE = {
+		"nearest": FILTER_NEAREST,
+		"linear": FILTER_LINEAR,
+		"nearest_mip_nearest": FILTER_NEAREST_MIPMAP_NEAREST,
+		"linear_mip_nearest": FILTER_LINEAR_MIPMAP_NEAREST,
+		"nearest_mip_linear": FILTER_NEAREST_MIPMAP_LINEAR,
+		"linear_mip_linear": FILTER_LINEAR_MIPMAP_LINEAR
+	};
+	const JSON_TEXTURE_TYPE = {
+		"default": TEXTURETYPE_DEFAULT,
+		"rgbm": TEXTURETYPE_RGBM,
+		"rgbe": TEXTURETYPE_RGBE,
+		"rgbp": TEXTURETYPE_RGBP,
+		"swizzleGGGR": TEXTURETYPE_SWIZZLEGGGR
+	};
+	const _completePartialMipmapChain = function(texture) {
+		const requiredMipLevels = TextureUtils.calcMipLevelsCount(texture._width, texture._height);
+		const isHtmlElement = function(object) {
+			return object instanceof HTMLCanvasElement || object instanceof HTMLImageElement || object instanceof HTMLVideoElement;
+		};
+		if (!(texture._format === PIXELFORMAT_RGBA8 || texture._format === PIXELFORMAT_RGBA32F) || texture._volume || texture._compressed || texture._levels.length === 1 || texture._levels.length === requiredMipLevels || isHtmlElement(texture._cubemap ? texture._levels[0][0] : texture._levels[0])) {
+			return;
+		}
+		const downsample = function(width, height, data) {
+			const sampledWidth = Math.max(1, width >> 1);
+			const sampledHeight = Math.max(1, height >> 1);
+			const sampledData = new data.constructor(sampledWidth * sampledHeight * 4);
+			const xs = Math.floor(width / sampledWidth);
+			const ys = Math.floor(height / sampledHeight);
+			const xsys = xs * ys;
+			for (let y = 0; y < sampledHeight; ++y) {
+				for (let x = 0; x < sampledWidth; ++x) {
+					for (let e = 0; e < 4; ++e) {
+						let sum = 0;
+						for (let sy = 0; sy < ys; ++sy) {
+							for (let sx = 0; sx < xs; ++sx) {
+								sum += data[(x * xs + sx + (y * ys + sy) * width) * 4 + e];
+							}
+						}
+						sampledData[(x + y * sampledWidth) * 4 + e] = sum / xsys;
+					}
+				}
+			}
+			return sampledData;
+		};
+		for (let level = texture._levels.length; level < requiredMipLevels; ++level) {
+			const width = Math.max(1, texture._width >> level - 1);
+			const height = Math.max(1, texture._height >> level - 1);
+			if (texture._cubemap) {
+				const mips = [];
+				for (let face = 0; face < 6; ++face) {
+					mips.push(downsample(width, height, texture._levels[level - 1][face]));
+				}
+				texture._levels.push(mips);
+			} else {
+				texture._levels.push(downsample(width, height, texture._levels[level - 1]));
+			}
+		}
+		texture._levelsUpdated = texture._cubemap ? [[true, true, true, true, true, true]] : [true];
+	};
+	class TextureHandler extends ResourceHandler {
+		constructor(app) {
+			super(app, "texture");
+			const assets = app.assets;
+			const device = app.graphicsDevice;
+			this._device = device;
+			this._assets = assets;
+			this.imgParser = new ImgParser(assets, device);
+			this.parsers = {
+				dds: new DdsParser(assets),
+				ktx: new KtxParser(assets),
+				ktx2: new Ktx2Parser(assets, device),
+				basis: new BasisParser(assets, device),
+				hdr: new HdrParser(assets)
+			};
+		}
+		set crossOrigin(value) {
+			this.imgParser.crossOrigin = value;
+		}
+		get crossOrigin() {
+			return this.imgParser.crossOrigin;
+		}
+		set maxRetries(value) {
+			this.imgParser.maxRetries = value;
+			for (const parser in this.parsers) {
+				if (this.parsers.hasOwnProperty(parser)) {
+					this.parsers[parser].maxRetries = value;
+				}
+			}
+		}
+		get maxRetries() {
+			return this.imgParser.maxRetries;
+		}
+		_getUrlWithoutParams(url) {
+			return url.indexOf("?") >= 0 ? url.split("?")[0] : url;
+		}
+		_getParser(url) {
+			const ext = path.getExtension(this._getUrlWithoutParams(url)).toLowerCase().replace(".", "");
+			return this.parsers[ext] || this.imgParser;
+		}
+		_getTextureOptions(asset) {
+			const options = {};
+			if (asset) {
+				if (asset.name?.length > 0) {
+					options.name = asset.name;
+				}
+				const assetData = asset.data;
+				if (assetData.hasOwnProperty("minfilter")) {
+					options.minFilter = JSON_FILTER_MODE[assetData.minfilter];
+				}
+				if (assetData.hasOwnProperty("magfilter")) {
+					options.magFilter = JSON_FILTER_MODE[assetData.magfilter];
+				}
+				if (assetData.hasOwnProperty("addressu")) {
+					options.addressU = JSON_ADDRESS_MODE[assetData.addressu];
+				}
+				if (assetData.hasOwnProperty("addressv")) {
+					options.addressV = JSON_ADDRESS_MODE[assetData.addressv];
+				}
+				if (assetData.hasOwnProperty("mipmaps")) {
+					options.mipmaps = assetData.mipmaps;
+				}
+				if (assetData.hasOwnProperty("anisotropy")) {
+					options.anisotropy = assetData.anisotropy;
+				}
+				if (assetData.hasOwnProperty("flipY")) {
+					options.flipY = !!assetData.flipY;
+				}
+				if (assetData.hasOwnProperty("srgb")) {
+					options.srgb = !!assetData.srgb;
+				}
+				options.type = TEXTURETYPE_DEFAULT;
+				if (assetData.hasOwnProperty("type")) {
+					options.type = JSON_TEXTURE_TYPE[assetData.type];
+				} else if (assetData.hasOwnProperty("rgbm") && assetData.rgbm) {
+					options.type = TEXTURETYPE_RGBM;
+				} else if (asset.file && (asset.file.opt & 8) !== 0) {
+					options.type = TEXTURETYPE_SWIZZLEGGGR;
+				}
+			}
+			return options;
+		}
+		load(url, callback, asset) {
+			if (typeof url === "string") {
+				url = {
+					load: url,
+					original: url
+				};
+			}
+			this._getParser(url.original).load(url, callback, asset);
+		}
+		open(url, data, asset) {
+			if (!url) {
+				return void 0;
+			}
+			const textureOptions = this._getTextureOptions(asset);
+			let texture = this._getParser(url).open(url, data, this._device, textureOptions);
+			if (texture === null) {
+				texture = new Texture(this._device, {
+					width: 4,
+					height: 4,
+					format: PIXELFORMAT_RGB8
+				});
+			} else {
+				_completePartialMipmapChain(texture);
+				if (data.unswizzledGGGR) {
+					asset.file.variants.basis.opt &= -9;
+				}
+			}
+			return texture;
+		}
+		patch(asset, assets) {
+			const texture = asset.resource;
+			if (!texture) {
+				return;
+			}
+			const options = this._getTextureOptions(asset);
+			for (const key of Object.keys(options)) {
+				texture[key] = options[key];
+			}
+		}
+	}
+
 	const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 
 	const clampPosition = (position, bounds) => ({
@@ -59522,6 +62470,7 @@ fn getColor() -> vec4f {
 	    this.camera = null;
 	    this.sceneEntity = null;
 	    this.sceneAsset = null;
+	    this.sceneTransformKey = '';
 	    this.assetId = '';
 	    this.viewpoint = null;
 	    this.resetViewpoint = null;
@@ -59535,14 +62484,18 @@ fn getColor() -> vec4f {
 	    const canvas = document.getElementById('scene-canvas');
 	    try {
 	      const device = await createGraphicsDevice(canvas, {
-	        deviceTypes: [DEVICETYPE_WEBGPU],
+	        deviceTypes: [DEVICETYPE_WEBGL2],
 	        antialias: false,
 	        powerPreference: 'high-performance',
 	      });
 	      const options = new AppOptions();
 	      options.graphicsDevice = device;
-	      options.componentSystems = [CameraComponentSystem, GSplatComponentSystem];
-	      options.resourceHandlers = [GSplatHandler];
+	      options.componentSystems = [
+	        RenderComponentSystem,
+	        CameraComponentSystem,
+	        GSplatComponentSystem,
+	      ];
+	      options.resourceHandlers = [TextureHandler, GSplatHandler];
 	      this.app = new AppBase(canvas);
 	      this.app.init(options);
 	      this.app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
@@ -59593,6 +62546,7 @@ fn getColor() -> vec4f {
 	      const entity = new Entity(assetId);
 	      entity.addComponent('gsplat', { asset: loadedAsset, unified: true });
 	      this.sceneEntity = entity;
+	      this.applySceneTransform();
 	      this.app.root.addChild(entity);
 	      this.bridge.report_scene_progress(assetId, 100, 100);
 	      this.setLoading(false, 'Scene ready');
@@ -59613,6 +62567,7 @@ fn getColor() -> vec4f {
 	      this.sceneAsset.unload();
 	    }
 	    this.sceneAsset = null;
+	    this.sceneTransformKey = '';
 	  }
 
 	  applyViewpoint(payload, rememberAsReset = false) {
@@ -59641,6 +62596,7 @@ fn getColor() -> vec4f {
 	        crop.right - crop.left,
 	        crop.bottom - crop.top,
 	      );
+	      this.applySceneTransform();
 	      this.updateSubjectGuide();
 	    } catch (error) {
 	      this.bridge.report_scene_error(this.assetId || 'renderer', 'viewpoint_invalid', this.safeMessage(error));
@@ -59758,6 +62714,24 @@ fn getColor() -> vec4f {
 	      width: `${region.width * 100}%`,
 	      height: `${region.height * 100}%`,
 	    });
+	  }
+
+	  applySceneTransform() {
+	    if (!this.sceneEntity || !this.viewpoint) return;
+	    const transform = this.viewpoint.scene_transform;
+	    const key = JSON.stringify(transform);
+	    if (key === this.sceneTransformKey) return;
+	    const translation = transform.translation;
+	    const orientation = transform.orientation;
+	    this.sceneEntity.setLocalPosition(translation.x, translation.y, translation.z);
+	    this.sceneEntity.setLocalRotation(
+	      orientation.x,
+	      orientation.y,
+	      orientation.z,
+	      orientation.w,
+	    );
+	    this.sceneEntity.setLocalScale(transform.scale, transform.scale, transform.scale);
+	    this.sceneTransformKey = key;
 	  }
 
 	  setLoading(loading, message) {
