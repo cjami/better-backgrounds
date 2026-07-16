@@ -1,0 +1,70 @@
+# Project documentation (kept locally by design)
+/docs/
+
+# Local agent tooling
+/.agents/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Node, Vite, and Electron Forge
+node_modules/
+.npm/
+.vite/
+.webpack/
+out/
+release/
+playwright-report/
+test-results/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Managed tools, downloaded assets, and generated application data
+.tools/
+.cache/
+/artifacts/
+/jobs/
+/logs/
+/media/
+/models/
+/reconstructions/
+/samples/downloads/
+*.part
+*.tmp
+*.temp
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating systems
+.DS_Store
+Thumbs.db
+Desktop.ini
