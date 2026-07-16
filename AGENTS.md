@@ -28,3 +28,8 @@ docs/                    Local planning documents (gitignored)
 
 - Keep all comments concise, clear, and suitable for inclusion in final production.
 - Only use comments when the intent cannot be explained through thoughtful naming or code structure.
+
+## Attribution
+
+- When committing Codex-assisted work, include this trailer in the commit message:
+  `Co-authored-by: Codex <codex@openai.com>`
