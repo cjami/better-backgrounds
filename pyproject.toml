@@ -1,0 +1,74 @@
+[project]
+name = "better-backgrounds"
+version = "0.1.0"
+description = "Local tooling for the Better Backgrounds desktop application"
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+    "pytest>=9.1.1",
+    "ruff>=0.15.21",
+    "ty==0.0.59",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.28,<0.12"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+include = [
+    "pyproject.toml",
+    "src/**/*.py",
+    "src/**/*.pyi",
+    "tests/**/*.py",
+    "tests/**/*.pyi",
+]
+extend-exclude = [
+    ".cache",
+    ".tools",
+    "artifacts",
+    "jobs",
+    "media",
+    "models",
+    "reconstructions",
+    "samples/downloads",
+]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812", # Conflicts with the formatter's handling of trailing commas.
+    "D203",   # Conflicts with the preferred no-blank-line D211 convention.
+    "D213",   # Conflicts with the preferred summary-on-first-line D212 convention.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "INP001", # Tests are not an importable production package.
+    "S101", # Assertions are pytest's native verification mechanism.
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["better_backgrounds"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+cache_dir = ".cache/pytest"
+testpaths = ["tests"]
+strict_config = true
+strict_markers = true
+
+[tool.ty.src]
+include = ["src", "tests"]

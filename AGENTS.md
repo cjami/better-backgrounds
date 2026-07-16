@@ -2,17 +2,21 @@
 
 ## Project Description
 
-TO-DO
+Better Backgrounds is a cross-platform desktop application that will reconstruct
+room video into a navigable local scene for coherent webcam compositing. The
+repository currently provides the Python tooling foundation only.
 
 ## Project Structure
 
 ```
-TO-DO
+src/better_backgrounds/  Python package
+tests/                   Python tests
+docs/                    Local planning documents (gitignored)
 ```
 
 ## Development Workflow
 
-- Always use modern Python practices for Python 3.12+.
+- Always use modern Python practices for Python 3.14.
 - Use TDD where appropriate to keep a considered design and protect key behaviours.
 - Do not test content, configurations or anything that is likely to change by design.
 - Tidy-up and refactor after changes - make sure to follow SOLID principles.
