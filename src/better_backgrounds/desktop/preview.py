@@ -1,0 +1,114 @@
+"""Lightweight Python-painted placeholders for later live render surfaces."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPaintEvent, QPen, QRadialGradient
+from PySide6.QtWidgets import QWidget
+
+
+class ScenePreview(QWidget):
+    """Paint a warm room and subject placeholder without media behavior."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Create an accessible minimum-size scene surface."""
+        super().__init__(parent)
+        self.setMinimumSize(480, 300)
+        self.setAccessibleName("Placeholder reconstructed room preview")
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: ARG002, N802
+        """Draw the Phase 2 scene placeholder."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        room = QLinearGradient(bounds.topLeft(), bounds.bottomRight())
+        room.setColorAt(0.0, QColor("#45423c"))
+        room.setColorAt(0.52, QColor("#282722"))
+        room.setColorAt(1.0, QColor("#17181b"))
+        painter.setBrush(room)
+        painter.setPen(QPen(QColor("#34363d"), 1))
+        painter.drawRoundedRect(bounds, 14, 14)
+
+        glow = QRadialGradient(bounds.width() * 0.72, bounds.height() * 0.16, bounds.width() * 0.5)
+        glow.setColorAt(0.0, QColor(255, 238, 208, 130))
+        glow.setColorAt(1.0, QColor(255, 238, 208, 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(glow)
+        painter.drawRoundedRect(bounds, 14, 14)
+
+        subject_width = min(150.0, bounds.width() * 0.2)
+        subject = QRectF(
+            bounds.center().x() - subject_width / 2,
+            bounds.top() + bounds.height() * 0.34,
+            subject_width,
+            bounds.height() * 0.5,
+        )
+        skin = QLinearGradient(subject.topLeft(), subject.bottomRight())
+        skin.setColorAt(0.0, QColor("#d9ac86"))
+        skin.setColorAt(1.0, QColor("#9e7355"))
+        painter.setBrush(skin)
+        painter.setPen(QPen(QColor(255, 220, 190, 70), 1))
+        painter.drawRoundedRect(subject, 18, 18)
+
+
+class ComparisonPreview(QWidget):
+    """Paint a draggable original-to-harmonised comparison placeholder."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the comparison surface with a centered wipe."""
+        super().__init__(parent)
+        self._wipe = 52
+        self.setMinimumSize(640, 360)
+        self.setAccessibleName("Placeholder original and harmonised comparison")
+
+    def set_wipe(self, value: int) -> None:
+        """Update the percentage of harmonised output shown."""
+        self._wipe = min(100, max(0, value))
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: ARG002, N802
+        """Draw the split comparison."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        self._paint_scene(painter, bounds, warm=False)
+        split = bounds.left() + bounds.width() * self._wipe / 100
+        painter.save()
+        painter.setClipRect(
+            QRectF(bounds.left(), bounds.top(), split - bounds.left(), bounds.height()),
+        )
+        self._paint_scene(painter, bounds, warm=True)
+        painter.restore()
+
+        painter.setPen(QPen(QColor("#e0a34a"), 2))
+        painter.drawLine(int(split), int(bounds.top()), int(split), int(bounds.bottom()))
+        painter.setPen(QColor("#d2d4d9"))
+        painter.drawText(
+            bounds.adjusted(16, 13, -16, -13),
+            Qt.AlignmentFlag.AlignTop,
+            "ORIGINAL WEBCAM",
+        )
+        painter.setPen(QColor("#e0a34a"))
+        painter.drawText(
+            bounds.adjusted(16, 13, -16, -13),
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+            "BETTER BACKGROUNDS",
+        )
+
+    @staticmethod
+    def _paint_scene(painter: QPainter, bounds: QRectF, *, warm: bool) -> None:
+        gradient = QLinearGradient(bounds.topLeft(), bounds.bottomRight())
+        gradient.setColorAt(0.0, QColor("#484139" if warm else "#30343b"))
+        gradient.setColorAt(1.0, QColor("#171614" if warm else "#15171b"))
+        painter.setBrush(gradient)
+        painter.setPen(QPen(QColor("#34363d"), 1))
+        painter.drawRoundedRect(bounds, 14, 14)
+        subject = QRectF(
+            bounds.center().x() - 75,
+            bounds.top() + bounds.height() * 0.34,
+            150,
+            bounds.height() * 0.5,
+        )
+        painter.setBrush(QColor("#d4a583" if warm else "#a88670"))
+        painter.setPen(QPen(QColor(255, 220, 190, 80), 1))
+        painter.drawRoundedRect(subject, 18, 18)

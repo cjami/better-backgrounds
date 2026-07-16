@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --all-groups --locked
+      - run: make lint
+      - run: make test
+      - run: make build
+
+  desktop-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --all-groups --locked
+      - name: Install Linux desktop build libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon-x11-0 libxcb-cursor0 patchelf xvfb
+      - name: Source smoke test on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a uv run python -m better_backgrounds.desktop --build-smoke-test
+      - name: Source smoke test
+        if: runner.os != 'Linux'
+        run: uv run python -m better_backgrounds.desktop --build-smoke-test
+      - run: uv run pyside6-deploy -c pysidedeploy.spec --force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: better-backgrounds-${{ runner.os }}-${{ runner.arch }}
+          path: dist/

@@ -11,10 +11,22 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    "platformdirs>=4.5.1",
+    "pydantic>=2.12.5",
+    "pyside6>=6.10.2",
+    "typer>=0.21.0",
+]
+
+[project.scripts]
+better-backgrounds = "better_backgrounds.cli:app"
+
+[project.gui-scripts]
+better-backgrounds-desktop = "better_backgrounds.desktop.app:main"
 
 [dependency-groups]
 dev = [
+    "nuitka==4.1.3",
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
     "ruff>=0.15.21",
@@ -37,6 +49,7 @@ include = [
 ]
 extend-exclude = [
     ".cache",
+    ".pytest-temp",
     ".tools",
     "artifacts",
     "jobs",
@@ -59,6 +72,12 @@ ignore = [
     "INP001", # Tests are not an importable production package.
     "S101", # Assertions are pytest's native verification mechanism.
 ]
+"src/better_backgrounds/desktop/webview.py" = [
+    "N802", # Qt virtual methods use the framework's camelCase API.
+]
+"src/better_backgrounds/desktop/pages.py" = [
+    "PLR0915", # Declarative widget composition is clearest in page constructors.
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["better_backgrounds"]
@@ -72,3 +91,16 @@ strict_markers = true
 
 [tool.ty.src]
 include = ["src", "tests"]
+
+[tool.pyside6-project]
+files = [
+    "src/better_backgrounds/desktop/__init__.py",
+    "src/better_backgrounds/desktop/__main__.py",
+    "src/better_backgrounds/desktop/app.py",
+    "src/better_backgrounds/desktop/bridge.py",
+    "src/better_backgrounds/desktop/main_window.py",
+    "src/better_backgrounds/desktop/pages.py",
+    "src/better_backgrounds/desktop/preview.py",
+    "src/better_backgrounds/desktop/theme.py",
+    "src/better_backgrounds/desktop/webview.py",
+]

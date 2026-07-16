@@ -1,0 +1,37 @@
+[
+  {
+    "schema_version": 2,
+    "type": "progress",
+    "job_id": "job-1",
+    "stage": "validation",
+    "message": "Wrong version"
+  },
+  {
+    "schema_version": 1,
+    "type": "progress",
+    "job_id": "job-1",
+    "stage": "validation",
+    "progress": 1.5,
+    "message": "Invalid bound"
+  },
+  {
+    "schema_version": 1,
+    "type": "unknown",
+    "job_id": "job-1"
+  },
+  {
+    "schema_version": 1,
+    "type": "result",
+    "job_id": "",
+    "scene_id": "scene-1",
+    "message": "Empty job id"
+  },
+  {
+    "schema_version": 1,
+    "type": "cancelled",
+    "job_id": "job-1",
+    "message": "Unknown field",
+    "forced": false,
+    "extra": true
+  }
+]

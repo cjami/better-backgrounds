@@ -1,4 +1,4 @@
-.PHONY: setup lint format format-check type test build check
+.PHONY: setup lint format format-check type test build desktop desktop-smoke package-desktop check
 
 setup:
 	uv python install 3.14
@@ -25,5 +25,14 @@ test:
 
 build:
 	uv build
+
+desktop:
+	uv run better-backgrounds desktop
+
+desktop-smoke:
+	uv run python -m better_backgrounds.desktop --build-smoke-test
+
+package-desktop:
+	uv run pyside6-deploy -c pysidedeploy.spec --force
 
 check: lint test build

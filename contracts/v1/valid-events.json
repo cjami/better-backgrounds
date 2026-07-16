@@ -1,0 +1,40 @@
+[
+  {
+    "schema_version": 1,
+    "type": "progress",
+    "job_id": "job-1",
+    "stage": "camera_estimation",
+    "progress": 0.42,
+    "message": "Registered 38 of 84 frames"
+  },
+  {
+    "schema_version": 1,
+    "type": "warning",
+    "job_id": "job-1",
+    "code": "minor_motion",
+    "message": "Moving curtain region will be down-weighted"
+  },
+  {
+    "schema_version": 1,
+    "type": "result",
+    "job_id": "job-1",
+    "scene_id": "scene-job-1",
+    "message": "Scene ready"
+  },
+  {
+    "schema_version": 1,
+    "type": "error",
+    "job_id": "job-2",
+    "code": "camera_estimation_failed",
+    "message": "Not enough frames registered",
+    "recovery_action": "Capture the room again with more overlap",
+    "log_reference": "jobs/job-2/logs/reconstruction.log"
+  },
+  {
+    "schema_version": 1,
+    "type": "cancelled",
+    "job_id": "job-3",
+    "message": "Build cancelled safely",
+    "forced": false
+  }
+]
