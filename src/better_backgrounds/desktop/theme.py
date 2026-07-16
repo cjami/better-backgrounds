@@ -18,6 +18,7 @@ QWidget {{
     font-size: 13px;
 }}
 QMainWindow {{ background: {BACKGROUND}; }}
+QLabel {{ background: transparent; }}
 QFrame#header {{
     background: #111216;
     border-bottom: 1px solid #282a30;
