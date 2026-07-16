@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
+    QStackedLayout,
     QStackedWidget,
     QTextEdit,
     QVBoxLayout,
@@ -72,52 +73,88 @@ class ShowPage(QWidget):
         super().__init__(parent)
         self._camera_active = False
         root = QHBoxLayout(self)
-        root.setContentsMargins(24, 24, 24, 24)
-        root.setSpacing(18)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        sidebar, sidebar_layout = _card()
-        sidebar.setFixedWidth(310)
-        sidebar_layout.addWidget(_label("Rooms", object_name="title"))
-        sidebar_layout.addWidget(
-            _label(
-                "Choose the room used by your virtual camera.",
-                object_name="subtitle",
-                word_wrap=True,
-            ),
-        )
-        self._rooms = QListWidget()
-        self._rooms.setObjectName("roomList")
-        self._rooms.setAccessibleName("Available rooms")
-        self._rooms.currentItemChanged.connect(self._emit_room)
-        sidebar_layout.addWidget(self._rooms, 1)
-        build = QPushButton("+  Build a new room")
-        build.setObjectName("quietAction")
-        build.clicked.connect(self.build_requested)
-        sidebar_layout.addWidget(build)
-        root.addWidget(sidebar)
-
-        feed, feed_layout = _card()
-        header = QHBoxLayout()
-        titles = QVBoxLayout()
-        titles.addWidget(_label("Current virtual camera feed", object_name="title"))
-        self._room_name = _label("", object_name="subtitle")
-        titles.addWidget(self._room_name)
-        header.addLayout(titles)
-        header.addStretch()
-        self._feed_status = _label("●  IDLE", object_name="success")
-        self._feed_status.setAccessibleName("Virtual camera status")
-        header.addWidget(self._feed_status)
-        feed_layout.addLayout(header)
+        feed_column = QWidget()
+        feed_layout = QVBoxLayout(feed_column)
+        feed_layout.setContentsMargins(22, 22, 22, 22)
+        feed_layout.setSpacing(14)
+        feed_surface = QFrame()
+        feed_surface.setObjectName("feedSurface")
+        feed_stack = QStackedLayout(feed_surface)
+        feed_stack.setContentsMargins(0, 0, 0, 0)
+        feed_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
         preview = preview_factory()
         preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        feed_layout.addWidget(preview, 1)
+        feed_stack.addWidget(preview)
+
+        overlay = QWidget()
+        overlay.setObjectName("feedOverlay")
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        overlay_layout = QVBoxLayout(overlay)
+        overlay_layout.setContentsMargins(18, 18, 18, 18)
+        overlay_layout.setSpacing(6)
+        feed_header = QHBoxLayout()
+        self._feed_title = _label("", object_name="feedBadge")
+        feed_header.addWidget(self._feed_title)
+        feed_header.addStretch()
+        self._feed_status = _label("●  IDLE", object_name="feedBadge")
+        self._feed_status.setAccessibleName("Virtual camera status")
+        feed_header.addWidget(self._feed_status)
+        overlay_layout.addLayout(feed_header)
+        overlay_layout.addStretch()
+        self._preview_note = _label(
+            "Preview only — the virtual camera is off",
+            object_name="previewNote",
+        )
+        overlay_layout.addWidget(
+            self._preview_note,
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
+        self._preview_hint = _label(
+            "Start it to make this feed available in Zoom, Meet, and other apps",
+            object_name="muted",
+        )
+        overlay_layout.addWidget(
+            self._preview_hint,
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
+        overlay_layout.addStretch()
+        overlay_layout.addWidget(
+            _label("1080p  ·  30 fps  ·  scene-aware harmonisation on", object_name="feedMeta"),
+        )
+        feed_stack.addWidget(overlay)
+        feed_stack.setCurrentWidget(overlay)
+        feed_layout.addWidget(feed_surface, 1)
         self._camera = QPushButton("●  Start virtual camera")
         self._camera.setObjectName("cameraToggle")
         self._camera.setProperty("active", False)  # noqa: FBT003
         self._camera.setAccessibleName("Start virtual camera")
         self._camera.clicked.connect(self._toggle_camera)
         feed_layout.addWidget(self._camera)
-        root.addWidget(feed, 1)
+        root.addWidget(feed_column, 1)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("roomRail")
+        sidebar.setFixedWidth(330)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(16, 20, 16, 20)
+        sidebar_layout.setSpacing(12)
+        sidebar_header = QHBoxLayout()
+        sidebar_header.addWidget(_label("Rooms", object_name="section"))
+        sidebar_header.addStretch()
+        build = QPushButton("+  New room")
+        build.setObjectName("railAction")
+        build.clicked.connect(self.build_requested)
+        sidebar_header.addWidget(build)
+        sidebar_layout.addLayout(sidebar_header)
+        self._rooms = QListWidget()
+        self._rooms.setObjectName("roomList")
+        self._rooms.setAccessibleName("Available rooms")
+        self._rooms.currentItemChanged.connect(self._emit_room)
+        sidebar_layout.addWidget(self._rooms, 1)
+        root.addWidget(sidebar)
 
         self.set_rooms(rooms)
 
@@ -132,9 +169,12 @@ class ShowPage(QWidget):
         self._rooms.blockSignals(True)  # noqa: FBT003
         self._rooms.clear()
         for room in rooms:
-            item = QListWidgetItem(room)
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, room)
             item.setToolTip("Ready to use")
+            item.setSizeHint(QSize(0, 82))
             self._rooms.addItem(item)
+            self._rooms.setItemWidget(item, self._room_card(room))
         self._rooms.blockSignals(False)  # noqa: FBT003
         self.set_room(target or (rooms[0] if rooms else ""))
 
@@ -142,42 +182,74 @@ class ShowPage(QWidget):
     def current_room(self) -> str:
         """Return the selected room name."""
         item = self._rooms.currentItem()
-        return "" if item is None else item.text()
+        return "" if item is None else str(item.data(Qt.ItemDataRole.UserRole))
 
     def set_room(self, room: str) -> None:
         """Select a room without emitting a redundant app-state update."""
         for index in range(self._rooms.count()):
             item = self._rooms.item(index)
-            if item.text() == room:
+            if item.data(Qt.ItemDataRole.UserRole) == room:
                 self._rooms.blockSignals(True)  # noqa: FBT003
                 self._rooms.setCurrentItem(item)
                 self._rooms.blockSignals(False)  # noqa: FBT003
-                self._room_name.setText(room)
+                self._feed_title.setText(f"VIRTUAL CAMERA  ·  {room}")
                 return
 
     def _emit_room(self, current: QListWidgetItem | None) -> None:
         if current is not None:
-            self._room_name.setText(current.text())
-            self.room_selected.emit(current.text())
+            room = str(current.data(Qt.ItemDataRole.UserRole))
+            self._feed_title.setText(f"VIRTUAL CAMERA  ·  {room}")
+            self.room_selected.emit(room)
 
     def _toggle_camera(self) -> None:
         self._camera_active = not self._camera_active
         if self._camera_active:
             self._feed_status.setText("●  LIVE")
-            self._feed_status.setObjectName("danger")
             self._camera.setText("■  Stop virtual camera")
             self._camera.setAccessibleName("Stop virtual camera")
+            self._preview_note.setText("Virtual camera is live")
+            self._preview_hint.setText("This feed is available to your video apps")
         else:
             self._feed_status.setText("●  IDLE")
-            self._feed_status.setObjectName("success")
             self._camera.setText("●  Start virtual camera")
             self._camera.setAccessibleName("Start virtual camera")
-        self._feed_status.style().unpolish(self._feed_status)
-        self._feed_status.style().polish(self._feed_status)
+            self._preview_note.setText("Preview only — the virtual camera is off")
+            self._preview_hint.setText(
+                "Start it to make this feed available in Zoom, Meet, and other apps",
+            )
         self._camera.setProperty("active", self._camera_active)
         self._camera.style().unpolish(self._camera)
         self._camera.style().polish(self._camera)
         self.camera_changed.emit(self._camera_active)
+
+    @staticmethod
+    def _room_card(room: str) -> QWidget:
+        metadata = {
+            "Loft — North Window": "Opened just now",
+            "Studio — West Wall": "3 days ago",
+            "Living room": "Last week",
+            "Bookshelf corner": "2 weeks ago",
+        }
+        card = QWidget()
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(10)
+        thumbnail = QLabel()
+        thumbnail.setObjectName("roomThumbnail")
+        thumbnail.setFixedSize(82, 58)
+        layout.addWidget(thumbnail)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addStretch()
+        text.addWidget(_label(room, object_name="roomName"))
+        text.addWidget(_label(metadata.get(room, "Ready to use"), object_name="muted"))
+        text.addStretch()
+        layout.addLayout(text, 1)
+        badge = _label("Ready", object_name="readyBadge")
+        badge.setFixedSize(48, 22)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(badge)
+        return card
 
 
 class BuildPage(QWidget):
@@ -204,43 +276,51 @@ class BuildPage(QWidget):
     def _create_upload(self) -> None:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setSpacing(14)
         layout.addStretch()
         layout.addWidget(
-            _label("Build a new room", object_name="title"),
+            _label("NEW ROOM", object_name="eyebrow"),
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
+        layout.addWidget(
+            _label("Turn a short video into a room", object_name="heroTitle"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         subtitle = _label(
-            "Upload a short, steady room video to create a reusable room.",
+            "Walk slowly around the empty space for 15-30 seconds. We rebuild it into "
+            "a 3D scene your camera can sit inside.",
             object_name="subtitle",
             word_wrap=True,
         )
+        subtitle.setMaximumWidth(650)
+        subtitle.setMinimumHeight(44)
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(subtitle, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(10)
         drop = QFrame()
         drop.setObjectName("dropCard")
+        drop.setMinimumSize(620, 180)
         drop.setMaximumWidth(760)
         drop_layout = QVBoxLayout(drop)
-        drop_layout.setContentsMargins(38, 34, 38, 34)
-        drop_layout.setSpacing(12)
+        drop_layout.setContentsMargins(38, 28, 38, 28)
+        drop_layout.setSpacing(8)
         drop_layout.addWidget(
-            _label("ROOM VIDEO", object_name="stageActive"),
+            _label("↑", object_name="uploadIcon"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
-        drop_layout.addWidget(
-            _label("MP4 or MOV · 15-30 seconds · 720p or 1080p", object_name="muted"),
-            alignment=Qt.AlignmentFlag.AlignHCenter,
-        )
-        actions = QHBoxLayout()
-        choose = QPushButton("Choose video")
-        choose.setObjectName("primary")
+        choose = QPushButton("Drop a video here, or click to choose")
+        choose.setObjectName("dropAction")
         choose.clicked.connect(self.video_requested)
-        sample = QPushButton("Use prepared sample")
-        sample.clicked.connect(self.sample_requested)
-        actions.addStretch()
-        actions.addWidget(choose)
-        actions.addWidget(sample)
-        actions.addStretch()
-        drop_layout.addLayout(actions)
+        drop_layout.addWidget(choose, alignment=Qt.AlignmentFlag.AlignHCenter)
+        drop_layout.addWidget(
+            _label("MP4  /  MOV  ·  15-30 s  ·  720-1080p", object_name="feedMeta"),
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
         layout.addWidget(drop, alignment=Qt.AlignmentFlag.AlignHCenter)
+        sample = QPushButton("No footage handy?  Use a sample clip  →")
+        sample.setObjectName("sampleAction")
+        sample.clicked.connect(self.sample_requested)
+        layout.addWidget(sample, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch()
         self._content.addWidget(page)
 
@@ -451,48 +531,70 @@ class AdjustPage(QWidget):
         """Create the renderer and Python-owned adjustment controls."""
         super().__init__(parent)
         root = QHBoxLayout(self)
-        root.setContentsMargins(22, 22, 22, 22)
-        root.setSpacing(16)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        scene = QWidget()
+        scene_layout = QVBoxLayout(scene)
+        scene_layout.setContentsMargins(18, 18, 18, 18)
+        scene_layout.setSpacing(12)
+        overlays = QHBoxLayout()
+        for index, name in enumerate(("Depth", "Confidence", "Coverage", "Subject region")):
+            chip = QPushButton(name)
+            chip.setObjectName("overlayChip")
+            chip.setCheckable(True)
+            chip.setChecked(index > 1)
+            overlays.addWidget(chip)
+        overlays.addStretch()
+        overlays.addWidget(_label("RECONSTRUCTED VIEWPOINT  ·  SPLAT", object_name="feedBadge"))
+        scene_layout.addLayout(overlays)
         renderer = renderer_factory()
         renderer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        root.addWidget(renderer, 1)
+        scene_layout.addWidget(renderer, 1)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        reset = QPushButton("Reset view")
+        reset.setObjectName("quietAction")
+        actions.addWidget(reset)
+        save = QPushButton("Save settings")
+        save.setObjectName("primary")
+        actions.addWidget(save)
+        scene_layout.addLayout(actions)
+        root.addWidget(scene, 1)
 
         inspector = QFrame()
         inspector.setObjectName("inspector")
-        inspector.setFixedWidth(320)
+        inspector.setFixedWidth(310)
         controls = QVBoxLayout(inspector)
-        controls.setContentsMargins(18, 18, 18, 18)
-        controls.setSpacing(11)
-        controls.addWidget(_label("Adjust room", object_name="title"))
-        self._room_name = _label("", object_name="subtitle", word_wrap=True)
-        controls.addWidget(self._room_name)
-        controls.addSpacing(8)
+        controls.setContentsMargins(16, 18, 16, 16)
+        controls.setSpacing(7)
         controls.addWidget(_label("Viewpoint", object_name="section"))
+        presets = QHBoxLayout()
+        for index, name in enumerate(("Eye level", "Low", "High", "Wide")):
+            preset = QPushButton(name)
+            preset.setObjectName("preset")
+            preset.setProperty("active", index == 0)
+            presets.addWidget(preset)
+        controls.addLayout(presets)
         self._add_slider(controls, "Field of view", 24, 90, 42)
         self._add_slider(controls, "Horizon", -100, 100, -15)
+        controls.addSpacing(6)
+        controls.addWidget(_label("Subject", object_name="section"))
         self._add_slider(controls, "Depth in scene", 5, 50, 24)
         self._add_slider(controls, "Virtual focus", 5, 50, 26)
-        controls.addSpacing(8)
-        controls.addWidget(_label("Scene settings", object_name="section"))
-        quality = QComboBox()
-        quality.addItems(("Balanced quality", "Highest quality", "Performance"))
-        quality.setAccessibleName("Render quality")
-        controls.addWidget(quality)
+        controls.addSpacing(6)
+        controls.addWidget(_label("Harmonisation", object_name="section"))
+        self._add_slider(controls, "Scene match", 0, 100, 72)
+        self._add_slider(controls, "Exposure", 0, 100, 44)
+        self._add_slider(controls, "Colour temp", 0, 100, 56)
+        self._add_slider(controls, "Colour spill", 0, 100, 34)
         self._add_slider(controls, "Foreground focus", 0, 100, 52)
         self._add_slider(controls, "Edge integration", 0, 100, 66)
         controls.addStretch()
-        controls.addWidget(
-            _label(
-                "Live scene rendering and persisted controls arrive in Phase 3.",
-                object_name="muted",
-                word_wrap=True,
-            ),
-        )
         root.addWidget(inspector)
 
     def set_room(self, room: str) -> None:
         """Update the room named by the inspector."""
-        self._room_name.setText(room)
+        self.setAccessibleDescription(f"Adjust settings for {room}")
 
     @staticmethod
     def _add_slider(
@@ -502,13 +604,33 @@ class AdjustPage(QWidget):
         maximum: int,
         value: int,
     ) -> QSlider:
-        layout.addWidget(_label(title, object_name="muted"))
+        row = QHBoxLayout()
+        row.addWidget(_label(title, object_name="muted"))
+        row.addStretch()
+        value_label = _label(AdjustPage._format_slider(title, value), object_name="controlValue")
+        row.addWidget(value_label)
+        layout.addLayout(row)
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(minimum, maximum)
         slider.setValue(value)
         slider.setAccessibleName(title)
+        slider.valueChanged.connect(
+            lambda current, name=title, label=value_label: label.setText(
+                AdjustPage._format_slider(name, current),
+            ),
+        )
         layout.addWidget(slider)
         return slider
+
+    @staticmethod
+    def _format_slider(title: str, value: int) -> str:
+        if title == "Field of view":
+            return f"{value}°"
+        if title == "Horizon":
+            return f"{value / 10:.1f}°"
+        if title in {"Depth in scene", "Virtual focus"}:
+            return f"{value / 10:.1f} m"
+        return f"{value}%"
 
 
 class ComparePage(QWidget):
@@ -519,16 +641,7 @@ class ComparePage(QWidget):
         super().__init__(parent)
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 22, 22, 22)
-        root.setSpacing(14)
-        header = QHBoxLayout()
-        titles = QVBoxLayout()
-        titles.addWidget(_label("Compare", object_name="title"))
-        self._room_name = _label("", object_name="subtitle")
-        titles.addWidget(self._room_name)
-        header.addLayout(titles)
-        header.addStretch()
-        header.addWidget(_label("A/B WIPE", object_name="stageActive"))
-        root.addLayout(header)
+        root.setSpacing(12)
         self._preview = ComparisonPreview()
         root.addWidget(self._preview, 1)
         wipe_row = QHBoxLayout()
@@ -544,4 +657,4 @@ class ComparePage(QWidget):
 
     def set_room(self, room: str) -> None:
         """Update the room named by the comparison."""
-        self._room_name.setText(room)
+        self.setAccessibleDescription(f"Compare output for {room}")

@@ -82,18 +82,31 @@ class ComparisonPreview(QWidget):
 
         painter.setPen(QPen(QColor("#e0a34a"), 2))
         painter.drawLine(int(split), int(bounds.top()), int(split), int(bounds.bottom()))
+        badge_brush = QColor(16, 17, 21, 225)
+        left_badge = QRectF(bounds.left() + 16, bounds.top() + 14, 190, 36)
+        right_badge = QRectF(bounds.right() - 226, bounds.top() + 14, 210, 36)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(badge_brush)
+        painter.drawRoundedRect(left_badge, 10, 10)
+        painter.drawRoundedRect(right_badge, 10, 10)
         painter.setPen(QColor("#d2d4d9"))
         painter.drawText(
-            bounds.adjusted(16, 13, -16, -13),
-            Qt.AlignmentFlag.AlignTop,
+            left_badge,
+            Qt.AlignmentFlag.AlignCenter,
             "ORIGINAL WEBCAM",
         )
         painter.setPen(QColor("#e0a34a"))
         painter.drawText(
-            bounds.adjusted(16, 13, -16, -13),
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+            right_badge,
+            Qt.AlignmentFlag.AlignCenter,
             "BETTER BACKGROUNDS",
         )
+        handle = QRectF(split - 19, bounds.center().y() - 19, 38, 38)
+        painter.setPen(QPen(QColor(20, 16, 10, 80), 1))
+        painter.setBrush(QColor("#e0a34a"))
+        painter.drawEllipse(handle)
+        painter.setPen(QColor("#1a1204"))
+        painter.drawText(handle, Qt.AlignmentFlag.AlignCenter, "↔")
 
     @staticmethod
     def _paint_scene(painter: QPainter, bounds: QRectF, *, warm: bool) -> None:

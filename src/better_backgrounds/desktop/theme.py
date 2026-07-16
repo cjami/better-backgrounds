@@ -23,14 +23,33 @@ QFrame#header {{
     background: #111216;
     border-bottom: 1px solid #282a30;
 }}
-QFrame#card, QFrame#dropCard, QFrame#inspector {{
+QFrame#headerDivider {{ background: #303238; border: none; }}
+QFrame#card {{
     background: {SURFACE};
     border: 1px solid #292b31;
     border-radius: 14px;
 }}
-QFrame#dropCard:hover {{ border-color: {ACCENT}; }}
+QFrame#dropCard {{
+    background: #171616;
+    border: 1px dashed #5b5c61;
+    border-radius: 14px;
+}}
+QFrame#dropCard:hover {{ border-color: {ACCENT}; background: #1b1916; }}
+QFrame#inspector {{
+    background: #111216;
+    border: none;
+    border-left: 1px solid #292b31;
+}}
+QFrame#roomRail {{
+    background: #111216;
+    border: none;
+    border-left: 1px solid #292b31;
+}}
+QFrame#feedSurface, QWidget#feedOverlay {{ background: transparent; border: none; }}
 QLabel#brand {{ font-size: 17px; font-weight: 700; }}
 QLabel#title {{ font-size: 28px; font-weight: 700; }}
+QLabel#heroTitle {{ font-size: 30px; font-weight: 700; }}
+QLabel#eyebrow {{ color: {ACCENT}; font-size: 11px; font-weight: 700; letter-spacing: 2px; }}
 QLabel#subtitle, QLabel#muted {{ color: {MUTED}; }}
 QLabel#section {{ font-size: 14px; font-weight: 650; }}
 QLabel#success {{ color: {SUCCESS}; font-weight: 650; }}
@@ -38,6 +57,46 @@ QLabel#danger {{ color: {DANGER}; font-weight: 650; }}
 QLabel#stageActive {{ color: {ACCENT}; font-weight: 650; }}
 QLabel#stageDone {{ color: {SUCCESS}; font-weight: 650; }}
 QLabel#stagePending {{ color: #696c74; }}
+QLabel#feedBadge {{
+    color: #d9dbe0;
+    background: #17181c;
+    border: 1px solid #292b31;
+    border-radius: 8px;
+    padding: 7px 11px;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 10px;
+    font-weight: 700;
+}}
+QLabel#feedMeta {{
+    color: #b5b8c0;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 10px;
+}}
+QLabel#previewNote {{ color: #e3e4e7; font-size: 14px; font-weight: 600; }}
+QLabel#roomName {{ font-weight: 650; }}
+QLabel#readyBadge {{
+    color: #8fd6a9;
+    background: #203429;
+    border-radius: 9px;
+    padding: 3px 8px;
+    font-size: 10px;
+    font-weight: 700;
+}}
+QLabel#roomThumbnail {{
+    background: qradialgradient(cx:0.62, cy:0.18, radius:0.78,
+        stop:0 #8b8679, stop:0.34 #3b3d42, stop:1 #171a20);
+    border: 1px solid #2c2e34;
+    border-radius: 10px;
+}}
+QLabel#uploadIcon {{
+    color: {ACCENT};
+    background: #392f20;
+    border-radius: 14px;
+    padding: 10px 16px;
+    font-size: 24px;
+    font-weight: 700;
+}}
+QLabel#controlValue {{ color: #e6e7ea; font-size: 11px; }}
 QPushButton {{
     min-height: 34px;
     padding: 2px 15px;
@@ -67,6 +126,21 @@ QPushButton#tab {{
 }}
 QPushButton#tab:hover {{ color: {TEXT}; background: #1b1c21; }}
 QPushButton#tab[active="true"] {{ color: {ACCENT}; background: #2a2216; }}
+QFrame#roomPill {{
+    min-height: 30px;
+    color: #c9cbd1;
+    background: #1b1c21;
+    border-radius: 9px;
+    border: none;
+}}
+QPushButton#headerIcon {{
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 30px;
+    padding: 0;
+    background: #1b1c21;
+    border: none;
+}}
 QPushButton#cameraToggle {{
     min-height: 52px;
     color: #1a1204;
@@ -87,19 +161,44 @@ QPushButton#quietAction {{
     background: transparent;
     border-color: #473822;
 }}
+QPushButton#railAction, QPushButton#sampleAction {{
+    color: {ACCENT};
+    background: transparent;
+    border: none;
+    padding: 0 4px;
+}}
+QPushButton#dropAction {{
+    color: {TEXT};
+    background: transparent;
+    border: none;
+    font-size: 14px;
+    font-weight: 700;
+}}
+QPushButton#overlayChip, QPushButton#preset {{
+    min-height: 28px;
+    padding: 0 11px;
+    color: #b7bac1;
+    background: #18191d;
+    border: 1px solid #272930;
+}}
+QPushButton#overlayChip:checked, QPushButton#preset[active="true"] {{
+    color: {ACCENT};
+    background: #352b1d;
+    border-color: #76582e;
+}}
 QListWidget {{
     background: transparent;
     border: none;
     outline: none;
 }}
 QListWidget::item {{
-    min-height: 44px;
     margin: 3px 0;
-    padding: 4px 11px;
+    padding: 0;
     border: 1px solid #292b31;
-    border-radius: 10px;
+    border-radius: 12px;
     background: #18191d;
 }}
+QListWidget QWidget {{ background: transparent; }}
 QListWidget::item:hover {{ border-color: #454852; background: #1d1f24; }}
 QListWidget::item:selected {{
     color: {TEXT};

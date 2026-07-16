@@ -72,13 +72,19 @@ class TabHeader(QFrame):
         self.setObjectName("header")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(24, 12, 24, 12)
-        logo = QLabel("◐")
-        logo.setStyleSheet("color: #e0a34a; font-size: 21px; font-weight: 700;")
+        logo = QLabel()
+        logo.setFixedSize(22, 22)
+        logo.setStyleSheet("background: #e0a34a; border-radius: 6px;")
         layout.addWidget(logo)
         brand = QLabel("Better Backgrounds")
         brand.setObjectName("brand")
         layout.addWidget(brand)
-        layout.addStretch()
+        divider = QFrame()
+        divider.setObjectName("headerDivider")
+        divider.setFixedSize(1, 26)
+        layout.addSpacing(14)
+        layout.addWidget(divider)
+        layout.addSpacing(8)
         self._tabs: list[QPushButton] = []
         for index, title in enumerate(TAB_NAMES):
             tab = QPushButton(title)
@@ -90,10 +96,22 @@ class TabHeader(QFrame):
             self._tabs.append(tab)
             layout.addWidget(tab)
         layout.addStretch()
-        self._status = QLabel("●  LOCAL")
-        self._status.setObjectName("success")
-        self._status.setToolTip("All Phase 2 processing stays on this computer")
-        layout.addWidget(self._status)
+        room_pill = QFrame()
+        room_pill.setObjectName("roomPill")
+        room_layout = QHBoxLayout(room_pill)
+        room_layout.setContentsMargins(12, 0, 12, 0)
+        room_layout.setSpacing(7)
+        dot = QLabel("●")
+        dot.setObjectName("success")
+        room_layout.addWidget(dot)
+        self._room = QLabel("No room selected")
+        room_layout.addWidget(self._room)
+        layout.addWidget(room_pill)
+        for label, accessible_name in (("?", "Help"), ("⚙︎", "Settings")):
+            action = QPushButton(label)
+            action.setObjectName("headerIcon")
+            action.setAccessibleName(accessible_name)
+            layout.addWidget(action)
 
     def set_active_tab(self, index: int) -> None:
         """Highlight the selected product tab."""
@@ -102,12 +120,9 @@ class TabHeader(QFrame):
             tab.style().unpolish(tab)
             tab.style().polish(tab)
 
-    def set_camera_active(self, active: bool) -> None:  # noqa: FBT001
-        """Reflect the virtual-camera state in the global header."""
-        self._status.setText("●  CAMERA LIVE" if active else "●  LOCAL")
-        self._status.setObjectName("danger" if active else "success")
-        self._status.style().unpolish(self._status)
-        self._status.style().polish(self._status)
+    def set_room(self, room: str) -> None:
+        """Show the room shared by the room-dependent tabs."""
+        self._room.setText(room)
 
 
 class MainWindow(QMainWindow):
@@ -162,7 +177,6 @@ class MainWindow(QMainWindow):
         self._header.tab_selected.connect(self.select_tab)
         self._show_page.room_selected.connect(self.select_room)
         self._show_page.build_requested.connect(self._open_build)
-        self._show_page.camera_changed.connect(self._header.set_camera_active)
         self._build_page.video_requested.connect(self._choose_video)
         self._build_page.sample_requested.connect(self._use_sample)
         self._build_page.build_requested.connect(self._start_build)
@@ -214,6 +228,7 @@ class MainWindow(QMainWindow):
         if room not in self._rooms:
             return
         self._selected_room = room
+        self._header.set_room(room)
         self._show_page.set_room(room)
         self._adjust_page.set_room(room)
         self._compare_page.set_room(room)
