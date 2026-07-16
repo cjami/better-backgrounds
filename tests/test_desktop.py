@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QStackedWidget
 from better_backgrounds.build_session import IdleBuild
 from better_backgrounds.desktop.app import packaged_worker_command
 from better_backgrounds.desktop.bridge import RendererBridge
+from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.desktop.webview import navigation_is_allowed
@@ -47,6 +48,13 @@ def test_main_window_contains_four_independent_product_tabs() -> None:
     assert window.active_tab == 0
     assert isinstance(window.build_session.state, IdleBuild)
     window.close()
+
+
+def test_application_icon_loads_from_package_data() -> None:
+    """Keep the shared vector mark available to source and packaged builds."""
+    application()
+
+    assert not application_icon().isNull()
 
 
 def test_tabs_can_be_opened_in_any_order() -> None:

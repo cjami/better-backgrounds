@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow, development_worker_command
 from better_backgrounds.desktop.theme import STYLESHEET
 from better_backgrounds.fake_worker import FakeOutcome, run_fake_job
@@ -56,6 +57,7 @@ def main() -> int:
     application = cast("QApplication | None", QApplication.instance()) or QApplication(sys.argv)
     application.setApplicationName("Better Backgrounds")
     application.setOrganizationName("Better Backgrounds")
+    application.setWindowIcon(application_icon())
     application.setStyleSheet(STYLESHEET)
     window = MainWindow(command_factory=packaged_worker_command)
     window.show()

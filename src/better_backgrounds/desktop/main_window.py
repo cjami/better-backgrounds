@@ -29,6 +29,7 @@ from better_backgrounds.build_session import (
     RunningBuild,
     VideoSelection,
 )
+from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.pages import AdjustPage, BuildPage, ComparePage, ShowPage
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.job_runner import JobRunner
@@ -74,7 +75,7 @@ class TabHeader(QFrame):
         layout.setContentsMargins(24, 12, 24, 12)
         logo = QLabel()
         logo.setFixedSize(22, 22)
-        logo.setStyleSheet("background: #e0a34a; border-radius: 6px;")
+        logo.setPixmap(application_icon().pixmap(22, 22))
         layout.addWidget(logo)
         brand = QLabel("Better Backgrounds")
         brand.setObjectName("brand")
