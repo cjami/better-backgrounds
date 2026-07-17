@@ -384,6 +384,7 @@ class ShowPage(QWidget):
             "seed-ready",
             "initializing",
             "live",
+            "lost",
         }
         labels = {
             "starting": "●  PREVIEW STARTING",
@@ -400,14 +401,19 @@ class ShowPage(QWidget):
         self._preview_note.setText("" if state == "live" else message)
         self._seed_controls.setVisible(state in {"seed-ready", "seed-error"})
         self._confirm_seed.setVisible(state == "seed-ready")
-        self._reselect_person.setVisible(state == "live")
+        self._reselect_person.setVisible(state in {"live", "lost"})
+        self._reselect_person.setText(
+            "Find person again" if state == "lost" else "Re-select person",
+        )
         if state == "live":
             self._preview_hint.setText("MatAnyone 2 · local preview")
         elif state in {"seeding", "seed-ready", "initializing"}:
             self._preview_hint.setText("One-time target selection · webcam frames stay local")
         elif state == "seed-error":
             self._preview_hint.setText("Move into a clearer position, then retry person selection")
-        elif state in {"error", "lost"}:
+        elif state == "lost":
+            self._preview_hint.setText("Tracking is paused · choose the person again to continue")
+        elif state == "error":
             self._preview_hint.setText("Check permission or device availability, then restart")
         else:
             self._preview_hint.setText("Frames remain on this device")

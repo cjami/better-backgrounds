@@ -77,6 +77,24 @@ def test_failed_seed_waits_for_an_explicit_retry() -> None:
     page.close()
 
 
+def test_tracking_loss_offers_explicit_person_reselection() -> None:
+    """Pause on a lost target without silently restarting person confirmation."""
+    application()
+    page = ShowPage([], ScenePreview)
+    reselect = next(
+        button for button in page.findChildren(QPushButton) if button.text() == "Re-select person"
+    )
+    requests: list[bool] = []
+    page.reseed_requested.connect(lambda: requests.append(True))
+
+    page.set_camera_state("lost", "Tracking paused")
+    reselect.click()
+
+    assert not reselect.isHidden()
+    assert requests == [True]
+    page.close()
+
+
 def create_window(tmp_path: Path, pipeline: TrackingLiveRenderer) -> MainWindow:
     """Create a deterministic desktop with one available camera."""
     application()

@@ -2,8 +2,12 @@
 
 from typing import TYPE_CHECKING
 
+import numpy as np
+import torch
+
 from better_backgrounds.matanyone_runtime import (
     MATANYONE2_REVISION,
+    MatAnyoneRuntime,
     load_matanyone_asset_manifest,
     packaged_checkpoint_path,
 )
@@ -16,6 +20,15 @@ from better_backgrounds.matting import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+class PassthroughCore:
+    """Expose the foreground view returned by MatAnyone's inference core."""
+
+    @staticmethod
+    def output_prob_to_mask(output: torch.Tensor) -> torch.Tensor:
+        """Return a view into the model-owned probability tensor."""
+        return output[1:].squeeze(0)
 
 
 def test_live_preferences_round_trip_atomically(tmp_path: Path) -> None:
@@ -56,3 +69,16 @@ def test_matanyone_runtime_checkpoint_and_license_are_pinned() -> None:
     assert manifest.upstream_revision == MATANYONE2_REVISION
     assert manifest.license == "S-Lab-1.0-NC"
     assert checkpoint.stat().st_size == manifest.checkpoint.size
+
+
+def test_alpha_conversion_does_not_modify_temporal_model_state() -> None:
+    """Keep display conversion from scaling MatAnyone's retained probability view."""
+    runtime = MatAnyoneRuntime.__new__(MatAnyoneRuntime)
+    runtime._core = PassthroughCore()  # noqa: SLF001
+    output = torch.tensor([[[0.75, 0.25]], [[0.25, 0.75]]])
+    expected = output.clone()
+
+    alpha = runtime._alpha_array(output, output_size=(2, 1))  # noqa: SLF001
+
+    assert torch.equal(output, expected)
+    assert np.array_equal(alpha, np.array([[64, 191]], dtype=np.uint8))

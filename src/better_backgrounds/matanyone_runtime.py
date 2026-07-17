@@ -266,7 +266,7 @@ class MatAnyoneRuntime:
         output_size: tuple[int, int],
     ) -> NDArray[np.uint8]:
         matte = self._core.output_prob_to_mask(output)
-        alpha = matte.detach().float().clamp_(0.0, 1.0).mul_(255.0).round_().byte()
+        alpha = matte.detach().float().clamp(0.0, 1.0).mul(255.0).round().byte()
         array = cast("NDArray[np.uint8]", alpha.cpu().numpy())
         if (array.shape[1], array.shape[0]) != output_size:
             array = cast(

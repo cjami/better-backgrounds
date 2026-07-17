@@ -71,6 +71,7 @@ class NativeCompositeSurface(QWidget):
         self._composite_image = QImage()
         self._seed_image = QImage()
         self._mask_image = QImage()
+        self._mask_label = ""
         self._mode = "show"
         self._wipe = 52
         self._mirrored = True
@@ -114,6 +115,7 @@ class NativeCompositeSurface(QWidget):
         self._source_image = rgb_to_qimage(display_source)
         self._seed_image = rgb_to_qimage(preview)
         self._mask_image = rgb_to_qimage(np.repeat(display_mask[..., None], 3, axis=2))
+        self._mask_label = "PERSON FOUND"
         self.update()
 
     def apply_matte(self, completed: CompletedMatte) -> LiveComposite:
@@ -123,6 +125,7 @@ class NativeCompositeSurface(QWidget):
         self._raw_source = completed.source
         self._alpha = completed.alpha
         self._seed_image = QImage()
+        self._mask_label = "LIVE MATTE"
         composite = self._recompose()
         if composite is None:
             msg = "compositor did not produce an image"
@@ -160,6 +163,8 @@ class NativeCompositeSurface(QWidget):
         self._matte = None
         self._alpha = None
         self._composite_image = QImage()
+        self._mask_image = QImage()
+        self._mask_label = ""
         self._last_composite = None
         self.update()
 
@@ -186,6 +191,12 @@ class NativeCompositeSurface(QWidget):
             painter.drawLine(split, 0, split, self.height())
         if not self._mask_image.isNull():
             box = QRect(16, self.height() - 106, 144, 81)
+            painter.setPen(QColor(235, 236, 239, 190))
+            painter.drawText(
+                QRectF(box.left(), box.top() - 18, box.width(), 14),
+                Qt.AlignmentFlag.AlignLeft,
+                self._mask_label,
+            )
             painter.drawImage(box, self._mask_image)
             painter.setPen(QPen(QColor("#e0a34a"), 1))
             painter.drawRect(box)
@@ -426,7 +437,7 @@ class NativeLivePreview(QWidget):
         if self._latest_frame is not None and source.shape != self._latest_frame.shape:
             self._begin_reseed("Camera format changed; capture a new person seed…")
         self._latest_frame = source
-        if self._state != "live":
+        if self._state not in {"live", "seed-ready"}:
             self._surface.set_raw_frame(source)
         if self._state == "seeding" and not self._seed_inflight:
             candidate = self._selector.offer(source)
@@ -486,13 +497,14 @@ class NativeLivePreview(QWidget):
                 self._rate_started = time.monotonic()
                 self._active_device = event.capabilities.device_type
                 self._internal_size = event.selected_internal_size
+                self._invalid_matte_count = 0
                 device = event.capabilities.device_type.upper()
                 self._set_state("live", f"Live · MatAnyone 2 · {device}")
             elif isinstance(event, CompletedMatte):
                 self._handle_matte(event)
             elif isinstance(event, EngineFailure):
-                self._begin_reseed(
-                    f"MatAnyone 2 restarted after a worker failure: {event.message}; hold still",
+                self._pause_tracking(
+                    f"Matting stopped: {event.message}. Re-select the person to retry.",
                 )
 
     def _handle_matte(self, completed: CompletedMatte) -> None:
@@ -505,7 +517,7 @@ class NativeLivePreview(QWidget):
             else 0
         )
         if self._invalid_matte_count >= LOST_MATTE_LIMIT:
-            self._begin_reseed("Person tracking was lost; capture a new seed…")
+            self._pause_tracking("Tracking paused. Re-select the person to continue.")
             return
         self._surface.apply_matte(completed)
         self._mask_count += 1
@@ -543,6 +555,14 @@ class NativeLivePreview(QWidget):
             self.comparison_frame.emit(self._surface.grab())
 
     def _begin_reseed(self, message: str) -> None:
+        self._reset_tracking()
+        self._set_state("seeding", message)
+
+    def _pause_tracking(self, message: str) -> None:
+        self._reset_tracking()
+        self._set_state("lost", message)
+
+    def _reset_tracking(self) -> None:
         if self._engine is not None:
             self._engine.close()
             self._engine = None
@@ -552,7 +572,6 @@ class NativeLivePreview(QWidget):
         self._seed_inflight = False
         self._invalid_matte_count = 0
         self._surface.clear_matte()
-        self._set_state("seeding", message)
 
     @Slot(str)
     def _camera_failed(self, message: str) -> None:
