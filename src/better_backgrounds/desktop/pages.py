@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import TYPE_CHECKING
 
+from PIL import Image, ImageOps
+from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
@@ -32,16 +34,17 @@ from better_backgrounds.scene import CropRegion, SceneReference, Viewpoint
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from better_backgrounds.build_session import VideoSelection
     from better_backgrounds.input_camera import InputCamera
-    from better_backgrounds.video_analysis import CaptureDiagnostics
+    from better_backgrounds.sharp import SceneImageDiagnostics, SceneImageSelection
 
 STAGE_ORDER = (
-    ("validation", "Validating video"),
-    ("frame_selection", "Selecting frames"),
-    ("camera_estimation", "Estimating camera poses"),
-    ("scene_training", "Training spatial scene"),
-    ("runtime_conversion", "Preparing runtime scene"),
+    ("validation", "Validating image"),
+    ("model_preparation", "Preparing model"),
+    ("model_loading", "Loading model"),
+    ("inference", "Predicting Gaussians"),
+    ("ply_validation", "Validating PLY"),
+    ("publication", "Publishing scene"),
+    ("preview_generation", "Preparing preview"),
 )
 COMPLETE_PROGRESS = 100
 
@@ -457,11 +460,10 @@ class ShowPage(QWidget):
 
 
 class BuildPage(QWidget):
-    """Upload and process a video within one self-contained tab."""
+    """Upload and process one room image within a self-contained tab."""
 
-    video_requested = Signal()
-    sample_requested = Signal()
-    build_requested = Signal(str, str)
+    image_requested = Signal()
+    build_requested = Signal(str)
     cancel_requested = Signal()
     retry_requested = Signal()
 
@@ -487,12 +489,12 @@ class BuildPage(QWidget):
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         layout.addWidget(
-            _label("Turn a short video into a room", object_name="heroTitle"),
+            _label("Turn one photo into a room", object_name="heroTitle"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         subtitle = _label(
-            "Walk slowly around the empty space for 15-30 seconds. We rebuild it into "
-            "a 3D scene your camera can sit inside.",
+            "Choose a clear room photo. Apple SHARP creates a metric Gaussian scene "
+            "for nearby viewpoint changes, entirely on this device.",
             object_name="subtitle",
             word_wrap=True,
         )
@@ -512,19 +514,15 @@ class BuildPage(QWidget):
             _label("↑", object_name="uploadIcon"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
-        choose = QPushButton("Drop a video here, or click to choose")
+        choose = QPushButton("Choose a room photo")
         choose.setObjectName("dropAction")
-        choose.clicked.connect(self.video_requested)
+        choose.clicked.connect(self.image_requested)
         drop_layout.addWidget(choose, alignment=Qt.AlignmentFlag.AlignHCenter)
         drop_layout.addWidget(
-            _label("MP4  /  MOV  ·  15-30 s  ·  720-1080p", object_name="feedMeta"),
+            _label("JPEG  /  PNG  /  WEBP  ·  UPLOAD FIRST", object_name="feedMeta"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         layout.addWidget(drop, alignment=Qt.AlignmentFlag.AlignHCenter)
-        sample = QPushButton("No footage handy?  Use a sample clip  →")
-        sample.setObjectName("sampleAction")
-        sample.clicked.connect(self.sample_requested)
-        layout.addWidget(sample, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch()
         self._content.addWidget(page)
 
@@ -538,22 +536,27 @@ class BuildPage(QWidget):
         self._selection_name = _label("", object_name="title")
         header.addWidget(self._selection_name)
         header.addStretch()
-        self._readiness = _label("ANALYSING", object_name="muted")
+        self._readiness = _label("READY TO REVIEW", object_name="success")
         header.addWidget(self._readiness)
         card_layout.addLayout(header)
         self._review_summary = _label(
-            "Measuring capture quality…",
+            "Review the oriented source before SHARP inference.",
             object_name="subtitle",
             word_wrap=True,
         )
         card_layout.addWidget(self._review_summary)
+        self._image_preview = QLabel()
+        self._image_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_preview.setMinimumHeight(180)
+        self._image_preview.setMaximumHeight(260)
+        self._image_preview.setAccessibleName("Oriented room image preview")
+        card_layout.addWidget(self._image_preview)
         diagnostics = (
-            ("duration", "Duration & resolution"),
-            ("sharpness", "Sharpness"),
-            ("exposure", "Exposure stability"),
-            ("movement", "Camera movement"),
-            ("overlap", "Frame overlap proxy"),
-            ("frames", "Useful frames"),
+            ("dimensions", "Oriented dimensions"),
+            ("format", "Format"),
+            ("orientation", "EXIF orientation"),
+            ("focal", "Focal metadata"),
+            ("alpha", "Transparency"),
         )
         self._diagnostic_values: dict[str, QLabel] = {}
         for key, title in diagnostics:
@@ -566,30 +569,23 @@ class BuildPage(QWidget):
             row.addWidget(value)
             card_layout.addLayout(row)
         footer = QHBoxLayout()
-        back = QPushButton("Choose another video")
+        back = QPushButton("Choose another image")
         back.setObjectName("quiet")
         back.clicked.connect(self.show_upload)
         footer.addWidget(back)
         footer.addStretch()
-        footer.addWidget(_label("Developer outcome", object_name="muted"))
-        self._outcome = QComboBox()
-        self._outcome.addItem("Successful build", "success")
-        self._outcome.addItem("Recoverable failure", "failure")
-        self._outcome.addItem("Forced cancellation", "forced")
-        self._outcome.setAccessibleName("Fake worker outcome")
-        footer.addWidget(self._outcome)
-        footer.addWidget(_label("Build quality", object_name="muted"))
-        self._quality = QComboBox()
-        self._quality.setObjectName("qualityPreset")
-        self._quality.setAccessibleName("Room reconstruction quality")
-        self._quality.addItem("Preview", "preview")
-        self._quality.addItem("Balanced", "balanced")
-        self._quality.addItem("Quality", "quality")
-        self._quality.setCurrentIndex(1)
-        self._quality.setToolTip(
-            "Preview is fastest; Balanced is recommended; Quality uses the full work budget."
-        )
-        footer.addWidget(self._quality)
+        self._model_status = _label("SHARP model status pending", object_name="muted")
+        footer.addWidget(self._model_status)
+        footer.addStretch()
+        footer.addWidget(_label("Device", object_name="muted"))
+        self._device = QComboBox()
+        self._device.setObjectName("sharpDevice")
+        self._device.setAccessibleName("SHARP inference device")
+        self._device.addItem("Automatic", "auto")
+        self._device.addItem("CUDA", "cuda")
+        self._device.addItem("Apple MPS", "mps")
+        self._device.addItem("CPU", "cpu")
+        footer.addWidget(self._device)
         self._build_action = QPushButton("Build room")
         self._build_action.setObjectName("primary")
         self._build_action.clicked.connect(self._emit_build)
@@ -658,66 +654,67 @@ class BuildPage(QWidget):
         """Show the upload surface."""
         self._content.setCurrentIndex(0)
 
-    def show_review(self, selection: VideoSelection) -> None:
-        """Show capture diagnostics for the selected video."""
-        suffix = " · prepared sample" if selection.sample else ""
-        self._selection_name.setText(f"{selection.display_name}{suffix}")
+    def show_review(
+        self,
+        selection: SceneImageSelection,
+        diagnostics: SceneImageDiagnostics | None = None,
+    ) -> None:
+        """Show the oriented image, dimensions, and pre-inference warnings."""
+        self._selection_name.setText(selection.display_name)
         self._content.setCurrentIndex(1)
-
-    def set_analysis_pending(self) -> None:
-        """Keep reconstruction disabled until capture evidence is available."""
-        self._readiness.setText("ANALYSING")
-        self._set_label_style(self._readiness, "muted")
-        self._review_summary.setText("Measuring format, sharpness, exposure, and overlap…")
-        for value in self._diagnostic_values.values():
-            value.setText("—")
-        self._build_action.setEnabled(False)
-
-    def set_capture_diagnostics(self, diagnostics: CaptureDiagnostics) -> None:
-        """Render measured capture evidence and gate unsuitable input."""
-        probe = diagnostics.probe
-        self._diagnostic_values["duration"].setText(
-            f"{probe.duration_seconds:.1f} s · {probe.display_width}x{probe.display_height}"
-        )
-        self._diagnostic_values["sharpness"].setText(f"{diagnostics.median_sharpness:.0f}")
-        self._diagnostic_values["exposure"].setText(f"{diagnostics.exposure_stability:.0%} stable")
-        self._diagnostic_values["movement"].setText(f"{diagnostics.movement:.0%}")
-        self._diagnostic_values["overlap"].setText(f"{diagnostics.overlap_proxy:.0%}")
-        self._diagnostic_values["frames"].setText(
-            f"{diagnostics.selected_frames} of {diagnostics.candidate_frames}"
-        )
-        if diagnostics.suitable:
-            self._readiness.setText("SUITABLE")
+        if selection.source_path is None or diagnostics is None:
+            self._image_preview.clear()
+            self._readiness.setText("PREPARED SMOKE INPUT")
             self._set_label_style(self._readiness, "success")
-            summary = (
-                diagnostics.warnings[0]
-                if diagnostics.warnings
-                else ("The measured capture signals are suitable for a room build.")
+            self._review_summary.setText("The deterministic desktop smoke build is ready.")
+            for value in self._diagnostic_values.values():
+                value.setText("Prepared")
+            self._build_action.setEnabled(True)
+            return
+        with Image.open(selection.source_path) as opened:
+            oriented = ImageOps.exif_transpose(opened)
+            oriented.thumbnail((680, 250), Image.Resampling.LANCZOS)
+            oriented = oriented.convert("RGBA")
+            pixmap = QPixmap.fromImage(ImageQt(oriented))
+        self._image_preview.setPixmap(
+            pixmap.scaled(
+                QSize(680, 250),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
             )
-        else:
-            self._readiness.setText("NEEDS ANOTHER CAPTURE")
-            self._set_label_style(self._readiness, "danger")
-            issue = diagnostics.issues[0]
-            summary = f"{issue.message} {issue.recovery_action}"
-        self._review_summary.setText(summary)
-        self._build_action.setEnabled(diagnostics.suitable)
+        )
+        self._diagnostic_values["dimensions"].setText(f"{diagnostics.width} x {diagnostics.height}")
+        self._diagnostic_values["format"].setText(diagnostics.image_format)
+        self._diagnostic_values["orientation"].setText(
+            "Applied" if diagnostics.orientation_applied else "Already upright"
+        )
+        self._diagnostic_values["focal"].setText(
+            "Embedded" if diagnostics.has_focal_metadata else "30 mm default"
+        )
+        self._diagnostic_values["alpha"].setText(
+            "Flatten to white" if diagnostics.has_alpha else "Opaque"
+        )
+        self._readiness.setText("READY")
+        self._set_label_style(self._readiness, "success")
+        self._review_summary.setText(
+            diagnostics.warnings[0]
+            if diagnostics.warnings
+            else "The image is ready for local SHARP inference."
+        )
+        self._build_action.setEnabled(True)
 
-    def set_analysis_error(self, message: str) -> None:
-        """Show an actionable analysis failure without enabling reconstruction."""
-        self._readiness.setText("ANALYSIS UNAVAILABLE")
+    def set_image_error(self, message: str) -> None:
+        """Show an actionable decode or validation failure."""
+        self._readiness.setText("IMAGE UNAVAILABLE")
         self._set_label_style(self._readiness, "danger")
         self._review_summary.setText(message)
         self._build_action.setEnabled(False)
 
-    def set_prepared_sample_ready(self) -> None:
-        """Enable the deterministic bundled evaluation path."""
-        self._readiness.setText("PREPARED SAMPLE")
-        self._set_label_style(self._readiness, "success")
-        self._review_summary.setText("The prepared sample is ready for the pipeline smoke test.")
-        values = ("24 s · 1920x1080", "Good", "Balanced", "Smooth", "86%", "80 of 96")
-        for label, value in zip(self._diagnostic_values.values(), values, strict=True):
-            label.setText(value)
-        self._build_action.setEnabled(True)
+    def set_model_ready(self, *, ready: bool) -> None:
+        """Describe whether the research checkpoint is cached for offline use."""
+        self._model_status.setText(
+            "SHARP model ready offline" if ready else "SHARP model needs preparation"
+        )
 
     def reset_progress(self) -> None:
         """Prepare the progress surface for a new job."""
@@ -787,10 +784,7 @@ class BuildPage(QWidget):
             self._set_label_style(label, "stageDone")
 
     def _emit_build(self) -> None:
-        self.build_requested.emit(
-            str(self._outcome.currentData()),
-            str(self._quality.currentData()),
-        )
+        self.build_requested.emit(str(self._device.currentData()))
 
     @staticmethod
     def _set_label_style(label: QLabel, object_name: str) -> None:

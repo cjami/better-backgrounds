@@ -5,5 +5,13 @@
     "packager": "pyside6-deploy",
     "python_runtime": "bundled"
   },
-  "managed_tools": []
+  "scene_builder": {
+    "name": "Apple SHARP",
+    "source_revision": "1eaa046834b81852261262b41b0919f5c1efdd2e",
+    "checkpoint_sha256": "94211a75198c47f61fca7d739ba08a215418d8d398d48fddf023baccc24f073d",
+    "checkpoint_size": 2809738232,
+    "output_format": "ply",
+    "model_license": "Apple Machine Learning Research Model License Agreement",
+    "license_acceptance_required": true
+  }
 }

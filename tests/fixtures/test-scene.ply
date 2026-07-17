@@ -1,6 +1,6 @@
 ply
 format ascii 1.0
-comment Deterministic lightweight Brush-compatible Gaussian splat fixture
+comment Deterministic lightweight Gaussian splat fixture
 element vertex 8
 property float x
 property float y

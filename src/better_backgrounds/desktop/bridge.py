@@ -162,7 +162,7 @@ class LiveRendererBridge(RendererBridge):
             self.presentation_requested.emit(mode, min(100, max(0, wipe)))
 
     def request_mirroring(self, *, mirrored: bool) -> None:
-        """Mirror only the webcam foreground, never the reconstructed room."""
+        """Mirror only the webcam foreground, never the spatial room."""
         self.mirroring_requested.emit(mirrored)
 
     def request_matting_settings(self, payload: str) -> None:

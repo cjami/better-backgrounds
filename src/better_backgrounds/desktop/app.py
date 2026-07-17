@@ -14,7 +14,6 @@ from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow, development_worker_command
 from better_backgrounds.desktop.theme import STYLESHEET
 from better_backgrounds.fake_worker import FakeOutcome, run_fake_job
-from better_backgrounds.reconstruction import ReconstructionQuality
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -34,39 +33,60 @@ def packaged_worker_command(job_id: str, outcome: str) -> list[str]:
     return development_worker_command(job_id, outcome)
 
 
-def packaged_reconstruction_command(
+def packaged_sharp_command(
     job_id: str,
-    video: Path,
-    resume: bool,
-    quality: ReconstructionQuality | str,
+    image: Path,
+    device: str,
+    source_kind: str,
 ) -> list[str]:
-    """Choose a real worker command that also works in a frozen application."""
+    """Choose a SHARP worker command that also works when frozen."""
     if getattr(sys, "frozen", False) or "__compiled__" in globals():
-        command = [
+        return [
             str(Path(sys.argv[0]).resolve()),
-            "--reconstruction-worker",
-            "--video",
-            str(video),
+            "--sharp-worker",
+            "--image",
+            str(image),
             "--job-id",
             job_id,
-            "--quality",
-            ReconstructionQuality(quality).value,
+            "--device",
+            device,
+            "--source-kind",
+            source_kind,
         ]
-    else:
-        command = [
-            sys.executable,
-            "-m",
-            "better_backgrounds.cli",
-            "reconstruct",
-            str(video),
+    return [
+        sys.executable,
+        "-m",
+        "better_backgrounds.cli",
+        "sharp-build",
+        str(image),
+        "--job-id",
+        job_id,
+        "--device",
+        device,
+        "--source-kind",
+        source_kind,
+    ]
+
+
+def packaged_sharp_prepare_command(job_id: str) -> list[str]:
+    """Choose the managed checkpoint worker command for this runtime."""
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        return [
+            str(Path(sys.argv[0]).resolve()),
+            "--sharp-prepare-worker",
             "--job-id",
             job_id,
-            "--quality",
-            ReconstructionQuality(quality).value,
+            "--accept-model-license",
         ]
-    if resume:
-        command.append("--resume")
-    return command
+    return [
+        sys.executable,
+        "-m",
+        "better_backgrounds.cli",
+        "prepare-sharp",
+        "--job-id",
+        job_id,
+        "--accept-model-license",
+    ]
 
 
 def _run_packaged_worker(arguments: Sequence[str]) -> int:
@@ -84,30 +104,26 @@ def _run_packaged_worker(arguments: Sequence[str]) -> int:
     return run_fake_job(job_id, outcome=outcome)
 
 
-def _run_packaged_reconstruction(arguments: Sequence[str]) -> int:
+def _run_packaged_sharp(arguments: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--reconstruction-worker", action="store_true")
-    parser.add_argument("--video", required=True)
+    parser.add_argument("--sharp-worker", action="store_true")
+    parser.add_argument("--image", required=True)
     parser.add_argument("--job-id", required=True)
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument(
-        "--quality",
-        choices=tuple(item.value for item in ReconstructionQuality),
-        default=ReconstructionQuality.BALANCED.value,
-    )
+    parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
+    parser.add_argument("--source-kind", choices=("upload", "camera"), default="upload")
     values = parser.parse_args(arguments)
     from better_backgrounds.cli import app  # noqa: PLC0415
 
     cli_arguments = [
-        "reconstruct",
-        values.video,
+        "sharp-build",
+        values.image,
         "--job-id",
         values.job_id,
-        "--quality",
-        values.quality,
+        "--device",
+        values.device,
+        "--source-kind",
+        values.source_kind,
     ]
-    if values.resume:
-        cli_arguments.append("--resume")
     try:
         app(cli_arguments, standalone_mode=False)
     except SystemExit as error:
@@ -115,19 +131,31 @@ def _run_packaged_reconstruction(arguments: Sequence[str]) -> int:
     return 0
 
 
-def _run_packaged_pycolmap(arguments: Sequence[str]) -> int:
-    from better_backgrounds.pycolmap_worker import main as pycolmap_main  # noqa: PLC0415
+def _run_packaged_sharp_prepare(arguments: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--sharp-prepare-worker", action="store_true")
+    parser.add_argument("--job-id", required=True)
+    parser.add_argument("--accept-model-license", action="store_true")
+    values = parser.parse_args(arguments)
+    from better_backgrounds.cli import app  # noqa: PLC0415
 
-    return pycolmap_main(arguments)
+    cli_arguments = ["prepare-sharp", "--job-id", values.job_id]
+    if values.accept_model_license:
+        cli_arguments.append("--accept-model-license")
+    try:
+        app(cli_arguments, standalone_mode=False)
+    except SystemExit as error:
+        return int(error.code or 0)
+    return 0
 
 
 def main() -> int:
     """Run the desktop shell or its packaged fake-worker mode."""
     arguments = sys.argv[1:]
-    if arguments and arguments[0] == "--pycolmap-worker":
-        return _run_packaged_pycolmap(arguments[1:])
-    if "--reconstruction-worker" in arguments:
-        return _run_packaged_reconstruction(arguments)
+    if "--sharp-worker" in arguments:
+        return _run_packaged_sharp(arguments)
+    if "--sharp-prepare-worker" in arguments:
+        return _run_packaged_sharp_prepare(arguments)
     if "--fake-worker" in arguments:
         return _run_packaged_worker(arguments)
 
@@ -138,7 +166,8 @@ def main() -> int:
     application.setStyleSheet(STYLESHEET)
     window = MainWindow(
         command_factory=packaged_worker_command,
-        reconstruction_command_factory=packaged_reconstruction_command,
+        sharp_command_factory=packaged_sharp_command,
+        sharp_prepare_command_factory=packaged_sharp_prepare_command,
     )
     window.showMaximized()
     if "--build-smoke-test" in arguments:

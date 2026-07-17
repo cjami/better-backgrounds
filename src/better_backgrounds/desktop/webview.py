@@ -179,7 +179,7 @@ class SecureRendererView(QWebEngineView):
         page.setWebChannel(self._channel)
         self.setPage(page)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
-        self.setAccessibleName("Secure reconstructed scene renderer")
+        self.setAccessibleName("Secure spatial scene renderer")
         self._scene: SceneReference | None = None
         self._viewpoint = Viewpoint()
         self._load_placeholder()

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStackedLayout,
     QStackedWidget,
@@ -30,7 +31,6 @@ from better_backgrounds.build_session import (
     FailedBuild,
     ReviewBuild,
     RunningBuild,
-    VideoSelection,
 )
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.pages import AdjustPage, BuildPage, ComparePage, ShowPage
@@ -41,7 +41,6 @@ from better_backgrounds.input_camera import (
     InputCameraSource,
 )
 from better_backgrounds.job_runner import JobRunner
-from better_backgrounds.managed_tools import resolved_executable_paths
 from better_backgrounds.matting import LivePreferencesStore
 from better_backgrounds.protocol import (
     CancelledEvent,
@@ -50,7 +49,6 @@ from better_backgrounds.protocol import (
     ResultEvent,
     WarningEvent,
 )
-from better_backgrounds.reconstruction import ReconstructionQuality
 from better_backgrounds.scene import (
     AssetInstaller,
     ManagedSceneResolver,
@@ -60,16 +58,19 @@ from better_backgrounds.scene import (
     ViewpointStore,
     load_sample_manifest,
 )
-from better_backgrounds.video_analysis import CaptureDiagnostics, analyse_video_file
+from better_backgrounds.sharp import (
+    SceneImageDiagnostics,
+    SceneImageSelection,
+    SharpCheckpointInstaller,
+    inspect_scene_image,
+)
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
 
 CommandFactory = Callable[[str, str], Sequence[str]]
-ReconstructionCommandFactory = Callable[
-    [str, Path, bool, ReconstructionQuality],
-    Sequence[str],
-]
+SharpCommandFactory = Callable[[str, Path, str, str], Sequence[str]]
+SharpPrepareCommandFactory = Callable[[str], Sequence[str]]
 RendererFactory = Callable[[], QWidget]
 
 TAB_NAMES = ("Show", "Build", "Adjust", "Compare")
@@ -96,13 +97,6 @@ class AssetSignals(QObject):
     progressed = Signal(int, int)
     completed = Signal()
     failed = Signal(str)
-
-
-class AnalysisSignals(QObject):
-    """Marshal video-analysis results onto the Qt main thread."""
-
-    completed = Signal(object)
-    failed = Signal(str, str)
 
 
 class TabHeader(QFrame):
@@ -180,7 +174,8 @@ class MainWindow(QMainWindow):
         self,
         *,
         command_factory: CommandFactory,
-        reconstruction_command_factory: ReconstructionCommandFactory | None = None,
+        sharp_command_factory: SharpCommandFactory | None = None,
+        sharp_prepare_command_factory: SharpPrepareCommandFactory | None = None,
         renderer_factory: RendererFactory | None = None,
         live_renderer_factory: RendererFactory | None = None,
         camera_source: InputCameraSource | None = None,
@@ -190,8 +185,11 @@ class MainWindow(QMainWindow):
         """Create tabs and connect their task-specific signals."""
         super().__init__()
         self._command_factory = command_factory
-        self._reconstruction_command_factory = reconstruction_command_factory
-        self._resume_job_id: str | None = None
+        self._sharp_command_factory = sharp_command_factory
+        self._sharp_prepare_command_factory = sharp_prepare_command_factory
+        self._preparing_checkpoint = False
+        self._pending_device = "auto"
+        self._image_diagnostics: SceneImageDiagnostics | None = None
         self._build_session = BuildSession()
         self._runner: JobRunner | None = None
         self._signals = RunnerSignals(self)
@@ -273,8 +271,7 @@ class MainWindow(QMainWindow):
         self._camera_source.cameras_changed.connect(self._refresh_input_cameras)
         self._show_page.sample_install_requested.connect(self._install_sample)
         self._show_page.build_requested.connect(self._open_build)
-        self._build_page.video_requested.connect(self._choose_video)
-        self._build_page.sample_requested.connect(self._use_sample)
+        self._build_page.image_requested.connect(self._choose_image)
         self._build_page.build_requested.connect(self._start_build)
         self._build_page.cancel_requested.connect(self._cancel_build)
         self._build_page.retry_requested.connect(self._retry_build)
@@ -300,6 +297,7 @@ class MainWindow(QMainWindow):
             attribution=self._sample_scene.attribution,
             installed=self._asset_installer.is_ready(self._sample_scene),
         )
+        self._build_page.set_model_ready(ready=self._sharp_checkpoint.is_ready())
         self._refresh_input_cameras()
         self.select_room(self._selected_room)
         self.select_tab(0)
@@ -337,10 +335,7 @@ class MainWindow(QMainWindow):
         )
         self._live_preferences = self._live_preferences_store.load()
         self._latest_diagnostics: object | None = None
-        self._ffprobe = resolved_executable_paths(cache_root.parent / "tools-v1").get("ffprobe")
-        self._analysis_signals = AnalysisSignals(self)
-        self._analysis_signals.completed.connect(self._analysis_completed)
-        self._analysis_signals.failed.connect(self._analysis_failed)
+        self._sharp_checkpoint = SharpCheckpointInstaller(cache_root.parent / "models-v1" / "sharp")
         self._asset_signals = AssetSignals(self)
         self._asset_signals.progressed.connect(self._show_sample_progress)
         self._asset_signals.completed.connect(self._sample_installed)
@@ -375,8 +370,8 @@ class MainWindow(QMainWindow):
     def start_smoke_build(self) -> None:
         """Run the prepared sample through the successful fake worker."""
         self.select_tab(1)
-        self._use_sample()
-        self._start_build("success", ReconstructionQuality.BALANCED.value)
+        self._select_image(SceneImageSelection("Prepared smoke room", None))
+        self._start_build("auto")
 
     def _default_renderer_factory(self) -> QWidget:
         try:
@@ -620,93 +615,99 @@ class MainWindow(QMainWindow):
         self.select_tab(1)
 
     @Slot()
-    def _choose_video(self) -> None:
+    def _choose_image(self) -> None:
         path, _selected_filter = QFileDialog.getOpenFileName(
             self,
-            "Choose a room video",
+            "Choose a room photo",
             "",
-            "Room videos (*.mp4 *.mov);;All files (*)",
+            "Room images (*.jpg *.jpeg *.png *.webp);;All files (*)",
         )
         if path:
-            self._select_video(
-                VideoSelection(display_name=Path(path).name, source_path=Path(path)),
+            self._select_image(
+                SceneImageSelection(display_name=Path(path).name, source_path=Path(path)),
             )
 
-    @Slot()
-    def _use_sample(self) -> None:
-        self._select_video(VideoSelection("Prepared loft sample", None, sample=True))
-
-    def _select_video(self, selection: VideoSelection) -> None:
-        self._build_session.select_video(selection)
-        self._build_page.show_review(selection)
-        if selection.sample:
-            self._build_page.set_prepared_sample_ready()
+    def _select_image(self, selection: SceneImageSelection) -> None:
+        self._build_session.select_image(selection)
+        if selection.source_path is None:
+            self._image_diagnostics = None
+            self._build_page.show_review(selection)
             return
-        self._build_page.set_analysis_pending()
-        ffprobe = self._ffprobe
-        if selection.source_path is None or ffprobe is None:
-            self._build_page.set_analysis_error(
-                "Video analysis requires the pinned FFmpeg tools. Run setup --tools and doctor."
-            )
+        try:
+            diagnostics = inspect_scene_image(selection.source_path)
+        except ValueError as error:
+            self._image_diagnostics = None
+            self._build_page.show_review(selection)
+            self._build_page.set_image_error(str(error))
             return
-        source = selection.source_path.resolve()
+        self._image_diagnostics = diagnostics
+        self._build_page.show_review(selection, diagnostics)
 
-        def analyse() -> None:
-            try:
-                diagnostics = analyse_video_file(source, ffprobe)
-            except (OSError, TypeError, ValueError) as error:
-                self._analysis_signals.failed.emit(str(source), str(error)[:500])
-            else:
-                self._analysis_signals.completed.emit(diagnostics)
-
-        threading.Thread(target=analyse, name="capture-analysis", daemon=True).start()
-
-    @Slot(object)
-    def _analysis_completed(self, result: object) -> None:
-        if not isinstance(result, CaptureDiagnostics) or not self._review_matches(
-            result.probe.path
-        ):
-            return
-        self._build_page.set_capture_diagnostics(result)
-
-    @Slot(str, str)
-    def _analysis_failed(self, source: str, message: str) -> None:
-        if self._review_matches(Path(source)):
-            self._build_page.set_analysis_error(message)
-
-    def _review_matches(self, source: Path) -> bool:
-        state = self._build_session.state
-        return bool(
-            isinstance(state, ReviewBuild)
-            and state.selection.source_path is not None
-            and state.selection.source_path.resolve() == source.resolve()
-        )
-
-    @Slot(str, str)
-    def _start_build(self, outcome: str, quality_name: str) -> None:
+    @Slot(str)
+    def _start_build(self, device_name: str) -> None:
         state = self._build_session.state
         if not isinstance(state, ReviewBuild):
             return
-        job_id = self._resume_job_id or uuid4().hex
-        resume = self._resume_job_id is not None
-        self._resume_job_id = None
+        selection = state.selection
+        if selection.source_path is not None and not self._sharp_checkpoint.is_ready():
+            if self._sharp_prepare_command_factory is None:
+                self._build_page.set_image_error(
+                    "The SHARP checkpoint is not prepared. Run prepare-sharp after reviewing "
+                    "Apple's research-only model license."
+                )
+                return
+            answer = QMessageBox.question(
+                self,
+                "Prepare Apple SHARP model",
+                "SHARP's 2.8 GB checkpoint is licensed only for non-commercial scientific "
+                "research and excludes product development. Accept that model license and "
+                "download the pinned checkpoint now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        job_id = uuid4().hex
         self._build_session.start(job_id)
         self._build_page.reset_progress()
+        self._pending_device = device_name
+        if selection.source_path is None:
+            self._start_runner(self._command_factory(job_id, "success"), job_id)
+        elif not self._sharp_checkpoint.is_ready():
+            self._preparing_checkpoint = True
+            factory = self._sharp_prepare_command_factory
+            if factory is None:
+                return
+            self._start_runner(factory(job_id), job_id)
+        else:
+            self._launch_sharp(job_id, selection, device_name)
+
+    def _launch_sharp(
+        self,
+        job_id: str,
+        selection: SceneImageSelection,
+        device_name: str,
+    ) -> None:
+        source = selection.source_path
+        factory = self._sharp_command_factory
+        if source is None or factory is None:
+            self._handle_job_event(
+                ErrorEvent(
+                    job_id=job_id,
+                    code="sharp_worker_unavailable",
+                    message="The SHARP build worker is unavailable.",
+                    recovery_action="Reinstall the complete application runtime.",
+                )
+            )
+            return
+        self._start_runner(
+            factory(job_id, source, device_name, selection.source_kind),
+            job_id,
+        )
+
+    def _start_runner(self, command: Sequence[str], job_id: str) -> None:
         runner = JobRunner(self._signals.event_received.emit)
         self._runner = runner
-        quality = ReconstructionQuality(quality_name)
-        if (
-            state.selection.source_path is not None
-            and self._reconstruction_command_factory is not None
-        ):
-            command = self._reconstruction_command_factory(
-                job_id,
-                state.selection.source_path,
-                resume,
-                quality,
-            )
-        else:
-            command = self._command_factory(job_id, outcome)
         runner.start(command, job_id=job_id)
 
     @Slot()
@@ -717,11 +718,18 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _retry_build(self) -> None:
-        failed_state = self._build_session.state
-        if isinstance(failed_state, FailedBuild) and self._runner is not None:
-            self._resume_job_id = self._runner.job_id
         state = self._build_session.retry()
-        self._build_page.show_review(state.selection)
+        selection = state.selection
+        if selection.source_path is None:
+            self._build_page.show_review(selection)
+            return
+        try:
+            self._image_diagnostics = inspect_scene_image(selection.source_path)
+        except ValueError as error:
+            self._build_page.show_review(selection)
+            self._build_page.set_image_error(str(error))
+        else:
+            self._build_page.show_review(selection, self._image_diagnostics)
 
     @Slot(object)
     def _handle_job_event(self, event: object) -> None:
@@ -730,7 +738,8 @@ class MainWindow(QMainWindow):
             ProgressEvent | WarningEvent | ResultEvent | ErrorEvent | CancelledEvent,
         ):
             return
-        previous_state = self._build_session.state
+        if self._finish_checkpoint_preparation(event):
+            return
         if not self._build_session.apply(event):
             return
         state = self._build_session.state
@@ -739,9 +748,11 @@ class MainWindow(QMainWindow):
         elif isinstance(state, FailedBuild):
             self._build_page.set_failed(state.message, state.recovery_action)
         elif isinstance(state, ReviewBuild):
-            if isinstance(previous_state, RunningBuild) and isinstance(event, CancelledEvent):
-                self._resume_job_id = previous_state.job_id
-            self._build_page.show_review(state.selection)
+            self._preparing_checkpoint = False
+            diagnostics = (
+                self._image_diagnostics if state.selection.source_path is not None else None
+            )
+            self._build_page.show_review(state.selection, diagnostics)
         elif isinstance(state, CompletedBuild):
             scene = self._catalogue.find(state.scene_id)
             if scene is not None and self._asset_installer.is_ready(scene):
@@ -760,6 +771,17 @@ class MainWindow(QMainWindow):
             self._build_page.set_completed(room_name)
             self.room_ready.emit()
 
+    def _finish_checkpoint_preparation(self, event: object) -> bool:
+        if not self._preparing_checkpoint or not isinstance(event, ResultEvent):
+            return False
+        state = self._build_session.state
+        if not isinstance(state, RunningBuild) or event.job_id != state.job_id:
+            return False
+        self._preparing_checkpoint = False
+        self._build_page.set_model_ready(ready=True)
+        self._launch_sharp(state.job_id, state.selection, self._pending_device)
+        return True
+
     def _scene_for_room(self, room: str) -> SceneReference | None:
         if room == self._sample_scene.display_name:
             return self._sample_scene
@@ -767,9 +789,7 @@ class MainWindow(QMainWindow):
         return self._generated_scenes.get(room_id) if room_id is not None else None
 
     @staticmethod
-    def _room_name_for(selection: VideoSelection) -> str:
-        if selection.sample:
-            return "Loft — North Window"
+    def _room_name_for(selection: SceneImageSelection) -> str:
         return Path(selection.display_name).stem.replace("_", " ").strip().title()
 
     @staticmethod

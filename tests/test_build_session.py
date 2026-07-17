@@ -11,28 +11,28 @@ from better_backgrounds.build_session import (
     InvalidBuildStateError,
     ReviewBuild,
     RunningBuild,
-    VideoSelection,
 )
 from better_backgrounds.protocol import ErrorEvent, ProgressEvent, ResultEvent
+from better_backgrounds.sharp import SceneImageSelection
 
 
-def selection() -> VideoSelection:
-    """Create a stable video selection."""
-    return VideoSelection("room.mp4", Path("room.mp4"))
+def selection() -> SceneImageSelection:
+    """Create a stable room-image selection."""
+    return SceneImageSelection("room.jpg", Path("room.jpg"))
 
 
 def test_successful_build_completes_without_controlling_navigation() -> None:
     """Track review, progress, and completion for one job."""
     session = BuildSession()
-    assert isinstance(session.select_video(selection()), ReviewBuild)
+    assert isinstance(session.select_image(selection()), ReviewBuild)
     assert isinstance(session.start("job-1"), RunningBuild)
 
     assert session.apply(
         ProgressEvent(
             job_id="job-1",
-            stage="camera_estimation",
+            stage="inference",
             progress=0.5,
-            message="Estimating poses",
+            message="Predicting Gaussians",
         ),
     )
     assert isinstance(session.state, RunningBuild)
@@ -43,7 +43,7 @@ def test_successful_build_completes_without_controlling_navigation() -> None:
 def test_stale_job_events_are_ignored() -> None:
     """Prevent an old process from changing the active build."""
     session = BuildSession()
-    session.select_video(selection())
+    session.select_image(selection())
     session.start("current")
 
     accepted = session.apply(
@@ -57,15 +57,15 @@ def test_stale_job_events_are_ignored() -> None:
 def test_failure_preserves_selection_for_retry() -> None:
     """Retain user context after a failed build."""
     session = BuildSession()
-    session.select_video(selection())
+    session.select_image(selection())
     session.start("job-1")
 
     session.apply(
         ErrorEvent(
             job_id="job-1",
             code="failed",
-            message="Could not estimate cameras",
-            recovery_action="Capture more overlap",
+            message="Could not load the SHARP model",
+            recovery_action="Prepare the checkpoint",
         ),
     )
 
@@ -73,7 +73,7 @@ def test_failure_preserves_selection_for_retry() -> None:
     assert isinstance(session.retry(), ReviewBuild)
 
 
-def test_build_requires_a_reviewed_video() -> None:
-    """Reject a build that has no selected video."""
+def test_build_requires_a_reviewed_image() -> None:
+    """Reject a build that has no selected image."""
     with pytest.raises(InvalidBuildStateError):
         BuildSession().start("job-1")

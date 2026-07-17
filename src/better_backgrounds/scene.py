@@ -21,6 +21,8 @@ from PySide6.QtCore import QUrl
 SCENE_SCHEME = "bbscene"
 APP_SCHEME = "bbapp"
 CHUNK_SIZE = 64 * 1024
+SOURCE_SIZE_DIMENSIONS = 2
+SCENE_CATALOGUE_V2 = 2
 
 
 class StrictModel(BaseModel):
@@ -129,6 +131,11 @@ def colmap_scene_transform() -> SceneTransform:
     return SceneTransform(orientation=Quaternion(z=1.0, w=0.0))
 
 
+def sharp_scene_transform() -> SceneTransform:
+    """Convert SHARP's OpenCV basis to the PlayCanvas scene basis."""
+    return SceneTransform(orientation=Quaternion(x=1.0, w=0.0))
+
+
 class Viewpoint(StrictModel):
     """Persist every safe virtual-camera and subject-placement input."""
 
@@ -194,12 +201,36 @@ class AssetResource(StrictModel):
         return path.as_posix()
 
 
+class SceneProvenance(StrictModel):
+    """Record reproducible local-scene build evidence without retaining input pixels."""
+
+    source_kind: Literal["upload", "camera"]
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_size: tuple[int, int]
+    builder_name: str = Field(default="Apple SHARP", min_length=1, max_length=80)
+    builder_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    checkpoint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    device: Literal["cuda", "mps", "cpu"]
+    inference_ms: float = Field(ge=0.0, allow_inf_nan=False)
+    license_name: str = Field(min_length=1, max_length=100)
+    license_url: HttpUrl | None = None
+
+    @field_validator("source_size")
+    @classmethod
+    def positive_source_size(cls, value: tuple[int, int]) -> tuple[int, int]:
+        """Require a positive width and height."""
+        if len(value) != SOURCE_SIZE_DIMENSIONS or any(dimension <= 0 for dimension in value):
+            msg = "source size must contain a positive width and height"
+            raise ValueError(msg)
+        return value
+
+
 class SceneReference(StrictModel):
     """Describe an application-owned scene without exposing a local path."""
 
     asset_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{2,63}$")
     display_name: str = Field(min_length=1, max_length=100)
-    format: Literal["sog"]
+    format: Literal["sog", "ply"]
     entrypoint: str = Field(min_length=1, max_length=200)
     resources: tuple[AssetResource, ...] = Field(min_length=1)
     license_name: str = Field(min_length=1, max_length=80)
@@ -208,6 +239,7 @@ class SceneReference(StrictModel):
     attribution_url: HttpUrl | None = None
     preview: str | None = Field(default=None, max_length=200)
     default_viewpoint: Viewpoint = Field(default_factory=Viewpoint)
+    provenance: SceneProvenance | None = None
 
     @model_validator(mode="after")
     def valid_entrypoint(self) -> Self:
@@ -472,6 +504,13 @@ class LegacySceneCatalogueDocument(StrictModel):
 class SceneCatalogueDocument(StrictModel):
     """Version locally generated rooms separately from bundled samples."""
 
+    schema_version: Literal[3] = 3
+    scenes: tuple[SceneReference, ...] = ()
+
+
+class SceneCatalogueV2Document(StrictModel):
+    """Read normalized generated rooms written before SHARP provenance."""
+
     schema_version: Literal[2] = 2
     scenes: tuple[SceneReference, ...] = ()
 
@@ -513,6 +552,9 @@ class SceneCatalogue:
                         normalize_colmap_scene_reference(scene) for scene in legacy.scenes
                     ),
                 )
+            if isinstance(payload, dict) and payload.get("schema_version") == SCENE_CATALOGUE_V2:
+                previous = SceneCatalogueV2Document.model_validate(payload)
+                return SceneCatalogueDocument(scenes=previous.scenes)
             return SceneCatalogueDocument.model_validate(payload)
         except OSError, TypeError, ValueError:
             return SceneCatalogueDocument()

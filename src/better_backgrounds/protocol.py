@@ -23,7 +23,7 @@ class EventEnvelope(WireModel):
 
 
 class ProgressEvent(EventEnvelope):
-    """Report defensible progress for one reconstruction stage."""
+    """Report defensible progress for one bounded worker stage."""
 
     type: Literal["progress"] = "progress"
     stage: str = Field(min_length=1, max_length=80)

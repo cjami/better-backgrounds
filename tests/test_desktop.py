@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from better_backgrounds.build_session import IdleBuild
 from better_backgrounds.desktop.app import (
-    packaged_reconstruction_command,
+    packaged_sharp_command,
     packaged_worker_command,
 )
 from better_backgrounds.desktop.bridge import LiveRendererBridge, RendererBridge
@@ -86,9 +86,9 @@ def test_main_window_contains_four_independent_product_tabs() -> None:
     assert all(tab.isEnabled() for tab in tabs)
     assert window.active_tab == 0
     assert isinstance(window.build_session.state, IdleBuild)
-    quality = window.findChild(QComboBox, "qualityPreset")
-    assert quality is not None
-    assert quality.currentData() == "balanced"
+    device = window.findChild(QComboBox, "sharpDevice")
+    assert device is not None
+    assert device.currentData() == "auto"
     window.close()
 
 
@@ -353,19 +353,19 @@ def test_frozen_application_reuses_its_executable_for_workers(
     assert command[:2] == [str(Path(sys.argv[0]).resolve()), "--fake-worker"]
 
 
-def test_frozen_application_reuses_its_executable_for_reconstruction(
+def test_frozen_application_reuses_its_executable_for_sharp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Keep real reconstruction inside the packaged worker dispatch."""
+    """Keep SHARP inference inside the packaged worker dispatch."""
     monkeypatch.setattr(sys, "frozen", True, raising=False)
 
-    command = packaged_reconstruction_command(
+    command = packaged_sharp_command(
         "job-1",
-        Path("room video.mp4"),
-        resume=True,
-        quality="preview",
+        Path("room image.jpg"),
+        "cuda",
+        "upload",
     )
 
-    assert command[:2] == [str(Path(sys.argv[0]).resolve()), "--reconstruction-worker"]
-    assert command[command.index("--quality") + 1] == "preview"
-    assert command[-1] == "--resume"
+    assert command[:2] == [str(Path(sys.argv[0]).resolve()), "--sharp-worker"]
+    assert command[command.index("--device") + 1] == "cuda"
+    assert command[command.index("--source-kind") + 1] == "upload"

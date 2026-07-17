@@ -20,10 +20,12 @@ dependencies = [
     "omegaconf>=2.3.1",
     "pillow>=12.2.0",
     "platformdirs>=4.5.1",
+    "plyfile==1.1.2",
     "psutil>=7.2.2",
     "pydantic>=2.12.5",
-    "pycolmap==4.1.0",
     "pyside6>=6.10.2",
+    "scipy==1.16.2",
+    "timm==1.0.20",
     "torch==2.11.0",
     "torchvision==0.26.0",
     "tqdm>=4.68.4",
@@ -68,7 +70,6 @@ extend-exclude = [
     "jobs",
     "media",
     "models",
-    "reconstructions",
     "samples/downloads",
 ]
 
@@ -116,8 +117,18 @@ ignore = [
     "PLR0913", # Constructor injection keeps native services replaceable in tests.
     "PLR0915", # Declarative window composition is clearest in the constructor.
 ]
-"src/better_backgrounds/reconstruction_worker.py" = [
-    "PLR0913", # Worker dependencies remain explicit and independently replaceable.
+"src/better_backgrounds/sharp.py" = [
+    "C901", # Binary PLY parsing remains cohesive at one untrusted-file boundary.
+    "PLR0912", # PLY validation branches mirror independent corruption checks.
+    "PLR0913", # Build and PLY trust boundaries keep their evidence explicit.
+    "PLR0915", # PLY validation remains cohesive at one managed publication boundary.
+    "TRY301", # Validation failures stay beside the exact array check that found them.
+]
+"src/better_backgrounds/sharp_worker.py" = [
+    "PLR0913", # Spawn-safe worker dependencies remain explicit and replaceable.
+]
+"src/better_backgrounds/sharp_runtime.py" = [
+    "PLR0913", # The predictor boundary mirrors the exact inference inputs and stage callback.
 ]
 
 [tool.ruff.lint.isort]
@@ -157,13 +168,11 @@ files = [
     "src/better_backgrounds/matting_engine.py",
     "src/better_backgrounds/matting_quality.py",
     "src/better_backgrounds/matting_worker.py",
-    "src/better_backgrounds/managed_tools.py",
-    "src/better_backgrounds/pycolmap_worker.py",
-    "src/better_backgrounds/reconstruction.py",
-    "src/better_backgrounds/reconstruction_worker.py",
     "src/better_backgrounds/scene.py",
     "src/better_backgrounds/seed_mask.py",
-    "src/better_backgrounds/video_analysis.py",
+    "src/better_backgrounds/sharp.py",
+    "src/better_backgrounds/sharp_runtime.py",
+    "src/better_backgrounds/sharp_worker.py",
 ]
 
 [[tool.uv.index]]

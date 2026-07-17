@@ -15,7 +15,7 @@ from better_backgrounds.protocol import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from better_backgrounds.sharp import SceneImageSelection
 
 
 class InvalidBuildStateError(RuntimeError):
@@ -23,31 +23,22 @@ class InvalidBuildStateError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class VideoSelection:
-    """A room video selected entirely within the trusted Python process."""
-
-    display_name: str
-    source_path: Path | None
-    sample: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class IdleBuild:
-    """Wait for a room video."""
+    """Wait for a room image."""
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewBuild:
-    """Show deterministic placeholder capture diagnostics."""
+    """Show the correctly oriented image and its diagnostics."""
 
-    selection: VideoSelection
+    selection: SceneImageSelection
 
 
 @dataclass(frozen=True, slots=True)
 class RunningBuild:
-    """Track one active reconstruction job."""
+    """Track one active SHARP scene-build job."""
 
-    selection: VideoSelection
+    selection: SceneImageSelection
     job_id: str
     stage: str = "validation"
     progress: float | None = 0.0
@@ -58,7 +49,7 @@ class RunningBuild:
 class FailedBuild:
     """Preserve enough context for an explicit retry."""
 
-    selection: VideoSelection
+    selection: SceneImageSelection
     message: str
     recovery_action: str | None
 
@@ -67,7 +58,7 @@ class FailedBuild:
 class CompletedBuild:
     """Record the room created by a successful job."""
 
-    selection: VideoSelection
+    selection: SceneImageSelection
     scene_id: str
 
 
@@ -78,7 +69,7 @@ class BuildSession:
     """Own the lifecycle of a build without controlling the app's tabs."""
 
     def __init__(self) -> None:
-        """Start without a selected video."""
+        """Start without a selected image."""
         self._state: BuildState = IdleBuild()
 
     @property
@@ -86,10 +77,10 @@ class BuildSession:
         """Return the current immutable build state."""
         return self._state
 
-    def select_video(self, selection: VideoSelection) -> ReviewBuild:
-        """Select a video unless a build is currently running."""
+    def select_image(self, selection: SceneImageSelection) -> ReviewBuild:
+        """Select an image unless a build is currently running."""
         if isinstance(self._state, RunningBuild):
-            msg = "A video cannot be replaced while its build is running."
+            msg = "An image cannot be replaced while its build is running."
             raise InvalidBuildStateError(msg)
         next_state = ReviewBuild(selection)
         self._state = next_state
@@ -98,7 +89,7 @@ class BuildSession:
     def start(self, job_id: str) -> RunningBuild:
         """Start a job after reviewing a selection."""
         if not isinstance(self._state, ReviewBuild):
-            msg = "A build requires a reviewed video selection."
+            msg = "A build requires a reviewed image selection."
             raise InvalidBuildStateError(msg)
         next_state = RunningBuild(selection=self._state.selection, job_id=job_id)
         self._state = next_state

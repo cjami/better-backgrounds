@@ -28,7 +28,7 @@
     "code": "camera_estimation_failed",
     "message": "Not enough frames registered",
     "recovery_action": "Capture the room again with more overlap",
-    "log_reference": "jobs/job-2/logs/reconstruction.log"
+    "log_reference": "jobs/job-2/logs/worker.log"
   },
   {
     "schema_version": 1,

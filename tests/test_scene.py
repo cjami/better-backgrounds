@@ -202,6 +202,33 @@ def test_legacy_generated_catalogue_migrates_colmap_orientation(tmp_path: Path) 
     assert migrated.default_viewpoint.scene_transform == colmap_scene_transform()
 
 
+def test_v2_catalogue_is_read_without_reapplying_colmap_orientation(tmp_path: Path) -> None:
+    """Preserve already-normalized v2 rooms while exposing them through the v3 reader."""
+    reference = scene_reference(resource("meta.json", b"metadata"))
+    path = tmp_path / "catalogue.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "scenes": [reference.model_dump(mode="json")],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert SceneCatalogue(path).find(reference.asset_id) == reference
+
+
+def test_generated_catalogue_is_saved_as_schema_v3(tmp_path: Path) -> None:
+    """Publish the current PLY-capable scene contract under schema v3."""
+    reference = scene_reference(resource("meta.json", b"metadata"))
+    path = tmp_path / "catalogue.json"
+
+    SceneCatalogue(path).save(reference)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 3
+
+
 def test_interrupted_download_can_retry_cleanly(tmp_path: Path) -> None:
     """Clean staging files after interruption so a later attempt can succeed."""
     content = b"complete scene"

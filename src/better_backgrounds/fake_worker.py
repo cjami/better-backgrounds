@@ -21,11 +21,13 @@ from better_backgrounds.protocol import (
 
 FakeOutcome = Literal["success", "failure", "forced", "malformed", "unexpected-exit"]
 STAGES = (
-    ("validation", "Validating room video"),
-    ("frame_selection", "Selecting sharp, well-spaced frames"),
-    ("camera_estimation", "Estimating camera poses"),
-    ("scene_training", "Training the spatial scene"),
-    ("runtime_conversion", "Preparing the runtime scene"),
+    ("validation", "Validating the room image"),
+    ("model_preparation", "Preparing the pinned SHARP model"),
+    ("model_loading", "Loading the SHARP predictor"),
+    ("inference", "Predicting metric Gaussians"),
+    ("ply_validation", "Validating scene geometry"),
+    ("publication", "Publishing the managed scene"),
+    ("preview", "Preparing the room preview"),
 )
 
 
@@ -93,23 +95,23 @@ def run_fake_job(
                 ),
             )
             time.sleep(delay)
-        if stage == "frame_selection":
+        if stage == "validation":
             _write_event(
                 output_stream,
                 WarningEvent(
                     job_id=job_id,
-                    code="minor_motion",
-                    message="Minor curtain movement will be down-weighted.",
+                    code="default_focal_length",
+                    message="The smoke input uses SHARP's default focal length.",
                 ),
             )
-        if outcome == "failure" and stage == "camera_estimation":
+        if outcome == "failure" and stage == "inference":
             _write_event(
                 output_stream,
                 ErrorEvent(
                     job_id=job_id,
-                    code="fake_camera_estimation_failed",
-                    message="The fake camera-estimation stage failed as requested.",
-                    recovery_action="Choose Retry or select a different video.",
+                    code="fake_sharp_inference_failed",
+                    message="The fake SHARP inference stage failed as requested.",
+                    recovery_action="Choose Retry or select a different image.",
                     log_reference=f"jobs/{job_id}/logs/fake.log",
                 ),
             )

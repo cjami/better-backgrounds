@@ -28,7 +28,7 @@ class ScenePreview(QWidget):
         super().__init__(parent)
         self._scene_image = QPixmap()
         self.setMinimumSize(480, 300)
-        self.setAccessibleName("Placeholder reconstructed room preview")
+        self.setAccessibleName("Placeholder spatial room preview")
 
     def set_scene_image(self, path: Path | None) -> None:
         """Display a verified cached room preview or the painted fallback."""
