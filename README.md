@@ -102,7 +102,11 @@ Startup calibration chooses the highest of 360p, 432p, and 540p that meets the
 33.3 ms inference budget. A three-slot shared-memory ring allows one active frame
 and one replaceable newest pending frame, dropping stale work instead of
 building latency. Every matte retains its source frame identity and timestamp;
-the native exact-frame compositor rejects mismatched source/matte pairs.
+the native exact-frame compositor rejects mismatched source/matte pairs. Small
+changes in uncertain boundary pixels are stabilized across adjacent frames while
+real movement and camera stalls release immediately. Before blending, the
+compositor estimates and removes the original room colour carried by soft edge
+pixels to avoid bright or dark halos against a contrasting replacement room.
 
 The benchmark command emits a machine-readable quality and performance gate
 report for a release reference machine:

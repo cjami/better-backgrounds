@@ -26,12 +26,8 @@ HARMONIZER_CHECKPOINT_ENV = "BETTER_BACKGROUNDS_HARMONIZER_CHECKPOINT"
 SESSION_PREDICTION_SAMPLE_COUNT = 3
 SESSION_PREDICTION_SAMPLE_INTERVAL_MS = 100.0
 SESSION_TRANSITION_MS = 750.0
-EDGE_DECONTAMINATION_STRENGTH = 0.12
 RGB_CHANNELS = 3
 RGB_DIMENSIONS = 3
-OPAQUE_ALPHA = 255
-EDGE_ALPHA_MINIMUM = 16
-EDGE_ALPHA_MAXIMUM = 239
 
 
 def checkpoint_from_environment() -> Path | None:
@@ -281,23 +277,10 @@ class HarmonizerAppearanceHarmonizer:
         if background.dtype != np.uint8 or background.shape != source.shape:
             msg = "background must be uint8 RGB and match source"
             raise ValueError(msg)
-        clean_source = source.copy()
-        uncertain = (alpha >= EDGE_ALPHA_MINIMUM) & (alpha <= EDGE_ALPHA_MAXIMUM)
-        if np.any(uncertain):
-            weights = alpha[uncertain].astype(np.float32) / 255.0
-            uncertainty = weights * (1.0 - weights) * 4.0 * EDGE_DECONTAMINATION_STRENGTH
-            source_edge = source[uncertain].astype(np.float32)
-            background_edge = background[uncertain].astype(np.float32)
-            cleaned = source_edge + (source_edge - background_edge) * uncertainty[:, None]
-            clean_source[uncertain] = np.rint(np.clip(cleaned, 0, 255)).astype(np.uint8)
         weight = alpha.astype(np.float32) / 255.0
-        composite = cv2.blendLinear(clean_source, background, weight, 1.0 - weight)
+        composite = cv2.blendLinear(source, background, weight, 1.0 - weight)
         cv2.copyTo(background, np.equal(alpha, 0).astype(np.uint8), composite)
-        cv2.copyTo(
-            clean_source,
-            np.equal(alpha, OPAQUE_ALPHA).astype(np.uint8),
-            composite,
-        )
+        cv2.copyTo(source, np.equal(alpha, 255).astype(np.uint8), composite)
         return cast("NDArray[np.uint8]", composite)
 
     @staticmethod

@@ -123,6 +123,29 @@ def test_compositor_preserves_reference_blend_at_all_alpha_levels() -> None:
     assert np.array_equal(composite.image, expected)
 
 
+def test_compositor_blends_a_refined_foreground_but_retains_raw_source() -> None:
+    """Keep camera evidence intact while using decontaminated boundary colours."""
+    source = np.full((1, 1, 3), 200, dtype=np.uint8)
+    foreground = np.full((1, 1, 3), 40, dtype=np.uint8)
+    background = np.zeros_like(source)
+    alpha = np.full((1, 1), 128, dtype=np.uint8)
+    packet = FramePacket(4, 40.0, 1, 1, 0)
+    matte = MatteResult(4, 40.0, 0, 10.0)
+
+    composite = compose_live_frame(
+        packet,
+        matte,
+        source,
+        alpha,
+        background,
+        revision=1,
+        foreground=foreground,
+    )
+
+    assert np.array_equal(composite.source, source)
+    assert int(composite.image[0, 0, 0]) == 20
+
+
 def test_background_content_rejects_transient_uniform_renderer_frames() -> None:
     """Keep the last room snapshot when WebEngine briefly grabs its clear frame."""
     clear_frame = np.full((4, 4, 3), [9, 9, 11], dtype=np.uint8)

@@ -17,6 +17,7 @@ from better_backgrounds.live_matting import (
     calibration_p95_latency,
     choose_internal_size,
 )
+from better_backgrounds.matte_refinement import TemporalAlphaStabilizer
 
 if TYPE_CHECKING:
     from multiprocessing.queues import Queue
@@ -101,6 +102,7 @@ def matting_worker_main(
             runtime.reconfigure(config)
         seed_alpha = runtime.initialize(seed_frame, seed_mask)
         ring.write_alpha(seed_packet.shared_slot, seed_alpha)
+        stabilizer = TemporalAlphaStabilizer()
         events.put(
             WorkerReady(
                 capabilities=runtime.capabilities,
@@ -122,6 +124,7 @@ def matting_worker_main(
             try:
                 alpha = runtime.step(ring.read_frame(command.shared_slot))
                 runtime.synchronize()
+                alpha = stabilizer.apply(alpha, captured_at=command.captured_at)
                 ring.write_alpha(command.shared_slot, alpha)
             except Exception as error:  # noqa: BLE001
                 events.put(

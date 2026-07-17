@@ -170,6 +170,7 @@ files = [
     "src/better_backgrounds/input_camera.py",
     "src/better_backgrounds/live_matting.py",
     "src/better_backgrounds/matting.py",
+    "src/better_backgrounds/matte_refinement.py",
     "src/better_backgrounds/matanyone_runtime.py",
     "src/better_backgrounds/matting_benchmark.py",
     "src/better_backgrounds/matting_engine.py",

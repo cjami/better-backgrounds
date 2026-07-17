@@ -75,6 +75,7 @@ def compose_live_frame(
     background: NDArray[np.uint8],
     *,
     revision: int,
+    foreground: NDArray[np.uint8] | None = None,
     harmonizer: LiveHarmonizer | None = None,
     retain_standard: bool = True,
 ) -> LiveComposite:
@@ -93,6 +94,11 @@ def compose_live_frame(
         raise ValueError(msg)
     if alpha.dtype != np.uint8 or alpha.shape != expected_alpha:
         msg = f"alpha must be {expected_alpha} uint8"
+        raise ValueError(msg)
+    if foreground is not None and (
+        foreground.dtype != np.uint8 or foreground.shape != expected_source
+    ):
+        msg = f"foreground must be {expected_source} uint8 RGB"
         raise ValueError(msg)
     if (
         background.dtype != np.uint8
@@ -114,9 +120,10 @@ def compose_live_frame(
     harmonization_ms = 0.0
     harmonization_degraded: tuple[str, ...] = ()
     harmonized = harmonizer is not None and harmonizer.active
+    render_source = source if foreground is None else foreground
     if harmonized and harmonizer is not None:
         result = harmonizer.apply(
-            source,
+            render_source,
             alpha,
             background,
             captured_at=packet.captured_at,
@@ -127,7 +134,7 @@ def compose_live_frame(
         harmonization_degraded = result.degraded_components
         harmonized = result.applied
     standard_image = (
-        _standard_composite(source, alpha, background)
+        _standard_composite(render_source, alpha, background)
         if image is None or retain_standard
         else image
     )

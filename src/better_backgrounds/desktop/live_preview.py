@@ -24,6 +24,7 @@ from better_backgrounds.desktop.camera_capture import QtCameraCapture, qimage_to
 from better_backgrounds.harmonizer_runtime import HarmonizerAppearanceHarmonizer
 from better_backgrounds.live_matting import LiveDiagnostics, MattingConfig, SlidingFrameRate
 from better_backgrounds.matanyone_runtime import packaged_checkpoint_path
+from better_backgrounds.matte_refinement import decontaminate_foreground
 from better_backgrounds.matting_engine import (
     CompletedMatte,
     EngineFailure,
@@ -238,6 +239,7 @@ class NativeCompositeSurface(QWidget):
                 self._resized_backgrounds[shape] = resized
             background = resized
         compare_mode = self._mode == "compare"
+        foreground = decontaminate_foreground(source, alpha)
         composite = compose_live_frame(
             completed.packet,
             completed.result,
@@ -245,6 +247,7 @@ class NativeCompositeSurface(QWidget):
             alpha,
             background,
             revision=revision,
+            foreground=foreground,
             harmonizer=self._harmonizer,
             retain_standard=compare_mode,
         )
