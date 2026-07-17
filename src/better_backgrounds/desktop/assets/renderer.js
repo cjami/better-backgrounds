@@ -62463,9 +62463,38 @@ fn getColor() -> vec4f {
 	const positionsEqual = (left, right) =>
 	  left.x === right.x && left.y === right.y && left.z === right.z;
 
+	const MAX_SCENE_CAPTURE_ATTEMPTS = 600;
+
+	const flipPixelRows = (pixels, width, height) => {
+	  const rowLength = width * 4;
+	  const temporary = new Uint8ClampedArray(rowLength);
+	  for (let top = 0; top < Math.floor(height / 2); top += 1) {
+	    const bottom = height - top - 1;
+	    const topOffset = top * rowLength;
+	    const bottomOffset = bottom * rowLength;
+	    temporary.set(pixels.subarray(topOffset, topOffset + rowLength));
+	    pixels.copyWithin(topOffset, bottomOffset, bottomOffset + rowLength);
+	    pixels.set(temporary, bottomOffset);
+	  }
+	  return pixels;
+	};
+
+	const hasPixelVariation = (pixels) => {
+	  let minimum = 765;
+	  let maximum = 0;
+	  for (let index = 0; index < pixels.length; index += 4) {
+	    const brightness = pixels[index] + pixels[index + 1] + pixels[index + 2];
+	    minimum = Math.min(minimum, brightness);
+	    maximum = Math.max(maximum, brightness);
+	    if (maximum - minimum > 12) return true;
+	  }
+	  return false;
+	};
+
 	class SceneRenderer {
-	  constructor(bridge) {
+	  constructor(bridge, { cacheSceneFrames = false } = {}) {
 	    this.bridge = bridge;
+	    this.cacheSceneFrames = cacheSceneFrames;
 	    this.app = null;
 	    this.camera = null;
 	    this.sceneEntity = null;
@@ -62475,6 +62504,12 @@ fn getColor() -> vec4f {
 	    this.viewpoint = null;
 	    this.resetViewpoint = null;
 	    this.drag = null;
+	    this.sceneFramePending = false;
+	    this.sceneFramesRemaining = 0;
+	    this.sceneSnapshot = null;
+	    this.sceneSnapshotContext = null;
+	    this.scenePixels = null;
+	    this.sceneCaptureAttempts = 0;
 	    this.warning = document.getElementById('safe-warning');
 	    this.status = document.getElementById('status');
 	    this.subjectGuide = document.getElementById('subject-guide');
@@ -62486,6 +62521,7 @@ fn getColor() -> vec4f {
 	      const device = await createGraphicsDevice(canvas, {
 	        deviceTypes: [DEVICETYPE_WEBGL2],
 	        antialias: false,
+	        preserveDrawingBuffer: true,
 	        powerPreference: 'high-performance',
 	      });
 	      const options = new AppOptions();
@@ -62509,13 +62545,18 @@ fn getColor() -> vec4f {
 	      });
 	      this.app.root.addChild(this.camera);
 	      this.app.start();
-	      this.status.textContent = device.deviceType === DEVICETYPE_WEBGPU ? 'WEBGPU' : 'WEBGL 2';
+	      this.requestSceneFrame();
+	      if (this.status) {
+	        this.status.textContent = device.deviceType === DEVICETYPE_WEBGPU ? 'WEBGPU' : 'WEBGL 2';
+	      }
 	      this.bindInput(canvas);
-	      window.addEventListener('resize', () => this.app?.resizeCanvas());
+	      window.addEventListener('resize', () => {
+	        this.app?.resizeCanvas();
+	        this.requestSceneFrame();
+	      });
 	      this.connectBridge();
-	      this.bridge.renderer_ready();
 	    } catch (error) {
-	      this.status.textContent = 'GPU UNAVAILABLE';
+	      if (this.status) this.status.textContent = 'GPU UNAVAILABLE';
 	      this.bridge.report_scene_error('renderer', 'gpu_unavailable', this.safeMessage(error));
 	    }
 	  }
@@ -62527,6 +62568,12 @@ fn getColor() -> vec4f {
 	    this.bridge.viewpoint_requested.connect((payload) => this.applyViewpoint(payload));
 	    this.bridge.reset_requested.connect(() => {
 	      if (this.resetViewpoint) this.applyViewpoint(JSON.stringify(this.resetViewpoint));
+	    });
+	    this.bridge.scene_cleared.connect(() => {
+	      this.removeScene();
+	      this.assetId = '';
+	      this.setLoading(false, 'No spatial scene selected');
+	      this.requestSceneFrame();
 	    });
 	  }
 
@@ -62546,8 +62593,10 @@ fn getColor() -> vec4f {
 	      const entity = new Entity(assetId);
 	      entity.addComponent('gsplat', { asset: loadedAsset, unified: true });
 	      this.sceneEntity = entity;
+	      this.sceneCaptureAttempts = 0;
 	      this.applySceneTransform();
 	      this.app.root.addChild(entity);
+	      this.requestSceneFrame();
 	      this.bridge.report_scene_progress(assetId, 100, 100);
 	      this.setLoading(false, 'Scene ready');
 	    });
@@ -62598,6 +62647,7 @@ fn getColor() -> vec4f {
 	      );
 	      this.applySceneTransform();
 	      this.updateSubjectGuide();
+	      this.requestSceneFrame();
 	    } catch (error) {
 	      this.bridge.report_scene_error(this.assetId || 'renderer', 'viewpoint_invalid', this.safeMessage(error));
 	    }
@@ -62697,6 +62747,7 @@ fn getColor() -> vec4f {
 	    const target = this.viewpoint.orbit_target;
 	    this.camera.lookAt(target.x, target.y, target.z);
 	    this.camera.rotateLocal(0, 0, this.viewpoint.horizon);
+	    this.requestSceneFrame();
 	  }
 
 	  publishViewpoint() {
@@ -62708,6 +62759,7 @@ fn getColor() -> vec4f {
 
 	  updateSubjectGuide() {
 	    const region = this.viewpoint.subject_region;
+	    if (!this.subjectGuide) return;
 	    Object.assign(this.subjectGuide.style, {
 	      left: `${region.x * 100}%`,
 	      top: `${region.y * 100}%`,
@@ -62734,8 +62786,81 @@ fn getColor() -> vec4f {
 	    this.sceneTransformKey = key;
 	  }
 
+	  requestSceneFrame(frameCount = 2) {
+	    if (!this.app) return;
+	    if (!this.cacheSceneFrames) {
+	      this.app.autoRender = true;
+	      this.app.renderNextFrame = true;
+	      return;
+	    }
+	    this.app.autoRender = true;
+	    this.sceneFramesRemaining = Math.max(this.sceneFramesRemaining, frameCount);
+	    if (this.sceneFramePending) return;
+	    this.renderSceneFrame();
+	  }
+
+	  renderSceneFrame() {
+	    this.sceneFramePending = true;
+	    this.app.once('postrender', () => {
+	      try {
+	        this.sceneFramesRemaining -= 1;
+	        if (this.sceneFramesRemaining === 0) {
+	          const capture = this.captureSceneFrame();
+	          if (
+	            this.sceneEntity &&
+	            !capture.hasContent &&
+	            this.sceneCaptureAttempts < MAX_SCENE_CAPTURE_ATTEMPTS
+	          ) {
+	            capture.frame.close();
+	            this.sceneCaptureAttempts += 1;
+	            this.sceneFramesRemaining = 1;
+	          } else {
+	            this.sceneCaptureAttempts = 0;
+	            this.app.autoRender = false;
+	            window.dispatchEvent(new CustomEvent('bb-scene-frame', { detail: capture.frame }));
+	          }
+	        }
+	      } catch (error) {
+	        this.bridge.report_scene_error(
+	          this.assetId || 'renderer',
+	          'scene_frame_capture_failed',
+	          this.safeMessage(error),
+	        );
+	      } finally {
+	        this.sceneFramePending = false;
+	        if (this.sceneFramesRemaining > 0) this.renderSceneFrame();
+	      }
+	    });
+	    this.app.renderNextFrame = true;
+	  }
+
+	  captureSceneFrame() {
+	    const source = this.app.graphicsDevice.canvas;
+	    if (
+	      !this.sceneSnapshot ||
+	      this.sceneSnapshot.width !== source.width ||
+	      this.sceneSnapshot.height !== source.height
+	    ) {
+	      this.sceneSnapshot = new OffscreenCanvas(source.width, source.height);
+	      this.sceneSnapshotContext = this.sceneSnapshot.getContext('2d', { alpha: false });
+	      this.scenePixels = new Uint8ClampedArray(source.width * source.height * 4);
+	    }
+	    this.app.graphicsDevice.readPixels(0, 0, source.width, source.height, this.scenePixels);
+	    flipPixelRows(this.scenePixels, source.width, source.height);
+	    this.sceneSnapshotContext.putImageData(
+	      new ImageData(this.scenePixels, source.width, source.height),
+	      0,
+	      0,
+	    );
+	    return {
+	      frame: this.sceneSnapshot.transferToImageBitmap(),
+	      hasContent: hasPixelVariation(this.scenePixels),
+	    };
+	  }
+
 	  setLoading(loading, message) {
 	    const overlay = document.getElementById('loading');
+	    if (!overlay) return;
 	    overlay.hidden = !loading;
 	    overlay.querySelector('span').textContent = message;
 	  }
@@ -62746,8 +62871,15 @@ fn getColor() -> vec4f {
 	  }
 	}
 
-	const start = (bridge) => new SceneRenderer(bridge).initialize();
+	const start = async (bridge) => {
+	  const renderer = new SceneRenderer(bridge);
+	  await renderer.initialize();
+	  bridge.renderer_ready();
+	};
 
+	exports.SceneRenderer = SceneRenderer;
+	exports.flipPixelRows = flipPixelRows;
+	exports.hasPixelVariation = hasPixelVariation;
 	exports.start = start;
 
 	Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });

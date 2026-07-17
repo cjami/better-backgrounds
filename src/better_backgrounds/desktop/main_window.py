@@ -42,6 +42,7 @@ from better_backgrounds.input_camera import (
 )
 from better_backgrounds.job_runner import JobRunner
 from better_backgrounds.managed_tools import resolved_executable_paths
+from better_backgrounds.matting import LivePreferencesStore, MattingSettings
 from better_backgrounds.protocol import (
     CancelledEvent,
     ErrorEvent,
@@ -72,6 +73,8 @@ ReconstructionCommandFactory = Callable[
 RendererFactory = Callable[[], QWidget]
 
 TAB_NAMES = ("Show", "Build", "Adjust", "Compare")
+COMPARE_TAB = 3
+DEFAULT_WIPE = 52
 DEFAULT_ROOMS = (
     "Table Tennis Room — Sample",
     "Loft — North Window",
@@ -171,6 +174,7 @@ class MainWindow(QMainWindow):
 
     room_ready = Signal()
     input_camera_changed = Signal(str)
+    virtual_camera_changed = Signal(bool)
 
     def __init__(
         self,
@@ -178,6 +182,7 @@ class MainWindow(QMainWindow):
         command_factory: CommandFactory,
         reconstruction_command_factory: ReconstructionCommandFactory | None = None,
         renderer_factory: RendererFactory | None = None,
+        live_renderer_factory: RendererFactory | None = None,
         camera_source: InputCameraSource | None = None,
         scene_cache_root: Path | None = None,
         data_root: Path | None = None,
@@ -195,6 +200,7 @@ class MainWindow(QMainWindow):
         self._camera_source = camera_source or InputCameraSource(parent=self)
         self._input_cameras: tuple[InputCamera, ...] = ()
         self._selected_input_camera_id: str | None = None
+        self._preview_started = False
         generated_rooms = [scene.display_name for scene in self._generated_scenes.values()]
         self._rooms = [
             *generated_rooms,
@@ -238,7 +244,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         actual_renderer_factory = renderer_factory or self._default_renderer_factory
-        self._show_page = ShowPage(self._rooms, ScenePreview)
+        actual_live_factory = live_renderer_factory
+        if actual_live_factory is None:
+            actual_live_factory = (
+                ScenePreview if renderer_factory is not None else self._default_live_factory
+            )
+        self._live_preview = actual_live_factory()
+        self._show_page = ShowPage(self._rooms, lambda: self._live_preview)
         self._build_page = BuildPage()
         self._adjust_page = AdjustPage(actual_renderer_factory)
         self._compare_page = ComparePage()
@@ -253,6 +265,8 @@ class MainWindow(QMainWindow):
         self._header.tab_selected.connect(self.select_tab)
         self._show_page.room_selected.connect(self.select_room)
         self._show_page.input_camera_selected.connect(self.select_input_camera)
+        self._show_page.preview_restart_requested.connect(self._restart_preview)
+        self._show_page.camera_changed.connect(self.virtual_camera_changed)
         self._camera_source.cameras_changed.connect(self._refresh_input_cameras)
         self._show_page.sample_install_requested.connect(self._install_sample)
         self._show_page.build_requested.connect(self._open_build)
@@ -262,6 +276,23 @@ class MainWindow(QMainWindow):
         self._build_page.cancel_requested.connect(self._cancel_build)
         self._build_page.retry_requested.connect(self._retry_build)
         self._adjust_page.viewpoint_saved.connect(self._save_viewpoint)
+        self._adjust_page.viewpoint_previewed.connect(self._preview_viewpoint)
+        self._adjust_page.matting_changed.connect(self._change_matting)
+        self._adjust_page.mirroring_changed.connect(self._change_mirroring)
+        self._compare_page.wipe_changed.connect(self._set_compare_wipe)
+        camera_state = getattr(self._live_preview, "camera_state_changed", None)
+        if camera_state is not None:
+            camera_state.connect(self._show_page.set_camera_state)
+        diagnostics = getattr(self._live_preview, "diagnostics_changed", None)
+        if diagnostics is not None:
+            diagnostics.connect(self._record_diagnostics)
+        comparison_frame = getattr(self._live_preview, "comparison_frame", None)
+        if comparison_frame is not None:
+            comparison_frame.connect(self._compare_page.set_live_frame)
+        self._adjust_page.set_live_preferences(
+            self._live_preferences.matting,
+            mirrored=self._live_preferences.mirrored,
+        )
         self._show_page.configure_sample(
             self._sample_scene.display_name,
             size=self._sample_scene.expected_size,
@@ -271,6 +302,7 @@ class MainWindow(QMainWindow):
         self._refresh_input_cameras()
         self.select_room(self._selected_room)
         self.select_tab(0)
+        self._start_preview()
 
     def _setup_scene_services(
         self,
@@ -299,6 +331,11 @@ class MainWindow(QMainWindow):
             actual_data_root / "input-camera-v1.json",
         )
         self._preferred_input_camera_id = self._input_camera_selection.load()
+        self._live_preferences_store = LivePreferencesStore(
+            actual_data_root / "live-preferences-v1.json",
+        )
+        self._live_preferences = self._live_preferences_store.load()
+        self._latest_diagnostics: object | None = None
         self._ffprobe = resolved_executable_paths(cache_root.parent / "tools-v1").get("ffprobe")
         self._analysis_signals = AnalysisSignals(self)
         self._analysis_signals.completed.connect(self._analysis_completed)
@@ -348,6 +385,16 @@ class MainWindow(QMainWindow):
         except ImportError:
             return ScenePreview()
 
+    def _default_live_factory(self) -> QWidget:
+        try:
+            from better_backgrounds.desktop.webview import (  # noqa: PLC0415
+                create_live_renderer_view,
+            )
+
+            return create_live_renderer_view(self._asset_resolver)
+        except ImportError:
+            return ScenePreview()
+
     @Slot()
     def _refresh_input_cameras(self) -> None:
         """Reconcile hot-plug changes without discarding the user's preference."""
@@ -368,6 +415,17 @@ class MainWindow(QMainWindow):
         self._show_page.set_input_cameras(cameras, selected)
         if changed:
             self.input_camera_changed.emit(selected or "")
+            if self._preview_started:
+                if selected is None:
+                    stopper = getattr(self._live_preview, "stop_camera", None)
+                    if callable(stopper):
+                        stopper()
+                    self._show_page.set_camera_state(
+                        "lost",
+                        "Camera disconnected — reconnect it and restart",
+                    )
+                else:
+                    self._restart_preview()
 
     @Slot(str)
     def select_input_camera(self, device_id: str) -> None:
@@ -381,6 +439,44 @@ class MainWindow(QMainWindow):
         self._show_page.set_input_cameras(self._input_cameras, device_id)
         if changed:
             self.input_camera_changed.emit(device_id)
+            if self._preview_started:
+                self._restart_preview()
+
+    def _start_preview(self) -> None:
+        """Start the local preview independently of virtual-camera output."""
+        if self._selected_input_camera_id is None:
+            self._show_page.set_camera_state("error", "No camera is available")
+            return
+        self._preview_started = True
+        self._show_page.set_camera_state("starting", "Requesting camera permission…")
+        starter = getattr(self._live_preview, "start_camera", None)
+        if callable(starter):
+            starter(self._selected_camera_label(), mirrored=self._live_preferences.mirrored)
+
+    def _restart_preview(self) -> None:
+        """Apply a device change without creating a second preview stream."""
+        stopper = getattr(self._live_preview, "stop_camera", None)
+        starter = getattr(self._live_preview, "start_camera", None)
+        if callable(stopper):
+            stopper()
+        if self._selected_input_camera_id is None:
+            self._show_page.set_camera_state("error", "No camera is available")
+            return
+        self._preview_started = True
+        if callable(starter):
+            self._show_page.set_camera_state("starting", "Restarting selected camera…")
+            starter(self._selected_camera_label(), mirrored=self._live_preferences.mirrored)
+
+    def _selected_camera_label(self) -> str:
+        selected = next(
+            (
+                camera
+                for camera in self._input_cameras
+                if camera.device_id == self._selected_input_camera_id
+            ),
+            None,
+        )
+        return selected.description if selected is not None else ""
 
     @Slot(int)
     def select_tab(self, index: int) -> None:
@@ -388,6 +484,12 @@ class MainWindow(QMainWindow):
         if 0 <= index < self._tabs.count():
             self._tabs.setCurrentIndex(index)
             self._header.set_active_tab(index)
+            presentation = getattr(self._live_preview, "set_presentation", None)
+            if index == COMPARE_TAB:
+                if callable(presentation):
+                    presentation("compare", DEFAULT_WIPE)
+            elif callable(presentation):
+                presentation("show", DEFAULT_WIPE)
 
     @Slot(str)
     def select_room(self, room: str) -> None:
@@ -406,6 +508,18 @@ class MainWindow(QMainWindow):
             installed=installed,
             viewpoint=self._viewpoints.load(room_id),
         )
+        if installed and scene is not None:
+            live_viewpoint = self._viewpoints.load(room_id) or scene.default_viewpoint
+            live_viewpoint = live_viewpoint.model_copy(
+                update={"scene_transform": scene.default_viewpoint.scene_transform},
+            )
+            scene_setter = getattr(self._live_preview, "set_scene", None)
+            if callable(scene_setter):
+                scene_setter(scene, live_viewpoint)
+        else:
+            scene_clearer = getattr(self._live_preview, "clear_scene", None)
+            if callable(scene_clearer):
+                scene_clearer()
         preview = None
         if installed and scene is not None and scene.preview is not None:
             preview = self._asset_installer.resource_path(scene, scene.preview)
@@ -452,6 +566,44 @@ class MainWindow(QMainWindow):
     def _save_viewpoint(self, room_id: str, viewpoint: object) -> None:
         if isinstance(viewpoint, Viewpoint):
             self._viewpoints.save(room_id, viewpoint)
+
+    @Slot(object)
+    def _preview_viewpoint(self, viewpoint: object) -> None:
+        """Keep Show and Compare on Adjust's current room camera."""
+        if isinstance(viewpoint, Viewpoint):
+            setter = getattr(self._live_preview, "set_viewpoint", None)
+            if callable(setter):
+                setter(viewpoint)
+
+    @Slot(object)
+    def _change_matting(self, settings: object) -> None:
+        """Persist and apply bounded mask refinement without restarting capture."""
+        if not isinstance(settings, MattingSettings):
+            return
+        self._live_preferences = self._live_preferences.model_copy(update={"matting": settings})
+        self._live_preferences_store.save(self._live_preferences)
+        setter = getattr(self._live_preview, "set_matting_settings", None)
+        if callable(setter):
+            setter(settings.worker_payload())
+
+    @Slot(bool)
+    def _change_mirroring(self, mirrored: bool) -> None:  # noqa: FBT001
+        """Persist and apply foreground-only mirroring."""
+        self._live_preferences = self._live_preferences.model_copy(update={"mirrored": mirrored})
+        self._live_preferences_store.save(self._live_preferences)
+        setter = getattr(self._live_preview, "set_mirroring", None)
+        if callable(setter):
+            setter(mirrored=mirrored)
+
+    @Slot(int)
+    def _set_compare_wipe(self, value: int) -> None:
+        setter = getattr(self._live_preview, "set_presentation", None)
+        if callable(setter):
+            setter("compare", value)
+
+    @Slot(object)
+    def _record_diagnostics(self, diagnostics: object) -> None:
+        self._latest_diagnostics = diagnostics
 
     @Slot()
     def _open_build(self) -> None:
@@ -621,6 +773,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         """Clean up the complete active process tree before closing."""
+        stopper = getattr(self._live_preview, "stop_camera", None)
+        if callable(stopper):
+            stopper()
         if self._runner is not None:
             self._runner.close()
         event.accept()

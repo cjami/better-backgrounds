@@ -97,6 +97,7 @@ class ComparisonPreview(QWidget):
         """Create the comparison surface with a centered wipe."""
         super().__init__(parent)
         self._wipe = 52
+        self._live_frame = QPixmap()
         self.setMinimumSize(640, 360)
         self.setAccessibleName("Placeholder original and harmonised comparison")
 
@@ -105,11 +106,30 @@ class ComparisonPreview(QWidget):
         self._wipe = min(100, max(0, value))
         self.update()
 
+    def set_live_frame(self, frame: QPixmap) -> None:
+        """Display the current retained-pipeline frame without new capture work."""
+        self._live_frame = frame
+        self.update()
+
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: ARG002, N802
         """Draw the split comparison."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if not self._live_frame.isNull():
+            scaled = self._live_frame.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            source = QRect(
+                max(0, (scaled.width() - self.width()) // 2),
+                max(0, (scaled.height() - self.height()) // 2),
+                self.width(),
+                self.height(),
+            )
+            painter.drawPixmap(self.rect(), scaled, source)
+            return
         self._paint_scene(painter, bounds, warm=False)
         split = bounds.left() + bounds.width() * self._wipe / 100
         painter.save()

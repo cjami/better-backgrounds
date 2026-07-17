@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "runtime": {
+    "name": "MediaPipe Tasks Vision",
+    "version": "0.10.35",
+    "source": "https://www.npmjs.com/package/@mediapipe/tasks-vision/v/0.10.35",
+    "license": "Apache-2.0",
+    "assets": [
+      {
+        "path": "wasm/vision_wasm_internal.js",
+        "size": 322044,
+        "sha256": "e7fd9858e8e8f221d9b96eddc11f8e077f263e0b7bbd79d3cbe882b134274f8c"
+      },
+      {
+        "path": "wasm/vision_wasm_internal.wasm",
+        "size": 11153617,
+        "sha256": "6a5c64584c2ab61c763b6e204afbdbc7ce1caf7f5216187322bca8df94f646bc"
+      },
+      {
+        "path": "wasm/vision_wasm_module_internal.js",
+        "size": 322082,
+        "sha256": "1f1d6215324a1fe62f6742d49a3db911170987ca18ad8c1b75f1a1c82acf2b44"
+      },
+      {
+        "path": "wasm/vision_wasm_module_internal.wasm",
+        "size": 11153641,
+        "sha256": "617b8e0248dbd27e9d7ece4218004eae4cefb499196d1bb4fa0e3fef21708756"
+      },
+      {
+        "path": "wasm/vision_wasm_nosimd_internal.js",
+        "size": 321847,
+        "sha256": "438d1fe8ff7f4d946025bc211c291543c037d8a3785ed4eee60f1f521b236296"
+      },
+      {
+        "path": "wasm/vision_wasm_nosimd_internal.wasm",
+        "size": 10481398,
+        "sha256": "8a3092d34c79d3f57e6ba8592105e8a90f6b07c27891ffecd14cca428bfd3e31"
+      }
+    ]
+  },
+  "model": {
+    "name": "MediaPipe Selfie Segmenter (landscape)",
+    "version": "float16/landscape latest retrieved 2026-07-17",
+    "path": "selfie_segmenter_landscape.tflite",
+    "source": "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter_landscape/float16/latest/selfie_segmenter_landscape.tflite",
+    "model_card": "https://storage.googleapis.com/mediapipe-assets/Model%20Card%20MediaPipe%20Selfie%20Segmentation.pdf",
+    "license": "Apache-2.0",
+    "size": 250177,
+    "sha256": "490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e"
+  }
+}

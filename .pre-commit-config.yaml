@@ -3,10 +3,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^src/better_backgrounds/desktop/assets/renderer\.js$
+        exclude: ^src/better_backgrounds/desktop/assets/(?:renderer\.js|live-renderer\.js|matting/wasm/)
       - id: end-of-file-fixer
+        exclude: ^src/better_backgrounds/desktop/assets/matting/wasm/
       - id: check-added-large-files
-        exclude: ^src/better_backgrounds/desktop/assets/renderer\.js$
+        exclude: ^src/better_backgrounds/desktop/assets/(?:renderer\.js|live-renderer\.js|matting/wasm/)
       - id: check-case-conflict
       - id: check-merge-conflict
       - id: check-toml

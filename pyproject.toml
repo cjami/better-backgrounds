@@ -122,6 +122,7 @@ files = [
     "src/better_backgrounds/desktop/theme.py",
     "src/better_backgrounds/desktop/webview.py",
     "src/better_backgrounds/input_camera.py",
+    "src/better_backgrounds/matting.py",
     "src/better_backgrounds/managed_tools.py",
     "src/better_backgrounds/pycolmap_worker.py",
     "src/better_backgrounds/reconstruction.py",

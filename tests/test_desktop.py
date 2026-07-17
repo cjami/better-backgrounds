@@ -18,7 +18,7 @@ from better_backgrounds.desktop.app import (
     packaged_reconstruction_command,
     packaged_worker_command,
 )
-from better_backgrounds.desktop.bridge import RendererBridge
+from better_backgrounds.desktop.bridge import LiveRendererBridge, RendererBridge
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow
 from better_backgrounds.desktop.pages import AdjustPage
@@ -200,8 +200,15 @@ def test_adjust_keeps_asset_normalization_when_restoring_a_saved_camera() -> Non
 
 
 def test_show_tab_has_a_clear_camera_toggle() -> None:
-    """Expose explicit start and stop actions for the virtual camera."""
-    window = MainWindow(command_factory=lambda _job_id, _outcome: [], renderer_factory=ScenePreview)
+    """Expose explicit start and stop actions for local webcam capture."""
+    camera_source = InputCameraSource(
+        lambda: (InputCamera(device_id="camera-a", description="Desk camera"),),
+    )
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        camera_source=camera_source,
+    )
     camera = window.findChild(QPushButton, "cameraToggle")
 
     assert camera is not None
@@ -312,6 +319,20 @@ def test_renderer_bridge_rejects_invalid_scene_status() -> None:
     assert not bridge.report_scene_progress("sample-room", 101, 100)
     assert bridge.report_scene_error("sample-room", "gpu_unavailable", "No GPU renderer")
     assert not bridge.report_scene_error("sample-room", "bad code!", "No GPU renderer")
+
+
+def test_live_bridge_validates_camera_state_and_diagnostics() -> None:
+    """Keep browser lifecycle and performance messages inside bounded schemas."""
+    bridge = LiveRendererBridge()
+
+    assert bridge.report_camera_state("live", "Live · Desk camera")
+    assert not bridge.report_camera_state("recording", "Unexpected state")
+    assert bridge.report_diagnostics(
+        '{"display_fps":30,"mask_fps":18,"mask_age_ms":42,'
+        '"dropped_frames":2,"worker_time_ms":31,'
+        '"processing_width":256,"processing_height":144}',
+    )
+    assert not bridge.report_diagnostics('{"display_fps":-1}')
 
 
 def test_navigation_is_restricted_to_synthetic_origin() -> None:

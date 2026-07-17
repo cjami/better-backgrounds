@@ -22,7 +22,7 @@ wheel_shiboken =
 plugins =
 
 [nuitka]
-macos.permissions =
+macos.permissions = NSCameraUsageDescription:Better Backgrounds uses the selected camera to composite you locally into your room.
 mode = standalone
 extra_args = --quiet --zig --assume-yes-for-downloads --noinclude-qt-translations --include-package=better_backgrounds --include-package=pycolmap --include-package-data=better_backgrounds
 

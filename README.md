@@ -2,11 +2,11 @@
 
 Better Backgrounds is an early-stage cross-platform desktop application for
 reconstructing a room from video and using that scene as a coherent webcam
-background. The current Phase 4 foundation adds explainable video analysis and
-a cancellable, resumable local FFmpeg/PyCOLMAP/Brush/SplatTransform pipeline to
-the checksummed sample room, room-scoped viewpoint persistence, input-camera
-selection, and locally bundled PlayCanvas renderer. Webcam capture and
-compositing remain a later phase.
+background. The current Phase 5 foundation adds explicit local webcam capture,
+offline MediaPipe person matting, a retained reconstructed-room composite, and
+one original-versus-standard-composite wipe. It builds on explainable video
+analysis and the cancellable, resumable local FFmpeg/PyCOLMAP/Brush/
+SplatTransform room pipeline from Phase 4.
 
 ## Requirements
 
@@ -119,8 +119,22 @@ authority.
 
 Show enumerates local video inputs through Qt Multimedia, follows device
 hot-plug changes, and remembers the user's preferred camera in application
-data. Enumeration does not start capture or grant media access to the embedded
-renderer.
+data. The local preview starts independently when Show has a selected camera,
+and WebEngine requests video permission when that retained surface is ready.
+It stays active across tabs and is released on device loss or application
+shutdown. The Start virtual camera control is a separate publication boundary;
+an OS virtual-camera backend is not bundled yet.
+
+The retained pipeline uses `requestVideoFrameCallback`, one in-flight MediaPipe
+Image Segmenter worker, timestamped confidence masks, temporal smoothing, edge
+feathering, and local standard alpha compositing. Compare presents the same
+source frame, mask, PlayCanvas scene renderer, and composite as Show; it does
+not create another stream or model. The MediaPipe 0.10.35 WASM files and Apache
+2.0 selfie-segmentation model are packaged locally and verified against
+`assets/matting/manifest-v1.json`; there is no CDN fallback and webcam frames
+are never uploaded. Adjust owns foreground-only mirroring and bounded mask
+controls. The room is never silently mirrored, and the standard composite is
+labelled as not yet harmonised.
 
 The prepared Table Tennis Room sample is downloaded only when requested in
 Show, verified against the checked-in manifest, and then available offline. It

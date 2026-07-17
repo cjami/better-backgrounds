@@ -6,7 +6,9 @@ from collections import Counter
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from better_backgrounds.desktop.preview import ComparisonPreview
+from better_backgrounds.matting import MattingSettings
 from better_backgrounds.scene import CropRegion, SceneReference, Viewpoint
 
 if TYPE_CHECKING:
@@ -62,11 +65,12 @@ def _card() -> tuple[QFrame, QVBoxLayout]:
 
 
 class ShowPage(QWidget):
-    """Preview and control the virtual camera for the selected room."""
+    """Preview and control the local composite for the selected room."""
 
     room_selected = Signal(str)
     build_requested = Signal()
     camera_changed = Signal(bool)
+    preview_restart_requested = Signal()
     input_camera_selected = Signal(str)
     sample_install_requested = Signal()
 
@@ -79,6 +83,7 @@ class ShowPage(QWidget):
         """Create the room picker, feed preview, and camera control."""
         super().__init__(parent)
         self._camera_active = False
+        self._preview_active = False
         self._sample_room = ""
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -90,12 +95,12 @@ class ShowPage(QWidget):
         feed_layout.setSpacing(14)
         feed_surface = QFrame()
         feed_surface.setObjectName("feedSurface")
-        feed_stack = QStackedLayout(feed_surface)
-        feed_stack.setContentsMargins(0, 0, 0, 0)
-        feed_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        self._feed_stack = QStackedLayout(feed_surface)
+        self._feed_stack.setContentsMargins(0, 0, 0, 0)
+        self._feed_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
         self._preview = preview_factory()
         self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        feed_stack.addWidget(self._preview)
+        self._feed_stack.addWidget(self._preview)
 
         overlay = QWidget()
         overlay.setObjectName("feedOverlay")
@@ -108,12 +113,12 @@ class ShowPage(QWidget):
         feed_header.addWidget(self._feed_title)
         feed_header.addStretch()
         self._feed_status = _label("●  IDLE", object_name="feedBadge")
-        self._feed_status.setAccessibleName("Virtual camera status")
+        self._feed_status.setAccessibleName("Webcam composite status")
         feed_header.addWidget(self._feed_status)
         overlay_layout.addLayout(feed_header)
         overlay_layout.addStretch()
         self._preview_note = _label(
-            "Preview only — the virtual camera is off",
+            "Camera is off",
             object_name="previewNote",
         )
         overlay_layout.addWidget(
@@ -121,7 +126,7 @@ class ShowPage(QWidget):
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         self._preview_hint = _label(
-            "Start it to make this feed available in Zoom, Meet, and other apps",
+            "Start the camera to create a local standard-matting composite",
             object_name="muted",
         )
         overlay_layout.addWidget(
@@ -130,10 +135,14 @@ class ShowPage(QWidget):
         )
         overlay_layout.addStretch()
         overlay_layout.addWidget(
-            _label("1080p  ·  30 fps  ·  scene-aware harmonisation on", object_name="feedMeta"),
+            _label(
+                "LOCAL ONLY  ·  STANDARD MATTING  ·  NOT YET HARMONISED",
+                object_name="feedMeta",
+            ),
         )
-        feed_stack.addWidget(overlay)
-        feed_stack.setCurrentWidget(overlay)
+        self._overlay = overlay
+        self._feed_stack.addWidget(overlay)
+        self._feed_stack.setCurrentWidget(overlay)
         feed_layout.addWidget(feed_surface, 1)
         self._camera = QPushButton("●  Start virtual camera")
         self._camera.setObjectName("cameraToggle")
@@ -156,6 +165,10 @@ class ShowPage(QWidget):
         self._input_camera.setToolTip("Camera used as the foreground video input")
         self._input_camera.currentIndexChanged.connect(self._emit_input_camera)
         sidebar_layout.addWidget(self._input_camera)
+        restart_preview = QPushButton("Restart preview")
+        restart_preview.setObjectName("quietAction")
+        restart_preview.clicked.connect(self.preview_restart_requested)
+        sidebar_layout.addWidget(restart_preview)
         sidebar_layout.addWidget(
             _label(
                 "Select the webcam that will provide the foreground feed.",
@@ -205,8 +218,13 @@ class ShowPage(QWidget):
 
     @property
     def camera_active(self) -> bool:
-        """Return whether the placeholder virtual camera is active."""
+        """Return whether virtual-camera publication has been requested."""
         return self._camera_active
+
+    @property
+    def preview_active(self) -> bool:
+        """Return whether the local webcam preview is active."""
+        return self._preview_active
 
     @property
     def current_input_camera_id(self) -> str | None:
@@ -235,8 +253,11 @@ class ShowPage(QWidget):
         if not cameras:
             self._input_camera.addItem("No camera detected")
             self._input_camera.setEnabled(False)
+            if not self._camera_active:
+                self._camera.setEnabled(False)
         else:
             self._input_camera.setEnabled(True)
+            self._camera.setEnabled(True)
             selected_index = self._input_camera.findData(selected_device_id)
             self._input_camera.setCurrentIndex(max(0, selected_index))
         self._input_camera.blockSignals(False)  # noqa: FBT003
@@ -270,14 +291,14 @@ class ShowPage(QWidget):
                 self._rooms.blockSignals(True)  # noqa: FBT003
                 self._rooms.setCurrentItem(item)
                 self._rooms.blockSignals(False)  # noqa: FBT003
-                self._feed_title.setText(f"VIRTUAL CAMERA  ·  {room}")
+                self._feed_title.setText(f"STANDARD COMPOSITE  ·  {room}")
                 self._update_sample_panel(room)
                 return
 
     def _emit_room(self, current: QListWidgetItem | None) -> None:
         if current is not None:
             room = str(current.data(Qt.ItemDataRole.UserRole))
-            self._feed_title.setText(f"VIRTUAL CAMERA  ·  {room}")
+            self._feed_title.setText(f"STANDARD COMPOSITE  ·  {room}")
             self._update_sample_panel(room)
             self.room_selected.emit(room)
 
@@ -330,29 +351,41 @@ class ShowPage(QWidget):
         if callable(setter):
             setter(path)
 
+    def set_camera_state(self, state: str, message: str) -> None:
+        """Reflect the independent browser preview lifecycle."""
+        self._preview_active = state in {"starting", "live"}
+        labels = {
+            "starting": "●  PREVIEW STARTING",
+            "live": "●  PREVIEW LIVE",
+            "lost": "●  LOST",
+            "error": "●  ERROR",
+            "idle": "●  IDLE",
+        }
+        self._feed_status.setText(labels.get(state, "●  IDLE"))
+        self._preview_note.setText("" if state == "live" else message)
+        if state == "live":
+            self._preview_hint.setText("Local preview · start the virtual camera to use it in apps")
+        elif state in {"error", "lost"}:
+            self._preview_hint.setText("Check permission or device availability, then restart")
+        else:
+            self._preview_hint.setText("Frames remain on this device")
+
     def _update_sample_panel(self, room: str) -> None:
         self._sample_panel.setVisible(bool(self._sample_room) and room == self._sample_room)
 
     def _toggle_camera(self) -> None:
-        self._camera_active = not self._camera_active
-        if self._camera_active:
-            self._feed_status.setText("●  LIVE")
-            self._camera.setText("■  Stop virtual camera")
-            self._camera.setAccessibleName("Stop virtual camera")
-            self._preview_note.setText("Virtual camera is live")
-            self._preview_hint.setText("This feed is available to your video apps")
-        else:
-            self._feed_status.setText("●  IDLE")
-            self._camera.setText("●  Start virtual camera")
-            self._camera.setAccessibleName("Start virtual camera")
-            self._preview_note.setText("Preview only — the virtual camera is off")
-            self._preview_hint.setText(
-                "Start it to make this feed available in Zoom, Meet, and other apps",
-            )
-        self._camera.setProperty("active", self._camera_active)
+        requested = not self._camera_active
+        self._camera_active = requested
+        self._camera.setText(
+            "■  Stop virtual camera" if requested else "●  Start virtual camera",
+        )
+        self._camera.setAccessibleName(
+            "Stop virtual camera" if requested else "Start virtual camera",
+        )
+        self._camera.setProperty("active", requested)
         self._camera.style().unpolish(self._camera)
         self._camera.style().polish(self._camera)
-        self.camera_changed.emit(self._camera_active)
+        self.camera_changed.emit(requested)
 
     @staticmethod
     def _room_card(room: str) -> QWidget:
@@ -731,6 +764,9 @@ class AdjustPage(QWidget):
     """Adjust the current room's viewpoint and presentation settings."""
 
     viewpoint_saved = Signal(str, object)
+    viewpoint_previewed = Signal(object)
+    matting_changed = Signal(object)
+    mirroring_changed = Signal(bool)
 
     def __init__(
         self,
@@ -746,6 +782,7 @@ class AdjustPage(QWidget):
         self._sliders: dict[str, QSlider] = {}
         self._slider_labels: dict[str, QLabel] = {}
         self._loaded_scene_id = ""
+        self._matting = MattingSettings()
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -832,15 +869,44 @@ class AdjustPage(QWidget):
         focus.setEnabled(False)
         focus.setToolTip("Unavailable because this scene has no reliable depth proxy")
         controls.addSpacing(6)
+        controls.addWidget(_label("Foreground", object_name="section"))
+        self._mirrored = QCheckBox("Mirror my preview")
+        self._mirrored.setChecked(True)
+        self._mirrored.setToolTip("Mirrors the webcam foreground only; the room is never mirrored")
+        self._mirrored.toggled.connect(self.mirroring_changed)
+        controls.addWidget(self._mirrored)
+        self._add_slider(controls, "Mask threshold", 5, 95, 50)
+        self._add_slider(controls, "Temporal smoothing", 0, 95, 65)
+        self._add_slider(controls, "Edge feather", 1, 50, 12)
+        controls.addSpacing(6)
         controls.addWidget(_label("Harmonisation", object_name="section"))
-        self._add_slider(controls, "Scene match", 0, 100, 72)
-        self._add_slider(controls, "Exposure", 0, 100, 44)
-        self._add_slider(controls, "Colour temp", 0, 100, 56)
-        self._add_slider(controls, "Colour spill", 0, 100, 34)
-        self._add_slider(controls, "Foreground focus", 0, 100, 52)
-        self._add_slider(controls, "Edge integration", 0, 100, 66)
+        phase_six = _label(
+            "Scene-aware harmonisation arrives in Phase 6. "
+            "This phase uses standard alpha compositing.",
+            object_name="muted",
+            word_wrap=True,
+        )
+        controls.addWidget(phase_six)
         controls.addStretch()
         root.addWidget(inspector)
+
+    def set_live_preferences(self, settings: MattingSettings, *, mirrored: bool) -> None:
+        """Restore Python-owned foreground controls without emitting changes."""
+        self._matting = settings
+        self._mirrored.blockSignals(True)  # noqa: FBT003
+        self._mirrored.setChecked(mirrored)
+        self._mirrored.blockSignals(False)  # noqa: FBT003
+        values = {
+            "Mask threshold": round(settings.threshold * 100),
+            "Temporal smoothing": round(settings.temporal * 100),
+            "Edge feather": round(settings.feather * 100),
+        }
+        for title, value in values.items():
+            slider = self._sliders[title]
+            slider.blockSignals(True)  # noqa: FBT003
+            slider.setValue(value)
+            slider.blockSignals(False)  # noqa: FBT003
+            self._slider_labels[title].setText(self._format_slider(title, value))
 
     def set_room(
         self,
@@ -898,6 +964,7 @@ class AdjustPage(QWidget):
             self._viewpoint = viewpoint
             self._drafts[self._room_id] = viewpoint
             self._sync_controls()
+            self.viewpoint_previewed.emit(viewpoint)
 
     def _reset_viewpoint(self) -> None:
         self._viewpoint = self._default_viewpoint
@@ -906,6 +973,7 @@ class AdjustPage(QWidget):
         setter = getattr(self._renderer, "set_viewpoint", None)
         if callable(setter):
             setter(self._viewpoint)
+        self.viewpoint_previewed.emit(self._viewpoint)
         self._scene_status.setText("View reset to the safe prepared camera")
 
     def _save_viewpoint(self) -> None:
@@ -935,6 +1003,7 @@ class AdjustPage(QWidget):
         setter = getattr(self._renderer, "set_viewpoint", None)
         if callable(setter):
             setter(viewpoint)
+        self.viewpoint_previewed.emit(viewpoint)
 
     def _add_slider(
         self,
@@ -964,6 +1033,15 @@ class AdjustPage(QWidget):
 
     def _control_changed(self, title: str, value: int) -> None:
         self._slider_labels[title].setText(self._format_slider(title, value))
+        if title in {"Mask threshold", "Temporal smoothing", "Edge feather"}:
+            update = {
+                "Mask threshold": {"threshold": value / 100},
+                "Temporal smoothing": {"temporal": value / 100},
+                "Edge feather": {"feather": value / 100},
+            }[title]
+            self._matting = self._matting.model_copy(update=update)
+            self.matting_changed.emit(self._matting)
+            return
         if title == "Field of view":
             update: dict[str, object] = {"field_of_view": float(value)}
         elif title == "Horizon":
@@ -982,6 +1060,7 @@ class AdjustPage(QWidget):
         setter = getattr(self._renderer, "set_viewpoint", None)
         if callable(setter):
             setter(self._viewpoint)
+        self.viewpoint_previewed.emit(self._viewpoint)
 
     def _aspect_changed(self, _index: int) -> None:
         self._viewpoint = self._viewpoint.model_copy(
@@ -990,6 +1069,7 @@ class AdjustPage(QWidget):
         setter = getattr(self._renderer, "set_viewpoint", None)
         if callable(setter):
             setter(self._viewpoint)
+        self.viewpoint_previewed.emit(self._viewpoint)
 
     def _sync_controls(self) -> None:
         values = {
@@ -998,6 +1078,9 @@ class AdjustPage(QWidget):
             "Output crop": round(self._viewpoint.crop.left * 100),
             "Depth in scene": round(self._viewpoint.subject_depth * 10),
             "Virtual focus": round(self._viewpoint.focus_depth * 10),
+            "Mask threshold": round(self._matting.threshold * 100),
+            "Temporal smoothing": round(self._matting.temporal * 100),
+            "Edge feather": round(self._matting.feather * 100),
         }
         for title, value in values.items():
             slider = self._sliders[title]
@@ -1028,24 +1111,37 @@ class AdjustPage(QWidget):
 class ComparePage(QWidget):
     """Show only the A/B wipe for the selected room."""
 
+    wipe_changed = Signal(int)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create the Python-painted comparison and wipe control."""
         super().__init__(parent)
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 22, 22, 22)
         root.setSpacing(12)
-        self._preview = ComparisonPreview()
-        root.addWidget(self._preview, 1)
+        self._preview_host = QWidget()
+        self._preview_layout = QVBoxLayout(self._preview_host)
+        self._preview_layout.setContentsMargins(0, 0, 0, 0)
+        self._placeholder = ComparisonPreview()
+        self._preview_layout.addWidget(self._placeholder)
+        root.addWidget(self._preview_host, 1)
         wipe_row = QHBoxLayout()
         wipe_row.addWidget(_label("ORIGINAL WEBCAM", object_name="muted"))
         wipe = QSlider(Qt.Orientation.Horizontal)
         wipe.setRange(0, 100)
         wipe.setValue(52)
         wipe.setAccessibleName("Comparison wipe")
-        wipe.valueChanged.connect(self._preview.set_wipe)
+        wipe.valueChanged.connect(self._placeholder.set_wipe)
+        wipe.valueChanged.connect(self.wipe_changed)
         wipe_row.addWidget(wipe, 1)
-        wipe_row.addWidget(_label("BETTER BACKGROUNDS", object_name="stageActive"))
+        wipe_row.addWidget(_label("STANDARD COMPOSITE", object_name="stageActive"))
         root.addLayout(wipe_row)
+
+    def set_live_frame(self, frame: object) -> None:
+        """Show a frame copied from the retained live surface."""
+        if isinstance(frame, QPixmap):
+            self._placeholder.show()
+            self._placeholder.set_live_frame(frame)
 
     def set_room(self, room: str) -> None:
         """Update the room named by the comparison."""

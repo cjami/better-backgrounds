@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from PySide6.QtCore import QObject, Signal, Slot
 
 from better_backgrounds.scene import Viewpoint
 
 ViewpointMessage = Viewpoint
+MAX_CAMERA_STATUS_LENGTH = 300
 
 
 class SceneErrorMessage(BaseModel):
@@ -30,6 +31,7 @@ class RendererBridge(QObject):
     scene_requested = Signal(str, str, str)
     viewpoint_requested = Signal(str)
     reset_requested = Signal()
+    scene_cleared = Signal()
 
     @Slot()
     def renderer_ready(self) -> None:
@@ -75,3 +77,94 @@ class RendererBridge(QObject):
     def request_reset(self) -> None:
         """Ask the renderer to return to the room's usable preset."""
         self.reset_requested.emit()
+
+    def request_scene_clear(self) -> None:
+        """Ask the renderer to remove an unavailable or deselected scene."""
+        self.scene_cleared.emit()
+
+
+class CameraDeviceMessage(BaseModel):
+    """Validate a browser camera description before it reaches application state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_id: str = Field(min_length=1, max_length=4_096)
+    description: str = Field(min_length=1, max_length=200)
+
+
+class PipelineDiagnosticsMessage(BaseModel):
+    """Validate bounded local performance counters from the live renderer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_fps: float = Field(ge=0, le=1_000, allow_inf_nan=False)
+    mask_fps: float = Field(ge=0, le=1_000, allow_inf_nan=False)
+    mask_age_ms: float = Field(ge=0, le=60_000, allow_inf_nan=False)
+    dropped_frames: int = Field(ge=0)
+    worker_time_ms: float = Field(ge=0, le=60_000, allow_inf_nan=False)
+    processing_width: int = Field(gt=0, le=8_192)
+    processing_height: int = Field(gt=0, le=8_192)
+
+
+class LiveRendererBridge(RendererBridge):
+    """Add narrow camera and matting messages to the scene-renderer bridge."""
+
+    camera_start_requested = Signal(str, bool)
+    camera_stop_requested = Signal()
+    presentation_requested = Signal(str, int)
+    mirroring_requested = Signal(bool)
+    matting_settings_requested = Signal(str)
+    camera_state_changed = Signal(str, str)
+    camera_devices_received = Signal(object)
+    diagnostics_received = Signal(object)
+
+    @Slot(str, str, result=bool)
+    def report_camera_state(self, state: str, message: str) -> bool:
+        """Publish one bounded camera lifecycle state."""
+        if state not in {"idle", "starting", "live", "error", "lost"}:
+            return False
+        if not 1 <= len(message) <= MAX_CAMERA_STATUS_LENGTH:
+            return False
+        self.camera_state_changed.emit(state, message)
+        return True
+
+    @Slot(str, result=bool)
+    def report_camera_devices(self, payload: str) -> bool:
+        """Publish camera identifiers revealed after explicit permission."""
+        try:
+            devices = TypeAdapter(list[CameraDeviceMessage]).validate_json(payload)
+        except ValidationError:
+            return False
+        self.camera_devices_received.emit(tuple(devices))
+        return True
+
+    @Slot(str, result=bool)
+    def report_diagnostics(self, payload: str) -> bool:
+        """Publish local-only live pipeline diagnostics."""
+        try:
+            diagnostics = PipelineDiagnosticsMessage.model_validate_json(payload)
+        except ValidationError:
+            return False
+        self.diagnostics_received.emit(diagnostics)
+        return True
+
+    def request_camera_start(self, preferred_label: str, *, mirrored: bool) -> None:
+        """Start capture after the Python owner records an explicit user action."""
+        self.camera_start_requested.emit(preferred_label[:200], mirrored)
+
+    def request_camera_stop(self) -> None:
+        """Stop capture and release the browser stream."""
+        self.camera_stop_requested.emit()
+
+    def request_presentation(self, mode: str, wipe: int) -> None:
+        """Switch the retained output between Show and Compare presentation."""
+        if mode in {"show", "compare"}:
+            self.presentation_requested.emit(mode, min(100, max(0, wipe)))
+
+    def request_mirroring(self, *, mirrored: bool) -> None:
+        """Mirror only the webcam foreground, never the reconstructed room."""
+        self.mirroring_requested.emit(mirrored)
+
+    def request_matting_settings(self, payload: str) -> None:
+        """Forward Python-validated refinement controls to the worker."""
+        self.matting_settings_requested.emit(payload)
