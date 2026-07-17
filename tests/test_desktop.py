@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import QApplication, QComboBox, QPushButton, QStackedWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QPushButton,
+    QStackedLayout,
+    QStackedWidget,
+)
 
 from better_backgrounds.build_session import IdleBuild
 from better_backgrounds.desktop.app import (
@@ -73,6 +79,9 @@ def test_main_window_contains_four_independent_product_tabs() -> None:
     assert app.applicationName() is not None
     assert stack is not None
     assert stack.count() == TAB_COUNT
+    layout = stack.layout()
+    assert isinstance(layout, QStackedLayout)
+    assert layout.stackingMode() is QStackedLayout.StackingMode.StackAll
     assert [tab.text() for tab in tabs] == ["Show", "Build", "Adjust", "Compare"]
     assert all(tab.isEnabled() for tab in tabs)
     assert window.active_tab == 0
@@ -99,6 +108,25 @@ def test_tabs_can_be_opened_in_any_order() -> None:
     window.select_tab(BUILD_TAB)
     assert window.active_tab == BUILD_TAB
     assert isinstance(window.build_session.state, IdleBuild)
+    window.close()
+
+
+def test_adjust_renderer_remains_mapped_behind_other_tabs(tmp_path: Path) -> None:
+    """Avoid remapping Chromium's GPU surface during tab switches."""
+    renderer = TrackingRenderer()
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=lambda: renderer,
+        scene_cache_root=tmp_path / "cache",
+        data_root=tmp_path / "data",
+    )
+    window.show()
+    renderer.show()
+
+    window.select_tab(BUILD_TAB)
+    application().processEvents()
+
+    assert renderer.isVisibleTo(window)
     window.close()
 
 

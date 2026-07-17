@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QStackedLayout,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -228,6 +229,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self._header)
         self._tabs = QStackedWidget()
         self._tabs.setObjectName("tabPages")
+        tab_layout = self._tabs.layout()
+        if not isinstance(tab_layout, QStackedLayout):
+            msg = "QStackedWidget did not provide its required stacked layout"
+            raise TypeError(msg)
+        tab_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
         root.addWidget(self._tabs, 1)
         self.setCentralWidget(container)
 
