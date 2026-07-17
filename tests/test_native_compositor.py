@@ -4,9 +4,23 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from PySide6.QtWidgets import QApplication
 
-from better_backgrounds.compositor import compose_live_frame
+from better_backgrounds.compositor import background_has_content, compose_live_frame
+from better_backgrounds.desktop.live_preview import NativeCompositeSurface, rgb_to_qimage
 from better_backgrounds.live_matting import FramePacket, MatteResult
+from better_backgrounds.matting_engine import CompletedMatte
+
+_APPLICATION: QApplication | None = None
+
+
+def application() -> QApplication:
+    """Return the one QApplication allowed by Qt."""
+    global _APPLICATION  # noqa: PLW0603
+    if _APPLICATION is None:
+        instance = QApplication.instance()
+        _APPLICATION = instance if isinstance(instance, QApplication) else QApplication([])
+    return _APPLICATION
 
 
 def test_compositor_uses_exact_source_alpha_and_background() -> None:
@@ -38,3 +52,65 @@ def test_compositor_rejects_mismatched_frame_and_matte() -> None:
             source,
             revision=0,
         )
+
+
+def test_compositor_preserves_reference_blend_at_all_alpha_levels() -> None:
+    """Optimize full-resolution blending without changing output pixels."""
+    source = np.array([[[3, 71, 250], [240, 13, 99], [17, 18, 19]]], dtype=np.uint8)
+    background = np.array([[[251, 6, 88], [7, 220, 31], [199, 101, 2]]], dtype=np.uint8)
+    alpha = np.array([[1, 127, 254]], dtype=np.uint8)
+    packet = FramePacket(2, 20.0, 3, 1, 1)
+    matte = MatteResult(2, 20.0, 1, 10.0)
+    weight = alpha.astype(np.float32)[..., None] / 255.0
+    expected = np.rint(source * weight + background * (1.0 - weight)).astype(np.uint8)
+
+    composite = compose_live_frame(
+        packet,
+        matte,
+        source,
+        alpha,
+        background,
+        revision=1,
+    )
+
+    assert np.array_equal(composite.image, expected)
+
+
+def test_background_content_rejects_transient_uniform_renderer_frames() -> None:
+    """Keep the last room snapshot when WebEngine briefly grabs its clear frame."""
+    clear_frame = np.full((4, 4, 3), [9, 9, 11], dtype=np.uint8)
+    room_frame = clear_frame.copy()
+    room_frame[2, 2] = [80, 40, 20]
+
+    assert not background_has_content(clear_frame)
+    assert background_has_content(room_frame)
+
+
+def test_surface_retains_last_room_when_renderer_grab_is_blank() -> None:
+    """Never replace a usable room snapshot with a transient clear frame."""
+    application()
+    room = np.array(
+        [
+            [[10, 20, 30], [80, 90, 100]],
+            [[40, 50, 60], [120, 130, 140]],
+        ],
+        dtype=np.uint8,
+    )
+    blank = np.full_like(room, 9)
+    source = np.zeros_like(room)
+    alpha = np.zeros((2, 2), dtype=np.uint8)
+    packet = FramePacket(3, 30.0, 2, 2, 0)
+    completed = CompletedMatte(
+        packet,
+        MatteResult(3, 30.0, 0, 10.0),
+        source,
+        alpha,
+    )
+    surface = NativeCompositeSurface()
+
+    assert surface.set_background(rgb_to_qimage(room))
+    assert not surface.set_background(rgb_to_qimage(blank))
+    composite = surface.apply_matte(completed)
+
+    assert np.array_equal(composite.image, room)
+    surface.close()

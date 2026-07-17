@@ -12,7 +12,11 @@ from PySide6.QtCore import QRect, QRectF, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPainter, QPaintEvent, QPen, QPixmap
 from PySide6.QtWidgets import QStackedLayout, QWidget
 
-from better_backgrounds.compositor import LiveComposite, compose_live_frame
+from better_backgrounds.compositor import (
+    LiveComposite,
+    background_has_content,
+    compose_live_frame,
+)
 from better_backgrounds.desktop.camera_capture import QtCameraCapture, qimage_to_rgb
 from better_backgrounds.live_matting import LiveDiagnostics, MattingConfig
 from better_backgrounds.matanyone_runtime import packaged_checkpoint_path
@@ -37,6 +41,11 @@ ALPHA_MIDPOINT = 128
 MINIMUM_MATTE_OCCUPANCY = 0.01
 MAXIMUM_MATTE_OCCUPANCY = 0.95
 LOST_MATTE_LIMIT = 15
+TARGET_MATTE_FPS = 30.0
+TARGET_MATTE_LATENCY_MS = 1_000.0 / TARGET_MATTE_FPS
+BACKGROUND_CAPTURE_DELAY_MS = 120
+BACKGROUND_CAPTURE_RETRY_MS = 50
+BACKGROUND_CAPTURE_RETRY_LIMIT = 20
 
 
 def rgb_to_qimage(pixels: NDArray[np.uint8]) -> QImage:
@@ -83,13 +92,17 @@ class NativeCompositeSurface(QWidget):
         """Return the most recently painted exact-frame evidence."""
         return self._last_composite
 
-    def set_background(self, image: QImage) -> None:
+    def set_background(self, image: QImage) -> bool:
         """Atomically replace the immutable room snapshot."""
         if image.isNull():
-            return
-        self._background = qimage_to_rgb(image)
+            return False
+        background = qimage_to_rgb(image)
+        if not background_has_content(background):
+            return False
+        self._background = background
         self._background_revision += 1
         self._recompose()
+        return True
 
     def set_raw_frame(self, source: NDArray[np.uint8]) -> None:
         """Show native camera pixels while preparing or confirming a seed."""
@@ -299,6 +312,7 @@ class NativeLivePreview(QWidget):
         self._background_timer = QTimer(self)
         self._background_timer.setSingleShot(True)
         self._background_timer.timeout.connect(self._capture_background)
+        self._background_capture_attempts = 0
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(5)
         self._poll_timer.timeout.connect(self._poll_engine)
@@ -361,7 +375,12 @@ class NativeLivePreview(QWidget):
             self._engine.start(
                 self._seed_frame,
                 self._seed_mask,
-                MattingConfig(internal_size=540, warmup_iterations=10, calibrate=True),
+                MattingConfig(
+                    internal_size=540,
+                    warmup_iterations=10,
+                    calibrate=True,
+                    latency_budget_ms=TARGET_MATTE_LATENCY_MS,
+                ),
             )
         except (OSError, RuntimeError, ValueError) as error:
             self._engine.close()
@@ -398,7 +417,7 @@ class NativeLivePreview(QWidget):
         setter = getattr(self._background_renderer, "set_viewpoint", None)
         if callable(setter):
             setter(viewpoint)
-            self._background_timer.start(120)
+            self._schedule_background_capture()
 
     def set_scene_image(self, path: Path | None) -> None:
         """Use a verified preview image until a spatial snapshot is ready."""
@@ -421,13 +440,21 @@ class NativeLivePreview(QWidget):
     @Slot(int, int)
     def _scene_progressed(self, loaded: int, total: int) -> None:
         if loaded == total:
-            self._background_timer.start(120)
+            self._schedule_background_capture()
+
+    def _schedule_background_capture(self) -> None:
+        self._background_capture_attempts = 0
+        self._background_timer.start(BACKGROUND_CAPTURE_DELAY_MS)
 
     @Slot()
     def _capture_background(self) -> None:
         pixmap = self._background_renderer.grab()
-        if not pixmap.isNull():
-            self._surface.set_background(pixmap.toImage())
+        if not pixmap.isNull() and self._surface.set_background(pixmap.toImage()):
+            self._background_capture_attempts = 0
+            return
+        self._background_capture_attempts += 1
+        if self._background_capture_attempts <= BACKGROUND_CAPTURE_RETRY_LIMIT:
+            self._background_timer.start(BACKGROUND_CAPTURE_RETRY_MS)
 
     @Slot(object, float)
     def _camera_frame_captured(self, frame: object, captured_at: float) -> None:

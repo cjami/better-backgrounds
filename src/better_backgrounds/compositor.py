@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 RGB_DIMENSIONS = 3
 RGB_CHANNELS = 3
+MINIMUM_BACKGROUND_BRIGHTNESS_RANGE = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,19 @@ class LiveComposite:
     alpha: NDArray[np.uint8]
     image: NDArray[np.uint8]
     background_revision: int
+
+
+def background_has_content(background: NDArray[np.uint8]) -> bool:
+    """Reject uniform renderer clear frames without rejecting dark room detail."""
+    if (
+        background.dtype != np.uint8
+        or background.ndim != RGB_DIMENSIONS
+        or background.shape[2] != RGB_CHANNELS
+        or background.size == 0
+    ):
+        return False
+    brightness = background.sum(axis=2, dtype=np.uint16)
+    return int(brightness.max()) - int(brightness.min()) > MINIMUM_BACKGROUND_BRIGHTNESS_RANGE
 
 
 def compose_live_frame(
@@ -69,9 +83,20 @@ def compose_live_frame(
                 interpolation=cv2.INTER_LINEAR,
             ),
         )
-    weight = alpha.astype(np.float32)[..., None] / 255.0
-    blended = np.rint(source * weight + background * (1.0 - weight))
-    image = np.clip(blended, 0, 255).astype(np.uint8)
+    weight = cv2.cvtColor(alpha, cv2.COLOR_GRAY2RGB)
+    weighted_source = cv2.multiply(source, weight, dtype=cv2.CV_16U)
+    weighted_background = cv2.multiply(
+        background,
+        cv2.bitwise_not(weight),
+        dtype=cv2.CV_16U,
+    )
+    image = cast(
+        "NDArray[np.uint8]",
+        cv2.convertScaleAbs(
+            cv2.add(weighted_source, weighted_background),
+            alpha=1 / 255,
+        ),
+    )
     return LiveComposite(
         frame_id=packet.frame_id,
         source=source,

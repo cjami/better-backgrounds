@@ -2,6 +2,7 @@
 
 from typing import TYPE_CHECKING
 
+from better_backgrounds.desktop.camera_capture import FrameRateLimiter, camera_format_score
 from better_backgrounds.input_camera import InputCameraSelectionStore
 
 if TYPE_CHECKING:
@@ -24,3 +25,27 @@ def test_invalid_input_camera_selection_is_ignored(tmp_path: Path) -> None:
     path.write_text('{"schema_version":2,"device_id":"camera-b"}', encoding="utf-8")
 
     assert InputCameraSelectionStore(path).load() is None
+
+
+def test_camera_format_prefers_720p_at_the_target_frame_rate() -> None:
+    """Do not select a 60 fps capture mode that overloads the 30 fps pipeline."""
+    target = camera_format_score(1280, 720, 30.0, 30.0)
+
+    assert target < camera_format_score(1280, 720, 60.0, 60.0)
+    assert target < camera_format_score(1920, 1080, 30.0, 30.0)
+    assert camera_format_score(1920, 1080, 30.0, 30.0) < camera_format_score(
+        1280,
+        720,
+        60.0,
+        60.0,
+    )
+
+
+def test_camera_rate_limiter_evenly_samples_an_overproducing_backend() -> None:
+    """Bound capture work when a platform ignores the requested camera frame rate."""
+    limiter = FrameRateLimiter(target_frame_rate=30.0)
+
+    emitted = [timestamp for timestamp in range(0, 5_000, 20) if limiter.allows(float(timestamp))]
+
+    assert 149 <= len(emitted) <= 151
+    assert emitted[-1] >= 4_960
