@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from better_backgrounds.build_session import VideoSelection
     from better_backgrounds.input_camera import InputCamera
+    from better_backgrounds.video_analysis import CaptureDiagnostics
 
 STAGE_ORDER = (
     ("validation", "Validating video"),
@@ -388,7 +389,7 @@ class BuildPage(QWidget):
 
     video_requested = Signal()
     sample_requested = Signal()
-    build_requested = Signal(str)
+    build_requested = Signal(str, str)
     cancel_requested = Signal()
     retry_requested = Signal()
 
@@ -465,28 +466,32 @@ class BuildPage(QWidget):
         self._selection_name = _label("", object_name="title")
         header.addWidget(self._selection_name)
         header.addStretch()
-        header.addWidget(_label("HIGH READINESS", object_name="success"))
+        self._readiness = _label("ANALYSING", object_name="muted")
+        header.addWidget(self._readiness)
         card_layout.addLayout(header)
-        card_layout.addWidget(
-            _label(
-                "The capture looks suitable for a room build.",
-                object_name="subtitle",
-            ),
+        self._review_summary = _label(
+            "Measuring capture quality…",
+            object_name="subtitle",
+            word_wrap=True,
         )
+        card_layout.addWidget(self._review_summary)
         diagnostics = (
-            ("Duration & resolution", "24 s · 1080p"),
-            ("Sharpness", "Good"),
-            ("Exposure", "Balanced"),
-            ("Camera movement", "Smooth"),
-            ("Frame overlap", "86%"),
-            ("Moving objects", "Minor curtain movement"),
+            ("duration", "Duration & resolution"),
+            ("sharpness", "Sharpness"),
+            ("exposure", "Exposure stability"),
+            ("movement", "Camera movement"),
+            ("overlap", "Frame overlap proxy"),
+            ("frames", "Useful frames"),
         )
-        for title, value in diagnostics:
+        self._diagnostic_values: dict[str, QLabel] = {}
+        for key, title in diagnostics:
             row = QHBoxLayout()
             row.addWidget(_label("✓", object_name="success"))
             row.addWidget(_label(title))
             row.addStretch()
-            row.addWidget(_label(value, object_name="muted"))
+            value = _label("—", object_name="muted")
+            self._diagnostic_values[key] = value
+            row.addWidget(value)
             card_layout.addLayout(row)
         footer = QHBoxLayout()
         back = QPushButton("Choose another video")
@@ -501,10 +506,23 @@ class BuildPage(QWidget):
         self._outcome.addItem("Forced cancellation", "forced")
         self._outcome.setAccessibleName("Fake worker outcome")
         footer.addWidget(self._outcome)
-        build = QPushButton("Build room")
-        build.setObjectName("primary")
-        build.clicked.connect(self._emit_build)
-        footer.addWidget(build)
+        footer.addWidget(_label("Build quality", object_name="muted"))
+        self._quality = QComboBox()
+        self._quality.setObjectName("qualityPreset")
+        self._quality.setAccessibleName("Room reconstruction quality")
+        self._quality.addItem("Preview", "preview")
+        self._quality.addItem("Balanced", "balanced")
+        self._quality.addItem("Quality", "quality")
+        self._quality.setCurrentIndex(1)
+        self._quality.setToolTip(
+            "Preview is fastest; Balanced is recommended; Quality uses the full work budget."
+        )
+        footer.addWidget(self._quality)
+        self._build_action = QPushButton("Build room")
+        self._build_action.setObjectName("primary")
+        self._build_action.clicked.connect(self._emit_build)
+        self._build_action.setEnabled(False)
+        footer.addWidget(self._build_action)
         card_layout.addLayout(footer)
         layout.addWidget(card, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch()
@@ -574,6 +592,61 @@ class BuildPage(QWidget):
         self._selection_name.setText(f"{selection.display_name}{suffix}")
         self._content.setCurrentIndex(1)
 
+    def set_analysis_pending(self) -> None:
+        """Keep reconstruction disabled until capture evidence is available."""
+        self._readiness.setText("ANALYSING")
+        self._set_label_style(self._readiness, "muted")
+        self._review_summary.setText("Measuring format, sharpness, exposure, and overlap…")
+        for value in self._diagnostic_values.values():
+            value.setText("—")
+        self._build_action.setEnabled(False)
+
+    def set_capture_diagnostics(self, diagnostics: CaptureDiagnostics) -> None:
+        """Render measured capture evidence and gate unsuitable input."""
+        probe = diagnostics.probe
+        self._diagnostic_values["duration"].setText(
+            f"{probe.duration_seconds:.1f} s · {probe.display_width}x{probe.display_height}"
+        )
+        self._diagnostic_values["sharpness"].setText(f"{diagnostics.median_sharpness:.0f}")
+        self._diagnostic_values["exposure"].setText(f"{diagnostics.exposure_stability:.0%} stable")
+        self._diagnostic_values["movement"].setText(f"{diagnostics.movement:.0%}")
+        self._diagnostic_values["overlap"].setText(f"{diagnostics.overlap_proxy:.0%}")
+        self._diagnostic_values["frames"].setText(
+            f"{diagnostics.selected_frames} of {diagnostics.candidate_frames}"
+        )
+        if diagnostics.suitable:
+            self._readiness.setText("SUITABLE")
+            self._set_label_style(self._readiness, "success")
+            summary = (
+                diagnostics.warnings[0]
+                if diagnostics.warnings
+                else ("The measured capture signals are suitable for a room build.")
+            )
+        else:
+            self._readiness.setText("NEEDS ANOTHER CAPTURE")
+            self._set_label_style(self._readiness, "danger")
+            issue = diagnostics.issues[0]
+            summary = f"{issue.message} {issue.recovery_action}"
+        self._review_summary.setText(summary)
+        self._build_action.setEnabled(diagnostics.suitable)
+
+    def set_analysis_error(self, message: str) -> None:
+        """Show an actionable analysis failure without enabling reconstruction."""
+        self._readiness.setText("ANALYSIS UNAVAILABLE")
+        self._set_label_style(self._readiness, "danger")
+        self._review_summary.setText(message)
+        self._build_action.setEnabled(False)
+
+    def set_prepared_sample_ready(self) -> None:
+        """Enable the deterministic bundled evaluation path."""
+        self._readiness.setText("PREPARED SAMPLE")
+        self._set_label_style(self._readiness, "success")
+        self._review_summary.setText("The prepared sample is ready for the pipeline smoke test.")
+        values = ("24 s · 1920x1080", "Good", "Balanced", "Smooth", "86%", "80 of 96")
+        for label, value in zip(self._diagnostic_values.values(), values, strict=True):
+            label.setText(value)
+        self._build_action.setEnabled(True)
+
     def reset_progress(self) -> None:
         """Prepare the progress surface for a new job."""
         self._content.setCurrentIndex(2)
@@ -642,7 +715,10 @@ class BuildPage(QWidget):
             self._set_label_style(label, "stageDone")
 
     def _emit_build(self) -> None:
-        self.build_requested.emit(str(self._outcome.currentData()))
+        self.build_requested.emit(
+            str(self._outcome.currentData()),
+            str(self._quality.currentData()),
+        )
 
     @staticmethod
     def _set_label_style(label: QLabel, object_name: str) -> None:

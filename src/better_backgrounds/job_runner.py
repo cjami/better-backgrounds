@@ -61,6 +61,12 @@ class JobRunner:
             return self._process is not None and self._process.poll() is None
 
     @property
+    def job_id(self) -> str | None:
+        """Return the active or most recently supervised job identifier."""
+        with self._lock:
+            return self._job_id
+
+    @property
     def stderr_text(self) -> str:
         """Return the bounded stderr tail for diagnostics."""
         with self._lock:

@@ -23,6 +23,7 @@ htmlcov/
 *.egg-info/
 build/
 dist/
+/target/
 
 # Node, Vite, and Electron Forge
 node_modules/

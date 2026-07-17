@@ -24,7 +24,7 @@ plugins =
 [nuitka]
 macos.permissions =
 mode = standalone
-extra_args = --quiet --zig --assume-yes-for-downloads --noinclude-qt-translations --include-package=better_backgrounds --include-package-data=better_backgrounds
+extra_args = --quiet --zig --assume-yes-for-downloads --noinclude-qt-translations --include-package=better_backgrounds --include-package=pycolmap --include-package-data=better_backgrounds
 
 [buildozer]
 mode = debug

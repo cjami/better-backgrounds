@@ -124,6 +124,11 @@ class SceneTransform(StrictModel):
     scale: float = Field(default=1.0, ge=0.01, le=100.0, allow_inf_nan=False)
 
 
+def colmap_scene_transform() -> SceneTransform:
+    """Convert COLMAP/Brush splat coordinates to the PlayCanvas scene basis."""
+    return SceneTransform(orientation=Quaternion(z=1.0, w=0.0))
+
+
 class Viewpoint(StrictModel):
     """Persist every safe virtual-camera and subject-placement input."""
 
@@ -168,7 +173,7 @@ class AssetResource(StrictModel):
     """Identify one checksummed file belonging to a managed scene."""
 
     path: str = Field(min_length=1, max_length=200)
-    url: HttpUrl
+    url: HttpUrl | None = None
     size: int = Field(gt=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -198,9 +203,9 @@ class SceneReference(StrictModel):
     entrypoint: str = Field(min_length=1, max_length=200)
     resources: tuple[AssetResource, ...] = Field(min_length=1)
     license_name: str = Field(min_length=1, max_length=80)
-    license_url: HttpUrl
+    license_url: HttpUrl | None = None
     attribution: str = Field(min_length=1, max_length=300)
-    attribution_url: HttpUrl
+    attribution_url: HttpUrl | None = None
     preview: str | None = Field(default=None, max_length=200)
     default_viewpoint: Viewpoint = Field(default_factory=Viewpoint)
 
@@ -228,6 +233,14 @@ class SceneReference(StrictModel):
     def managed_url(self) -> QUrl:
         """Return the renderer-safe URL of the runtime entrypoint."""
         return QUrl(f"{SCENE_SCHEME}://{self.asset_id}/{self.entrypoint}")
+
+
+def normalize_colmap_scene_reference(reference: SceneReference) -> SceneReference:
+    """Attach the non-destructive renderer transform for a COLMAP-derived scene."""
+    viewpoint = reference.default_viewpoint.model_copy(
+        update={"scene_transform": colmap_scene_transform()},
+    )
+    return reference.model_copy(update={"default_viewpoint": viewpoint})
 
 
 class SceneAssetManifest(StrictModel):
@@ -295,6 +308,42 @@ class AssetInstaller:
             raise
         return target
 
+    def adopt(self, reference: SceneReference, source_root: Path) -> Path:
+        """Atomically publish verified locally generated scene resources."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        target = self.root / reference.asset_id
+        staging = self.root / f".{reference.asset_id}.{uuid4().hex}.part"
+        try:
+            staging.mkdir()
+            for resource in reference.resources:
+                self._copy_generated_resource(resource, source_root, staging)
+            self._write_marker(staging / ".complete.json", self._digest(reference))
+            if target.exists():
+                shutil.rmtree(target)
+            staging.replace(target)
+            self._verified[reference.asset_id] = self._digest(reference)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return target
+
+    def _copy_generated_resource(
+        self,
+        resource: AssetResource,
+        source_root: Path,
+        staging: Path,
+    ) -> None:
+        source = source_root.joinpath(*PurePosixPath(resource.path).parts).resolve()
+        if not source.is_relative_to(source_root.resolve()) or not source.is_file():
+            msg = f"generated scene is missing {resource.path}"
+            raise ValueError(msg)
+        if source.stat().st_size != resource.size or self._file_digest(source) != resource.sha256:
+            msg = f"generated scene integrity failure for {resource.path}"
+            raise ValueError(msg)
+        destination = staging.joinpath(*PurePosixPath(resource.path).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
     def _download(
         self,
         resource: AssetResource,
@@ -303,6 +352,9 @@ class AssetInstaller:
         reference: SceneReference,
         progress: ProgressCallback | None,
     ) -> int:
+        if resource.url is None:
+            msg = f"generated resource {resource.path} cannot be downloaded"
+            raise ValueError(msg)
         digest = hashlib.sha256()
         written = 0
         with closing(self._opener(str(resource.url))) as source, destination.open("xb") as output:
@@ -404,6 +456,66 @@ class ManagedSceneResolver:
         if not candidate.is_relative_to(root) or not candidate.is_file():
             return None
         return candidate
+
+    def register(self, reference: SceneReference) -> None:
+        """Add one validated locally generated scene to the controlled index."""
+        self._references[reference.asset_id] = reference
+
+
+class LegacySceneCatalogueDocument(StrictModel):
+    """Read generated rooms written before coordinate normalization."""
+
+    schema_version: Literal[1] = 1
+    scenes: tuple[SceneReference, ...] = ()
+
+
+class SceneCatalogueDocument(StrictModel):
+    """Version locally generated rooms separately from bundled samples."""
+
+    schema_version: Literal[2] = 2
+    scenes: tuple[SceneReference, ...] = ()
+
+
+class SceneCatalogue:
+    """Persist generated scene references through atomic replacement."""
+
+    def __init__(self, path: Path) -> None:
+        """Use one application-owned catalogue path."""
+        self.path = path
+
+    def scenes(self) -> tuple[SceneReference, ...]:
+        """Return valid generated rooms, ignoring a corrupt document."""
+        return self._read().scenes
+
+    def find(self, asset_id: str) -> SceneReference | None:
+        """Find a generated room by stable identifier."""
+        return next((scene for scene in self.scenes() if scene.asset_id == asset_id), None)
+
+    def save(self, reference: SceneReference) -> None:
+        """Insert or replace one room without disturbing catalogue order."""
+        existing = [scene for scene in self.scenes() if scene.asset_id != reference.asset_id]
+        document = SceneCatalogueDocument(scenes=(reference, *existing))
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(document.model_dump_json(indent=2), encoding="utf-8")
+            temporary.replace(self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _read(self) -> SceneCatalogueDocument:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("schema_version") == 1:
+                legacy = LegacySceneCatalogueDocument.model_validate(payload)
+                return SceneCatalogueDocument(
+                    scenes=tuple(
+                        normalize_colmap_scene_reference(scene) for scene in legacy.scenes
+                    ),
+                )
+            return SceneCatalogueDocument.model_validate(payload)
+        except OSError, TypeError, ValueError:
+            return SceneCatalogueDocument()
 
 
 class ViewpointDocument(StrictModel):

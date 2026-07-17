@@ -8,7 +8,10 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QApplication, QComboBox, QPushButton, QStackedWidget
 
 from better_backgrounds.build_session import IdleBuild
-from better_backgrounds.desktop.app import packaged_worker_command
+from better_backgrounds.desktop.app import (
+    packaged_reconstruction_command,
+    packaged_worker_command,
+)
 from better_backgrounds.desktop.bridge import RendererBridge
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow
@@ -74,6 +77,9 @@ def test_main_window_contains_four_independent_product_tabs() -> None:
     assert all(tab.isEnabled() for tab in tabs)
     assert window.active_tab == 0
     assert isinstance(window.build_session.state, IdleBuild)
+    quality = window.findChild(QComboBox, "qualityPreset")
+    assert quality is not None
+    assert quality.currentData() == "balanced"
     window.close()
 
 
@@ -296,3 +302,21 @@ def test_frozen_application_reuses_its_executable_for_workers(
     command = packaged_worker_command("job-1", "success")
 
     assert command[:2] == [str(Path(sys.argv[0]).resolve()), "--fake-worker"]
+
+
+def test_frozen_application_reuses_its_executable_for_reconstruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep real reconstruction inside the packaged worker dispatch."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    command = packaged_reconstruction_command(
+        "job-1",
+        Path("room video.mp4"),
+        resume=True,
+        quality="preview",
+    )
+
+    assert command[:2] == [str(Path(sys.argv[0]).resolve()), "--reconstruction-worker"]
+    assert command[command.index("--quality") + 1] == "preview"
+    assert command[-1] == "--resume"

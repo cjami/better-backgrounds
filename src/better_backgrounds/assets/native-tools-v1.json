@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "tool_id": "ffmpeg",
+      "version": "8.1.2-21-gce3c09c101",
+      "source_url": "https://github.com/FFmpeg/FFmpeg/tree/ce3c09c101",
+      "license_name": "LGPL-2.1-or-later",
+      "artifacts": [
+        {
+          "platform": "windows-x86_64",
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1.zip",
+          "size": 144332533,
+          "sha256": "3b9eceb438016b647e0755a51ce3a388cd4ed5679e2427cb83a01e1ae2cd0eba",
+          "archive": "zip",
+          "layout": {
+            "executables": {
+              "ffmpeg": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1/bin/ffmpeg.exe",
+              "ffprobe": "ffmpeg-n8.1.2-21-gce3c09c101-win64-lgpl-8.1/bin/ffprobe.exe"
+            }
+          }
+        },
+        {
+          "platform": "linux-x86_64",
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-30-13-34/ffmpeg-n8.1.2-21-gce3c09c101-linux64-lgpl-8.1.tar.xz",
+          "size": 111084108,
+          "sha256": "92a85718296516045e3d08a971f346f111971a2f9cba7e8191e5454eb05e4305",
+          "archive": "tar.xz",
+          "layout": {
+            "executables": {
+              "ffmpeg": "ffmpeg-n8.1.2-21-gce3c09c101-linux64-lgpl-8.1/bin/ffmpeg",
+              "ffprobe": "ffmpeg-n8.1.2-21-gce3c09c101-linux64-lgpl-8.1/bin/ffprobe"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "tool_id": "brush",
+      "version": "0.3.0",
+      "source_url": "https://github.com/ArthurBrussee/brush/tree/v0.3.0",
+      "license_name": "Apache-2.0",
+      "artifacts": [
+        {
+          "platform": "windows-x86_64",
+          "url": "https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-x86_64-pc-windows-msvc.zip",
+          "size": 158791348,
+          "sha256": "b68e3e9cf052d51bf3ee30776fa5a364de7f2ba13b58443128ff797bb7bcfcd6",
+          "archive": "zip",
+          "layout": {
+            "executables": {
+              "brush": "brush_app.exe"
+            }
+          }
+        },
+        {
+          "platform": "macos-arm64",
+          "url": "https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-aarch64-apple-darwin.tar.xz",
+          "size": 41447012,
+          "sha256": "65b2631398c839be3c1d4d7160fe2326389dec87830aac0710985e6690a1048c",
+          "archive": "tar.xz",
+          "layout": {
+            "executables": {
+              "brush": "brush_app"
+            }
+          }
+        },
+        {
+          "platform": "linux-x86_64",
+          "url": "https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-x86_64-unknown-linux-gnu.tar.xz",
+          "size": 44242224,
+          "sha256": "4f0f9a8785d1951c62df26aae247c02c5bba32b00f40b06df4e1c9b867399e20",
+          "archive": "tar.xz",
+          "layout": {
+            "executables": {
+              "brush": "brush_app"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "tool_id": "splat-transform",
+      "version": "2.7.1",
+      "source_url": "https://github.com/playcanvas/splat-transform/tree/v2.7.1",
+      "license_name": "MIT",
+      "artifacts": []
+    }
+  ],
+  "samples": []
+}

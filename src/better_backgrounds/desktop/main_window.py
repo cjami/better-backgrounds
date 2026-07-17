@@ -40,6 +40,7 @@ from better_backgrounds.input_camera import (
     InputCameraSource,
 )
 from better_backgrounds.job_runner import JobRunner
+from better_backgrounds.managed_tools import resolved_executable_paths
 from better_backgrounds.protocol import (
     CancelledEvent,
     ErrorEvent,
@@ -47,18 +48,26 @@ from better_backgrounds.protocol import (
     ResultEvent,
     WarningEvent,
 )
+from better_backgrounds.reconstruction import ReconstructionQuality
 from better_backgrounds.scene import (
     AssetInstaller,
     ManagedSceneResolver,
+    SceneCatalogue,
+    SceneReference,
     Viewpoint,
     ViewpointStore,
     load_sample_manifest,
 )
+from better_backgrounds.video_analysis import CaptureDiagnostics, analyse_video_file
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
 
 CommandFactory = Callable[[str, str], Sequence[str]]
+ReconstructionCommandFactory = Callable[
+    [str, Path, bool, ReconstructionQuality],
+    Sequence[str],
+]
 RendererFactory = Callable[[], QWidget]
 
 TAB_NAMES = ("Show", "Build", "Adjust", "Compare")
@@ -83,6 +92,13 @@ class AssetSignals(QObject):
     progressed = Signal(int, int)
     completed = Signal()
     failed = Signal(str)
+
+
+class AnalysisSignals(QObject):
+    """Marshal video-analysis results onto the Qt main thread."""
+
+    completed = Signal(object)
+    failed = Signal(str, str)
 
 
 class TabHeader(QFrame):
@@ -159,6 +175,7 @@ class MainWindow(QMainWindow):
         self,
         *,
         command_factory: CommandFactory,
+        reconstruction_command_factory: ReconstructionCommandFactory | None = None,
         renderer_factory: RendererFactory | None = None,
         camera_source: InputCameraSource | None = None,
         scene_cache_root: Path | None = None,
@@ -167,6 +184,8 @@ class MainWindow(QMainWindow):
         """Create tabs and connect their task-specific signals."""
         super().__init__()
         self._command_factory = command_factory
+        self._reconstruction_command_factory = reconstruction_command_factory
+        self._resume_job_id: str | None = None
         self._build_session = BuildSession()
         self._runner: JobRunner | None = None
         self._signals = RunnerSignals(self)
@@ -175,12 +194,23 @@ class MainWindow(QMainWindow):
         self._camera_source = camera_source or InputCameraSource(parent=self)
         self._input_cameras: tuple[InputCamera, ...] = ()
         self._selected_input_camera_id: str | None = None
-        self._rooms = list(DEFAULT_ROOMS)
+        generated_rooms = [scene.display_name for scene in self._generated_scenes.values()]
+        self._rooms = [
+            *generated_rooms,
+            *[room for room in DEFAULT_ROOMS if room not in generated_rooms],
+        ]
         self._room_ids = {
             room: (
                 self._sample_scene.asset_id
                 if room == self._sample_scene.display_name
-                else self._room_id(room)
+                else next(
+                    (
+                        scene.asset_id
+                        for scene in self._generated_scenes.values()
+                        if scene.display_name == room
+                    ),
+                    self._room_id(room),
+                )
             )
             for room in self._rooms
         }
@@ -249,13 +279,24 @@ class MainWindow(QMainWindow):
         actual_data_root = data_root or Path(
             user_data_path("Better Backgrounds", "Better Backgrounds"),
         )
+        self._scene_cache_root = cache_root
+        self._data_root = actual_data_root
+        self._catalogue = SceneCatalogue(actual_data_root / "scene-catalogue-v1.json")
+        self._generated_scenes = {scene.asset_id: scene for scene in self._catalogue.scenes()}
         self._asset_installer = AssetInstaller(cache_root)
-        self._asset_resolver = ManagedSceneResolver(self._asset_installer, [self._sample_scene])
+        self._asset_resolver = ManagedSceneResolver(
+            self._asset_installer,
+            [self._sample_scene, *self._generated_scenes.values()],
+        )
         self._viewpoints = ViewpointStore(actual_data_root / "viewpoints-v1.json")
         self._input_camera_selection = InputCameraSelectionStore(
             actual_data_root / "input-camera-v1.json",
         )
         self._preferred_input_camera_id = self._input_camera_selection.load()
+        self._ffprobe = resolved_executable_paths(cache_root.parent / "tools-v1").get("ffprobe")
+        self._analysis_signals = AnalysisSignals(self)
+        self._analysis_signals.completed.connect(self._analysis_completed)
+        self._analysis_signals.failed.connect(self._analysis_failed)
         self._asset_signals = AssetSignals(self)
         self._asset_signals.progressed.connect(self._show_sample_progress)
         self._asset_signals.completed.connect(self._sample_installed)
@@ -291,7 +332,7 @@ class MainWindow(QMainWindow):
         """Run the prepared sample through the successful fake worker."""
         self.select_tab(1)
         self._use_sample()
-        self._start_build("success")
+        self._start_build("success", ReconstructionQuality.BALANCED.value)
 
     def _default_renderer_factory(self) -> QWidget:
         try:
@@ -351,7 +392,7 @@ class MainWindow(QMainWindow):
         room_id = self._room_ids[room]
         self._header.set_room(room)
         self._show_page.set_room(room)
-        scene = self._sample_scene if room == self._sample_scene.display_name else None
+        scene = self._scene_for_room(room)
         installed = scene is not None and self._asset_installer.is_ready(scene)
         self._adjust_page.set_room(
             room_id,
@@ -432,15 +473,75 @@ class MainWindow(QMainWindow):
     def _select_video(self, selection: VideoSelection) -> None:
         self._build_session.select_video(selection)
         self._build_page.show_review(selection)
+        if selection.sample:
+            self._build_page.set_prepared_sample_ready()
+            return
+        self._build_page.set_analysis_pending()
+        ffprobe = self._ffprobe
+        if selection.source_path is None or ffprobe is None:
+            self._build_page.set_analysis_error(
+                "Video analysis requires the pinned FFmpeg tools. Run setup --tools and doctor."
+            )
+            return
+        source = selection.source_path.resolve()
 
-    @Slot(str)
-    def _start_build(self, outcome: str) -> None:
-        job_id = uuid4().hex
+        def analyse() -> None:
+            try:
+                diagnostics = analyse_video_file(source, ffprobe)
+            except (OSError, TypeError, ValueError) as error:
+                self._analysis_signals.failed.emit(str(source), str(error)[:500])
+            else:
+                self._analysis_signals.completed.emit(diagnostics)
+
+        threading.Thread(target=analyse, name="capture-analysis", daemon=True).start()
+
+    @Slot(object)
+    def _analysis_completed(self, result: object) -> None:
+        if not isinstance(result, CaptureDiagnostics) or not self._review_matches(
+            result.probe.path
+        ):
+            return
+        self._build_page.set_capture_diagnostics(result)
+
+    @Slot(str, str)
+    def _analysis_failed(self, source: str, message: str) -> None:
+        if self._review_matches(Path(source)):
+            self._build_page.set_analysis_error(message)
+
+    def _review_matches(self, source: Path) -> bool:
+        state = self._build_session.state
+        return bool(
+            isinstance(state, ReviewBuild)
+            and state.selection.source_path is not None
+            and state.selection.source_path.resolve() == source.resolve()
+        )
+
+    @Slot(str, str)
+    def _start_build(self, outcome: str, quality_name: str) -> None:
+        state = self._build_session.state
+        if not isinstance(state, ReviewBuild):
+            return
+        job_id = self._resume_job_id or uuid4().hex
+        resume = self._resume_job_id is not None
+        self._resume_job_id = None
         self._build_session.start(job_id)
         self._build_page.reset_progress()
         runner = JobRunner(self._signals.event_received.emit)
         self._runner = runner
-        runner.start(self._command_factory(job_id, outcome), job_id=job_id)
+        quality = ReconstructionQuality(quality_name)
+        if (
+            state.selection.source_path is not None
+            and self._reconstruction_command_factory is not None
+        ):
+            command = self._reconstruction_command_factory(
+                job_id,
+                state.selection.source_path,
+                resume,
+                quality,
+            )
+        else:
+            command = self._command_factory(job_id, outcome)
+        runner.start(command, job_id=job_id)
 
     @Slot()
     def _cancel_build(self) -> None:
@@ -450,6 +551,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _retry_build(self) -> None:
+        failed_state = self._build_session.state
+        if isinstance(failed_state, FailedBuild) and self._runner is not None:
+            self._resume_job_id = self._runner.job_id
         state = self._build_session.retry()
         self._build_page.show_review(state.selection)
 
@@ -460,6 +564,7 @@ class MainWindow(QMainWindow):
             ProgressEvent | WarningEvent | ResultEvent | ErrorEvent | CancelledEvent,
         ):
             return
+        previous_state = self._build_session.state
         if not self._build_session.apply(event):
             return
         state = self._build_session.state
@@ -468,16 +573,32 @@ class MainWindow(QMainWindow):
         elif isinstance(state, FailedBuild):
             self._build_page.set_failed(state.message, state.recovery_action)
         elif isinstance(state, ReviewBuild):
+            if isinstance(previous_state, RunningBuild) and isinstance(event, CancelledEvent):
+                self._resume_job_id = previous_state.job_id
             self._build_page.show_review(state.selection)
         elif isinstance(state, CompletedBuild):
-            room_name = self._room_name_for(state.selection)
+            scene = self._catalogue.find(state.scene_id)
+            if scene is not None and self._asset_installer.is_ready(scene):
+                self._generated_scenes[scene.asset_id] = scene
+                self._asset_resolver.register(scene)
+            room_name = (
+                scene.display_name if scene is not None else self._room_name_for(state.selection)
+            )
             if room_name not in self._rooms:
                 self._rooms.insert(0, room_name)
-                self._room_ids[room_name] = self._room_id(room_name)
+            self._room_ids[room_name] = (
+                scene.asset_id if scene is not None else self._room_id(room_name)
+            )
             self._show_page.set_rooms(self._rooms, room_name)
             self.select_room(room_name)
             self._build_page.set_completed(room_name)
             self.room_ready.emit()
+
+    def _scene_for_room(self, room: str) -> SceneReference | None:
+        if room == self._sample_scene.display_name:
+            return self._sample_scene
+        room_id = self._room_ids.get(room)
+        return self._generated_scenes.get(room_id) if room_id is not None else None
 
     @staticmethod
     def _room_name_for(selection: VideoSelection) -> str:

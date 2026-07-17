@@ -18,11 +18,13 @@ from better_backgrounds.scene import (
     CropRegion,
     ManagedSceneResolver,
     Quaternion,
+    SceneCatalogue,
     SceneReference,
     SubjectRegion,
     Vector3,
     Viewpoint,
     ViewpointStore,
+    colmap_scene_transform,
     load_sample_manifest,
 )
 
@@ -120,6 +122,7 @@ def test_checked_in_sample_manifest_has_a_licensed_sog_scene() -> None:
     assert manifest.scenes[0].format == "sog"
     assert manifest.scenes[0].license_name == "CC BY 4.0"
     assert manifest.scenes[0].expected_size == SAMPLE_DOWNLOAD_SIZE
+    assert manifest.scenes[0].default_viewpoint.scene_transform == colmap_scene_transform()
 
 
 def test_lightweight_sog_fixture_has_runtime_resources() -> None:
@@ -147,6 +150,56 @@ def test_bad_checksum_never_exposes_a_partial_asset(tmp_path: Path) -> None:
     assert not installer.is_ready(reference)
     assert not (tmp_path / reference.asset_id).exists()
     assert not list(tmp_path.glob("*.part"))
+
+
+def test_generated_scene_is_adopted_and_catalogued_offline(tmp_path: Path) -> None:
+    """Publish local output without inventing a network resource URL."""
+    source = tmp_path / "generated"
+    source.mkdir()
+    content = b'{"version":2,"count":1}'
+    (source / "meta.json").write_bytes(content)
+    local_resource = AssetResource(
+        path="meta.json",
+        size=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+    reference = SceneReference(
+        asset_id="generated-room-v1",
+        display_name="Generated room",
+        format="sog",
+        entrypoint="meta.json",
+        resources=(local_resource,),
+        license_name="User-provided capture",
+        attribution="Generated locally",
+    )
+    installer = AssetInstaller(tmp_path / "cache")
+    catalogue = SceneCatalogue(tmp_path / "data" / "catalogue.json")
+
+    installer.adopt(reference, source)
+    catalogue.save(reference)
+
+    assert installer.is_ready(reference)
+    assert catalogue.find(reference.asset_id) == reference
+
+
+def test_legacy_generated_catalogue_migrates_colmap_orientation(tmp_path: Path) -> None:
+    """Repair generated rooms published before coordinate normalization was recorded."""
+    reference = scene_reference(resource("meta.json", b"metadata"))
+    path = tmp_path / "catalogue.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "scenes": [reference.model_dump(mode="json")],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    migrated = SceneCatalogue(path).find(reference.asset_id)
+
+    assert migrated is not None
+    assert migrated.default_viewpoint.scene_transform == colmap_scene_transform()
 
 
 def test_interrupted_download_can_retry_cleanly(tmp_path: Path) -> None:
