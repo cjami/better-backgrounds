@@ -111,9 +111,17 @@ report for a release reference machine:
 uv run better-backgrounds matting-benchmark capture.mp4 --mask first-mask.png
 ```
 
-Appearance harmonization is intentionally still gated. It must not become the
-default until both real SHARP scene-quality gates and the MatAnyone quality,
-latency, and soak gates pass on each supported reference platform.
+Appearance harmonization is available as an experimental, off-by-default stage
+in Adjust. Room analysis is cached when the selected render changes; masked
+foreground estimates run at 5 Hz and adjustment parameters are interpolated at
+frame rate. CUDA or Metal performs the full-resolution adjustment and fused
+composite with cached room tensors; systems without either use the guarded
+portable fallback. Each component has an independent off state, Compare retains
+the standard exact-frame composite, and reports measured frame cost. The
+production budget policy provides the documented ordered fallback.
+Harmonization must not become the default until both real SHARP and MatAnyone
+gates plus its quality, latency, and soak gates pass on each supported reference
+platform.
 
 ## Scene rendering and offline behavior
 

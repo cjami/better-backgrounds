@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 
 from better_backgrounds.compositor import background_has_content, compose_live_frame
 from better_backgrounds.desktop.live_preview import NativeCompositeSurface, rgb_to_qimage
+from better_backgrounds.harmonization import AppearanceHarmonizer, HarmonizationSettings
 from better_backgrounds.live_matting import FramePacket, MatteResult
 from better_backgrounds.matting_engine import CompletedMatte
 
@@ -114,3 +115,32 @@ def test_surface_retains_last_room_when_renderer_grab_is_blank() -> None:
 
     assert np.array_equal(composite.image, room)
     surface.close()
+
+
+def test_compositor_retains_standard_baseline_when_harmonization_is_enabled() -> None:
+    """Compare the same exact-frame composite with and without appearance matching."""
+    source = np.full((8, 8, 3), [40, 60, 90], dtype=np.uint8)
+    background = np.full((8, 8, 3), [160, 120, 80], dtype=np.uint8)
+    background[0, 0] = 20
+    alpha = np.full((8, 8), 255, dtype=np.uint8)
+    packet = FramePacket(8, 80.0, 8, 8, 0)
+    matte = MatteResult(8, 80.0, 0, 10.0)
+    harmonizer = AppearanceHarmonizer(
+        HarmonizationSettings(global_appearance=True),
+        statistics_interval=0.0,
+    )
+    harmonizer.set_room(background, revision=2)
+
+    composite = compose_live_frame(
+        packet,
+        matte,
+        source,
+        alpha,
+        background,
+        revision=2,
+        harmonizer=harmonizer,
+    )
+
+    assert np.array_equal(composite.standard_image, source)
+    assert not np.array_equal(composite.image, composite.standard_image)
+    assert composite.harmonized

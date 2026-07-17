@@ -35,6 +35,7 @@ from better_backgrounds.build_session import (
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.pages import AdjustPage, BuildPage, ComparePage, ShowPage
 from better_backgrounds.desktop.preview import ScenePreview
+from better_backgrounds.harmonization import HarmonizationSettings
 from better_backgrounds.input_camera import (
     InputCamera,
     InputCameraSelectionStore,
@@ -278,6 +279,7 @@ class MainWindow(QMainWindow):
         self._adjust_page.viewpoint_saved.connect(self._save_viewpoint)
         self._adjust_page.viewpoint_previewed.connect(self._preview_viewpoint)
         self._adjust_page.mirroring_changed.connect(self._change_mirroring)
+        self._adjust_page.harmonization_changed.connect(self._change_harmonization)
         self._compare_page.wipe_changed.connect(self._set_compare_wipe)
         camera_state = getattr(self._live_preview, "camera_state_changed", None)
         if camera_state is not None:
@@ -288,6 +290,13 @@ class MainWindow(QMainWindow):
         comparison_frame = getattr(self._live_preview, "comparison_frame", None)
         if comparison_frame is not None:
             comparison_frame.connect(self._compare_page.set_live_frame)
+        harmonization_status = getattr(
+            self._live_preview,
+            "harmonization_status_changed",
+            None,
+        )
+        if harmonization_status is not None:
+            harmonization_status.connect(self._compare_page.set_harmonization_status)
         self._adjust_page.set_live_preferences(
             mirrored=self._live_preferences.mirrored,
         )
@@ -597,6 +606,15 @@ class MainWindow(QMainWindow):
         setter = getattr(self._live_preview, "set_mirroring", None)
         if callable(setter):
             setter(mirrored=mirrored)
+
+    @Slot(object)
+    def _change_harmonization(self, settings: object) -> None:
+        """Apply one room-scoped experimental appearance configuration."""
+        if not isinstance(settings, HarmonizationSettings):
+            return
+        setter = getattr(self._live_preview, "set_harmonization", None)
+        if callable(setter):
+            setter(settings)
 
     @Slot(int)
     def _set_compare_wipe(self, value: int) -> None:

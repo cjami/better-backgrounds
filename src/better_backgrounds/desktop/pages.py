@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from better_backgrounds.desktop.preview import ComparisonPreview
+from better_backgrounds.harmonization import HarmonizationSettings
 from better_backgrounds.scene import CropRegion, SceneReference, Viewpoint
 
 if TYPE_CHECKING:
@@ -805,6 +806,7 @@ class AdjustPage(QWidget):
     viewpoint_saved = Signal(str, object)
     viewpoint_previewed = Signal(object)
     mirroring_changed = Signal(bool)
+    harmonization_changed = Signal(object)
 
     def __init__(
         self,
@@ -817,6 +819,9 @@ class AdjustPage(QWidget):
         self._viewpoint = Viewpoint()
         self._default_viewpoint = Viewpoint()
         self._drafts: dict[str, Viewpoint] = {}
+        self._harmonization_drafts: dict[str, HarmonizationSettings] = {}
+        self._harmonization = HarmonizationSettings()
+        self._harmonization_controls: dict[str, QCheckBox] = {}
         self._sliders: dict[str, QSlider] = {}
         self._slider_labels: dict[str, QLabel] = {}
         self._loaded_scene_id = ""
@@ -922,13 +927,40 @@ class AdjustPage(QWidget):
         )
         controls.addSpacing(6)
         controls.addWidget(_label("Harmonisation", object_name="section"))
-        phase_six = _label(
-            "Scene-aware harmonisation arrives in Phase 6. "
-            "This phase uses standard alpha compositing.",
-            object_name="muted",
-            word_wrap=True,
+        controls.addWidget(
+            _label(
+                "Experimental and off by default until the platform quality and "
+                "performance gates pass.",
+                object_name="muted",
+                word_wrap=True,
+            ),
         )
-        controls.addWidget(phase_six)
+        harmonization_components = (
+            ("global_appearance", "Global appearance match"),
+            ("directional_shading", "Directional shading"),
+            ("edge_decontamination", "Edge decontamination"),
+            ("light_wrap", "Light wrap"),
+            ("detail_match", "Sharpness and grain match"),
+            ("depth_effects", "Depth-dependent effects"),
+        )
+        for key, title in harmonization_components:
+            component = QCheckBox(title)
+            component.setObjectName(f"harmonization-{key.replace('_', '-')}")
+            component.toggled.connect(self._harmonization_control_changed)
+            self._harmonization_controls[key] = component
+            controls.addWidget(component)
+        depth_effects = self._harmonization_controls["depth_effects"]
+        depth_effects.setEnabled(False)
+        depth_effects.setToolTip(
+            "Unavailable until the room renderer provides reliable depth and confidence",
+        )
+        controls.addWidget(
+            _label(
+                "Compare retains the standard exact-frame composite as its baseline.",
+                object_name="muted",
+                word_wrap=True,
+            ),
+        )
         controls.addStretch()
         root.addWidget(inspector)
 
@@ -949,15 +981,19 @@ class AdjustPage(QWidget):
         """Restore one room draft and load its managed scene at most once."""
         if self._room_id:
             self._drafts[self._room_id] = self._viewpoint
+            self._harmonization_drafts[self._room_id] = self._harmonization
         self._room_id = room
         self.setAccessibleDescription(f"Adjust settings for {room}")
         self._default_viewpoint = scene.default_viewpoint if scene is not None else Viewpoint()
         self._viewpoint = self._drafts.get(room, viewpoint or self._default_viewpoint)
+        self._harmonization = self._harmonization_drafts.get(room, HarmonizationSettings())
         if scene is not None:
             self._viewpoint = self._viewpoint.model_copy(
                 update={"scene_transform": self._default_viewpoint.scene_transform},
             )
         self._sync_controls()
+        self._sync_harmonization_controls()
+        self.harmonization_changed.emit(self._harmonization)
 
         if scene is None:
             self._renderer.show()
@@ -1092,6 +1128,19 @@ class AdjustPage(QWidget):
             setter(self._viewpoint)
         self.viewpoint_previewed.emit(self._viewpoint)
 
+    def _harmonization_control_changed(self) -> None:
+        values = {key: control.isChecked() for key, control in self._harmonization_controls.items()}
+        self._harmonization = HarmonizationSettings.model_validate(values)
+        if self._room_id:
+            self._harmonization_drafts[self._room_id] = self._harmonization
+        self.harmonization_changed.emit(self._harmonization)
+
+    def _sync_harmonization_controls(self) -> None:
+        for key, control in self._harmonization_controls.items():
+            control.blockSignals(True)  # noqa: FBT003
+            control.setChecked(bool(getattr(self._harmonization, key)))
+            control.blockSignals(False)  # noqa: FBT003
+
     def _sync_controls(self) -> None:
         values = {
             "Field of view": round(self._viewpoint.field_of_view),
@@ -1143,8 +1192,15 @@ class ComparePage(QWidget):
         self._placeholder = ComparisonPreview()
         self._preview_layout.addWidget(self._placeholder)
         root.addWidget(self._preview_host, 1)
+        self._harmonization_status = _label(
+            "Harmonisation is off. Enable components in Adjust; identical sides are expected.",
+            object_name="muted",
+            word_wrap=True,
+        )
+        self._harmonization_status.setAccessibleName("Harmonisation comparison status")
+        root.addWidget(self._harmonization_status)
         wipe_row = QHBoxLayout()
-        wipe_row.addWidget(_label("ORIGINAL WEBCAM", object_name="muted"))
+        wipe_row.addWidget(_label("STANDARD EXACT-FRAME", object_name="muted"))
         wipe = QSlider(Qt.Orientation.Horizontal)
         wipe.setRange(0, 100)
         wipe.setValue(52)
@@ -1152,7 +1208,7 @@ class ComparePage(QWidget):
         wipe.valueChanged.connect(self._placeholder.set_wipe)
         wipe.valueChanged.connect(self.wipe_changed)
         wipe_row.addWidget(wipe, 1)
-        wipe_row.addWidget(_label("STANDARD COMPOSITE", object_name="stageActive"))
+        wipe_row.addWidget(_label("BETTER BACKGROUNDS", object_name="stageActive"))
         root.addLayout(wipe_row)
 
     def set_live_frame(self, frame: object) -> None:
@@ -1164,3 +1220,7 @@ class ComparePage(QWidget):
     def set_room(self, room: str) -> None:
         """Update the room named by the comparison."""
         self.setAccessibleDescription(f"Compare output for {room}")
+
+    def set_harmonization_status(self, message: str) -> None:
+        """Explain identical output or reference-path performance explicitly."""
+        self._harmonization_status.setText(message[:300])

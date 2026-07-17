@@ -3,11 +3,12 @@
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton
 
 from better_backgrounds.desktop.main_window import MainWindow
 from better_backgrounds.desktop.pages import ShowPage
 from better_backgrounds.desktop.preview import ScenePreview
+from better_backgrounds.harmonization import HarmonizationSettings
 from better_backgrounds.input_camera import InputCamera, InputCameraSource
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ class TrackingLiveRenderer(ScenePreview):
 
     camera_state_changed = Signal(str, str)
     diagnostics_changed = Signal(object)
+    harmonization_status_changed = Signal(str)
 
     def __init__(self) -> None:
         """Create empty lifecycle and presentation logs."""
@@ -30,6 +32,7 @@ class TrackingLiveRenderer(ScenePreview):
         self.presentations: list[tuple[str, int]] = []
         self.mirroring: list[bool] = []
         self.matting: list[str] = []
+        self.harmonization: list[HarmonizationSettings] = []
 
     def start_camera(self, label: str, *, mirrored: bool) -> None:
         """Record one explicit camera start."""
@@ -50,6 +53,10 @@ class TrackingLiveRenderer(ScenePreview):
     def set_matting_settings(self, payload: str) -> None:
         """Record worker refinement changes."""
         self.matting.append(payload)
+
+    def set_harmonization(self, settings: HarmonizationSettings) -> None:
+        """Record room-scoped appearance component changes."""
+        self.harmonization.append(settings)
 
 
 def application() -> QApplication:
@@ -173,3 +180,35 @@ def test_adjust_persists_and_applies_foreground_only_mirroring(tmp_path: Path) -
     )
     assert not restored_mirror.isChecked()
     restored.close()
+
+
+def test_harmonization_is_off_by_default_and_independently_enabled(tmp_path: Path) -> None:
+    """Keep phase-six effects opt-in while exposing each supported component."""
+    application()
+    pipeline = TrackingLiveRenderer()
+    window = create_window(tmp_path, pipeline)
+    controls = {checkbox.text(): checkbox for checkbox in window.findChildren(QCheckBox)}
+
+    expected = {
+        "Global appearance match",
+        "Directional shading",
+        "Edge decontamination",
+        "Light wrap",
+        "Sharpness and grain match",
+        "Depth-dependent effects",
+    }
+    assert expected <= controls.keys()
+    assert all(not controls[title].isChecked() for title in expected)
+    assert not controls["Depth-dependent effects"].isEnabled()
+
+    controls["Global appearance match"].setChecked(True)
+
+    assert pipeline.harmonization[-1] == HarmonizationSettings(global_appearance=True)
+    pipeline.harmonization_status_changed.emit("Experimental appearance preview: 18 ms/frame")
+    statuses = [
+        label
+        for label in window.findChildren(QLabel)
+        if label.accessibleName() == "Harmonisation comparison status"
+    ]
+    assert statuses[0].text() == "Experimental appearance preview: 18 ms/frame"
+    window.close()

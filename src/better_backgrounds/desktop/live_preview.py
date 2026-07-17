@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
+import cv2
 import numpy as np
 from PySide6.QtCore import QRect, QRectF, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPainter, QPaintEvent, QPen, QPixmap
@@ -18,6 +19,10 @@ from better_backgrounds.compositor import (
     compose_live_frame,
 )
 from better_backgrounds.desktop.camera_capture import QtCameraCapture, qimage_to_rgb
+from better_backgrounds.harmonization import (
+    AcceleratedAppearanceHarmonizer,
+    HarmonizationSettings,
+)
 from better_backgrounds.live_matting import LiveDiagnostics, MattingConfig
 from better_backgrounds.matanyone_runtime import packaged_checkpoint_path
 from better_backgrounds.matting_engine import (
@@ -71,6 +76,7 @@ class NativeCompositeSurface(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setAccessibleName("Native MatAnyone 2 webcam composite")
         self._background: NDArray[np.uint8] | None = None
+        self._resized_backgrounds: dict[tuple[int, int], NDArray[np.uint8]] = {}
         self._background_revision = 0
         self._raw_source: NDArray[np.uint8] | None = None
         self._packet = None
@@ -78,6 +84,7 @@ class NativeCompositeSurface(QWidget):
         self._alpha: NDArray[np.uint8] | None = None
         self._source_image = QImage()
         self._composite_image = QImage()
+        self._standard_composite_image = QImage()
         self._seed_image = QImage()
         self._mask_image = QImage()
         self._mask_label = ""
@@ -86,11 +93,19 @@ class NativeCompositeSurface(QWidget):
         self._mirrored = True
         self._diagnostics = "Waiting for camera"
         self._last_composite: LiveComposite | None = None
+        self._harmonizer = AcceleratedAppearanceHarmonizer(
+            enforce_accelerated_budget=False,
+        )
 
     @property
     def last_composite(self) -> LiveComposite | None:
         """Return the most recently painted exact-frame evidence."""
         return self._last_composite
+
+    @property
+    def harmonization_backend(self) -> str:
+        """Return the active full-resolution appearance backend."""
+        return self._harmonizer.backend_name
 
     def set_background(self, image: QImage) -> bool:
         """Atomically replace the immutable room snapshot."""
@@ -100,9 +115,28 @@ class NativeCompositeSurface(QWidget):
         if not background_has_content(background):
             return False
         self._background = background
+        self._resized_backgrounds.clear()
         self._background_revision += 1
+        self._harmonizer.set_room(background, revision=self._background_revision)
         self._recompose()
         return True
+
+    def clear_background(self) -> None:
+        """Discard room-scoped pixels and appearance evidence together."""
+        self._background = None
+        self._resized_backgrounds.clear()
+        self._background_revision += 1
+        self._harmonizer.clear_room()
+        self._recompose()
+
+    def set_harmonization(self, settings: HarmonizationSettings) -> None:
+        """Apply explicit component switches and refresh the retained frame."""
+        self._harmonizer.configure(settings)
+        self._recompose()
+
+    def reset_camera_harmonization(self) -> None:
+        """Clear live estimates when the camera source changes."""
+        self._harmonizer.reset_camera()
 
     def set_raw_frame(self, source: NDArray[np.uint8]) -> None:
         """Show native camera pixels while preparing or confirming a seed."""
@@ -168,6 +202,12 @@ class NativeCompositeSurface(QWidget):
             f"{diagnostics.processing_width}x{diagnostics.processing_height} · "
             f"{diagnostics.device_type.upper()} · {diagnostics.dropped_frames} dropped"
         )
+        composite = self._last_composite
+        if composite is not None and composite.harmonized:
+            self._diagnostics += f" · {composite.harmonization_ms:.1f} ms appearance"
+        if composite is not None and composite.harmonization_degraded:
+            fallback = ", ".join(composite.harmonization_degraded)
+            self._diagnostics += f" · appearance fallback: {fallback}"
         self.update()
 
     def clear_matte(self) -> None:
@@ -176,6 +216,7 @@ class NativeCompositeSurface(QWidget):
         self._matte = None
         self._alpha = None
         self._composite_image = QImage()
+        self._standard_composite_image = QImage()
         self._mask_image = QImage()
         self._mask_label = ""
         self._last_composite = None
@@ -192,13 +233,13 @@ class NativeCompositeSurface(QWidget):
             self._draw_cover(painter, primary)
         if (
             self._mode == "compare"
-            and not self._source_image.isNull()
+            and not self._standard_composite_image.isNull()
             and not self._composite_image.isNull()
         ):
             split = round(self.width() * self._wipe / 100)
             painter.save()
             painter.setClipRect(QRect(0, 0, split, self.height()))
-            self._draw_cover(painter, self._source_image)
+            self._draw_cover(painter, self._standard_composite_image)
             painter.restore()
             painter.setPen(QPen(QColor("#e0a34a"), 2))
             painter.drawLine(split, 0, split, self.height())
@@ -234,6 +275,20 @@ class NativeCompositeSurface(QWidget):
         background = self._background
         if background is None:
             background = np.zeros_like(source)
+        elif background.shape != source.shape:
+            shape = source.shape[:2]
+            resized = self._resized_backgrounds.get(shape)
+            if resized is None:
+                resized = cast(
+                    "NDArray[np.uint8]",
+                    cv2.resize(
+                        background,
+                        (source.shape[1], source.shape[0]),
+                        interpolation=cv2.INTER_LINEAR,
+                    ),
+                )
+                self._resized_backgrounds[shape] = resized
+            background = resized
         composite = compose_live_frame(
             self._packet,
             self._matte,
@@ -241,9 +296,11 @@ class NativeCompositeSurface(QWidget):
             alpha,
             background,
             revision=self._background_revision,
+            harmonizer=self._harmonizer,
         )
         self._source_image = rgb_to_qimage(source)
         self._composite_image = rgb_to_qimage(composite.image)
+        self._standard_composite_image = rgb_to_qimage(composite.standard_image)
         self._mask_image = rgb_to_qimage(np.repeat(alpha[..., None], 3, axis=2))
         self._last_composite = composite
         self.update()
@@ -270,6 +327,7 @@ class NativeLivePreview(QWidget):
     camera_state_changed = Signal(str, str)
     diagnostics_changed = Signal(object)
     comparison_frame = Signal(object)
+    harmonization_status_changed = Signal(str)
     _seed_generated = Signal(object, object)
     _seed_failed = Signal(str)
 
@@ -342,6 +400,7 @@ class NativeLivePreview(QWidget):
         self.stop_camera()
         self._mirrored = mirrored
         self._surface.set_mirroring(mirrored=mirrored)
+        self._surface.reset_camera_harmonization()
         self._selector.reset()
         self._poll_timer.start()
         self._set_state("seeding", "Hold still while the person seed is captured…")
@@ -360,6 +419,7 @@ class NativeLivePreview(QWidget):
         self._seed_frame = None
         self._seed_mask = None
         self._seed_inflight = False
+        self._surface.reset_camera_harmonization()
         self._surface.clear_matte()
         if self._state != "idle":
             self._set_state("idle", "Camera stopped")
@@ -411,6 +471,7 @@ class NativeLivePreview(QWidget):
         clearer = getattr(self._background_renderer, "clear_scene", None)
         if callable(clearer):
             clearer()
+        self._surface.clear_background()
 
     def set_viewpoint(self, viewpoint: Viewpoint) -> None:
         """Refresh the immutable room snapshot after viewpoint changes."""
@@ -436,6 +497,18 @@ class NativeLivePreview(QWidget):
         """Mirror source and alpha together, never the room snapshot."""
         self._mirrored = mirrored
         self._surface.set_mirroring(mirrored=mirrored)
+
+    def set_harmonization(self, settings: HarmonizationSettings) -> None:
+        """Apply explicit room-scoped experimental appearance switches."""
+        self._surface.set_harmonization(settings)
+        if settings.active:
+            self.harmonization_status_changed.emit(
+                "Experimental appearance preview enabled; preparing the accelerated pass…",
+            )
+        else:
+            self.harmonization_status_changed.emit(
+                "Harmonisation is off. Enable components in Adjust; identical sides are expected.",
+            )
 
     @Slot(int, int)
     def _scene_progressed(self, loaded: int, total: int) -> None:
@@ -546,7 +619,17 @@ class NativeLivePreview(QWidget):
         if self._invalid_matte_count >= LOST_MATTE_LIMIT:
             self._pause_tracking("Tracking paused. Re-select the person to continue.")
             return
-        self._surface.apply_matte(completed)
+        composite = self._surface.apply_matte(completed)
+        if composite.harmonized:
+            self.harmonization_status_changed.emit(
+                f"Experimental appearance preview: {composite.harmonization_ms:.1f} ms/frame "
+                f"on {self._surface.harmonization_backend} (production target: 2.0 ms).",
+            )
+        elif composite.harmonization_degraded:
+            self.harmonization_status_changed.emit(
+                "Appearance preview fell back to the standard composite: "
+                + ", ".join(composite.harmonization_degraded),
+            )
         self._mask_count += 1
         now = time.monotonic()
         elapsed = max(0.001, now - self._rate_started)

@@ -11,6 +11,7 @@ import numpy as np
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+    from better_backgrounds.harmonization import AppearanceHarmonizer
     from better_backgrounds.live_matting import FramePacket, MatteResult
 
 RGB_DIMENSIONS = 3
@@ -26,7 +27,11 @@ class LiveComposite:
     source: NDArray[np.uint8]
     alpha: NDArray[np.uint8]
     image: NDArray[np.uint8]
+    standard_image: NDArray[np.uint8]
     background_revision: int
+    harmonized: bool
+    harmonization_ms: float = 0.0
+    harmonization_degraded: tuple[str, ...] = ()
 
 
 def background_has_content(background: NDArray[np.uint8]) -> bool:
@@ -50,6 +55,7 @@ def compose_live_frame(
     background: NDArray[np.uint8],
     *,
     revision: int,
+    harmonizer: AppearanceHarmonizer | None = None,
 ) -> LiveComposite:
     """Blend one matching source/matte pair against an immutable background."""
     if (
@@ -90,17 +96,37 @@ def compose_live_frame(
         cv2.bitwise_not(weight),
         dtype=cv2.CV_16U,
     )
-    image = cast(
+    standard_image = cast(
         "NDArray[np.uint8]",
         cv2.convertScaleAbs(
             cv2.add(weighted_source, weighted_background),
             alpha=1 / 255,
         ),
     )
+    image = standard_image
+    harmonization_ms = 0.0
+    harmonization_degraded: tuple[str, ...] = ()
+    harmonized = harmonizer is not None and harmonizer.active
+    if harmonized and harmonizer is not None:
+        result = harmonizer.apply(
+            source,
+            alpha,
+            background,
+            captured_at=packet.captured_at,
+        )
+        if result.image is not None:
+            image = result.image
+        harmonization_ms = result.processing_ms
+        harmonization_degraded = result.degraded_components
+        harmonized = result.applied
     return LiveComposite(
         frame_id=packet.frame_id,
         source=source,
         alpha=alpha,
         image=image,
+        standard_image=standard_image,
         background_revision=revision,
+        harmonized=harmonized,
+        harmonization_ms=harmonization_ms,
+        harmonization_degraded=harmonization_degraded,
     )

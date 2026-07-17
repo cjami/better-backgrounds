@@ -91,7 +91,7 @@ class ScenePreview(QWidget):
 
 
 class ComparisonPreview(QWidget):
-    """Paint a draggable original-to-harmonised comparison placeholder."""
+    """Paint a standard-to-current Better Backgrounds comparison placeholder."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create the comparison surface with a centered wipe."""
@@ -99,7 +99,7 @@ class ComparisonPreview(QWidget):
         self._wipe = 52
         self._live_frame = QPixmap()
         self.setMinimumSize(640, 360)
-        self.setAccessibleName("Placeholder original and harmonised comparison")
+        self.setAccessibleName("Placeholder standard and Better Backgrounds comparison")
 
     def set_wipe(self, value: int) -> None:
         """Update the percentage of harmonised output shown."""
@@ -152,7 +152,7 @@ class ComparisonPreview(QWidget):
         painter.drawText(
             left_badge,
             Qt.AlignmentFlag.AlignCenter,
-            "ORIGINAL WEBCAM",
+            "STANDARD EXACT-FRAME",
         )
         painter.setPen(QColor("#e0a34a"))
         painter.drawText(
