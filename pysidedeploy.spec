@@ -24,7 +24,7 @@ plugins =
 [nuitka]
 macos.permissions = NSCameraUsageDescription:Better Backgrounds uses the selected camera to composite you locally into your room.
 mode = standalone
-extra_args = --quiet --zig --assume-yes-for-downloads --noinclude-qt-translations --include-package=better_backgrounds --include-package=pycolmap --include-package-data=better_backgrounds
+extra_args = --quiet --zig --assume-yes-for-downloads --noinclude-qt-translations --include-package=better_backgrounds --include-package=better_backgrounds._vendor.matanyone2 --include-package=mediapipe --include-package=pycolmap --include-package=torch --include-package=torchvision --include-package-data=better_backgrounds
 
 [buildozer]
 mode = debug

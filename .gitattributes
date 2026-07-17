@@ -1,0 +1,3 @@
+src/better_backgrounds/assets/matanyone2/matanyone2.pth filter=lfs diff=lfs merge=lfs -text
+src/better_backgrounds/_vendor/matanyone2/** whitespace=-trailing-space
+src/better_backgrounds/assets/matanyone2/LICENSE.txt whitespace=-trailing-space

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: bbscene:; style-src 'nonce-{{NONCE}}'; script-src qrc: bbapp: 'nonce-{{NONCE}}'; connect-src bbscene:; media-src 'none'; worker-src blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Room background renderer</title>
+  <style nonce="{{NONCE}}">
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #090a0c; }
+    canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+    #subject-guide, #safe-warning, #status, #loading { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="scene-canvas" aria-label="Rendered reconstructed room"></canvas>
+  <div id="subject-guide"></div>
+  <div id="safe-warning" hidden></div>
+  <div id="status"></div>
+  <div id="loading" hidden><span></span></div>
+  <script nonce="{{NONCE}}" src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script nonce="{{NONCE}}" src="bbapp://renderer/renderer.js"></script>
+  <script nonce="{{NONCE}}">
+    new QWebChannel(qt.webChannelTransport, function (channel) {
+      BetterBackgroundsRenderer.start(channel.objects.rendererBridge);
+    });
+  </script>
+</body>
+</html>

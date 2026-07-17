@@ -2,6 +2,11 @@
 
 from typing import TYPE_CHECKING
 
+from better_backgrounds.matanyone_runtime import (
+    MATANYONE2_REVISION,
+    load_matanyone_asset_manifest,
+    packaged_checkpoint_path,
+)
 from better_backgrounds.matting import (
     LivePreferences,
     LivePreferencesStore,
@@ -35,15 +40,19 @@ def test_invalid_live_preferences_restore_safe_defaults(tmp_path: Path) -> None:
     assert LivePreferencesStore(path).load() == LivePreferences()
 
 
-def test_worker_payload_uses_javascript_edge_radius_key() -> None:
-    """Keep the validated Python settings compatible with the bundled worker."""
-    assert '"edgeRadius":0' in MattingSettings().worker_payload()
-
-
 def test_offline_matting_runtime_and_model_match_manifest() -> None:
-    """Keep every locally served MediaPipe asset pinned and checksummed."""
+    """Keep the short-lived MediaPipe seed model pinned and checksummed."""
     manifest = verify_packaged_matting_assets()
 
-    assert manifest.runtime.version == "0.10.35"
     assert manifest.model.license == "Apache-2.0"
     assert manifest.model.path == "selfie_segmenter_landscape.tflite"
+
+
+def test_matanyone_runtime_checkpoint_and_license_are_pinned() -> None:
+    """Keep the sole continuous model complete and attributable offline."""
+    manifest = load_matanyone_asset_manifest()
+    checkpoint = packaged_checkpoint_path()
+
+    assert manifest.upstream_revision == MATANYONE2_REVISION
+    assert manifest.license == "S-Lab-1.0-NC"
+    assert checkpoint.stat().st_size == manifest.checkpoint.size

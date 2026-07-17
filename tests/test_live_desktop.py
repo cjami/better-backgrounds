@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
 
 from better_backgrounds.desktop.main_window import MainWindow
+from better_backgrounds.desktop.pages import ShowPage
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.input_camera import InputCamera, InputCameraSource
 
@@ -60,6 +61,22 @@ def application() -> QApplication:
     return _APPLICATION
 
 
+def test_failed_seed_waits_for_an_explicit_retry() -> None:
+    """Avoid repeatedly loading MediaPipe when no valid person seed is found."""
+    application()
+    page = ShowPage([], ScenePreview)
+    retry = next(button for button in page.findChildren(QPushButton) if button.text() == "Retry")
+    confirm = next(
+        button for button in page.findChildren(QPushButton) if button.text() == "Confirm person"
+    )
+
+    page.set_camera_state("seed-error", "No person was found")
+
+    assert not retry.isHidden()
+    assert confirm.isHidden()
+    page.close()
+
+
 def create_window(tmp_path: Path, pipeline: TrackingLiveRenderer) -> MainWindow:
     """Create a deterministic desktop with one available camera."""
     application()
@@ -84,13 +101,13 @@ def test_preview_starts_before_virtual_output_and_survives_tab_changes(tmp_path:
     virtual_states: list[bool] = []
     window.virtual_camera_changed.connect(virtual_states.append)
 
-    assert pipeline.starts == [("Desk camera", True)]
+    assert pipeline.starts == [("camera-a", True)]
     camera.click()
     window.select_tab(2)
     window.select_tab(3)
     window.select_tab(0)
 
-    assert pipeline.starts == [("Desk camera", True)]
+    assert pipeline.starts == [("camera-a", True)]
     assert pipeline.stops == 0
     assert ("compare", 52) in pipeline.presentations
     camera.click()

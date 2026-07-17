@@ -42,7 +42,7 @@ from better_backgrounds.input_camera import (
 )
 from better_backgrounds.job_runner import JobRunner
 from better_backgrounds.managed_tools import resolved_executable_paths
-from better_backgrounds.matting import LivePreferencesStore, MattingSettings
+from better_backgrounds.matting import LivePreferencesStore
 from better_backgrounds.protocol import (
     CancelledEvent,
     ErrorEvent,
@@ -266,6 +266,9 @@ class MainWindow(QMainWindow):
         self._show_page.room_selected.connect(self.select_room)
         self._show_page.input_camera_selected.connect(self.select_input_camera)
         self._show_page.preview_restart_requested.connect(self._restart_preview)
+        self._show_page.seed_confirmed.connect(self._confirm_person_seed)
+        self._show_page.seed_retry_requested.connect(self._retry_person_seed)
+        self._show_page.reseed_requested.connect(self._reselect_person)
         self._show_page.camera_changed.connect(self.virtual_camera_changed)
         self._camera_source.cameras_changed.connect(self._refresh_input_cameras)
         self._show_page.sample_install_requested.connect(self._install_sample)
@@ -277,7 +280,6 @@ class MainWindow(QMainWindow):
         self._build_page.retry_requested.connect(self._retry_build)
         self._adjust_page.viewpoint_saved.connect(self._save_viewpoint)
         self._adjust_page.viewpoint_previewed.connect(self._preview_viewpoint)
-        self._adjust_page.matting_changed.connect(self._change_matting)
         self._adjust_page.mirroring_changed.connect(self._change_mirroring)
         self._compare_page.wipe_changed.connect(self._set_compare_wipe)
         camera_state = getattr(self._live_preview, "camera_state_changed", None)
@@ -290,7 +292,6 @@ class MainWindow(QMainWindow):
         if comparison_frame is not None:
             comparison_frame.connect(self._compare_page.set_live_frame)
         self._adjust_page.set_live_preferences(
-            self._live_preferences.matting,
             mirrored=self._live_preferences.mirrored,
         )
         self._show_page.configure_sample(
@@ -387,11 +388,11 @@ class MainWindow(QMainWindow):
 
     def _default_live_factory(self) -> QWidget:
         try:
-            from better_backgrounds.desktop.webview import (  # noqa: PLC0415
-                create_live_renderer_view,
+            from better_backgrounds.desktop.live_preview import (  # noqa: PLC0415
+                create_native_live_view,
             )
 
-            return create_live_renderer_view(self._asset_resolver)
+            return create_native_live_view(self._asset_resolver)
         except ImportError:
             return ScenePreview()
 
@@ -451,7 +452,7 @@ class MainWindow(QMainWindow):
         self._show_page.set_camera_state("starting", "Requesting camera permission…")
         starter = getattr(self._live_preview, "start_camera", None)
         if callable(starter):
-            starter(self._selected_camera_label(), mirrored=self._live_preferences.mirrored)
+            starter(self._selected_input_camera_id, mirrored=self._live_preferences.mirrored)
 
     def _restart_preview(self) -> None:
         """Apply a device change without creating a second preview stream."""
@@ -465,7 +466,25 @@ class MainWindow(QMainWindow):
         self._preview_started = True
         if callable(starter):
             self._show_page.set_camera_state("starting", "Restarting selected camera…")
-            starter(self._selected_camera_label(), mirrored=self._live_preferences.mirrored)
+            starter(self._selected_input_camera_id, mirrored=self._live_preferences.mirrored)
+
+    @Slot()
+    def _confirm_person_seed(self) -> None:
+        confirmer = getattr(self._live_preview, "confirm_seed", None)
+        if callable(confirmer):
+            confirmer()
+
+    @Slot()
+    def _retry_person_seed(self) -> None:
+        retry = getattr(self._live_preview, "retry_seed", None)
+        if callable(retry):
+            retry()
+
+    @Slot()
+    def _reselect_person(self) -> None:
+        reseed = getattr(self._live_preview, "reselect_person", None)
+        if callable(reseed):
+            reseed()
 
     def _selected_camera_label(self) -> str:
         selected = next(
@@ -574,17 +593,6 @@ class MainWindow(QMainWindow):
             setter = getattr(self._live_preview, "set_viewpoint", None)
             if callable(setter):
                 setter(viewpoint)
-
-    @Slot(object)
-    def _change_matting(self, settings: object) -> None:
-        """Persist and apply bounded mask refinement without restarting capture."""
-        if not isinstance(settings, MattingSettings):
-            return
-        self._live_preferences = self._live_preferences.model_copy(update={"matting": settings})
-        self._live_preferences_store.save(self._live_preferences)
-        setter = getattr(self._live_preview, "set_matting_settings", None)
-        if callable(setter):
-            setter(settings.worker_payload())
 
     @Slot(bool)
     def _change_mirroring(self, mirrored: bool) -> None:  # noqa: FBT001

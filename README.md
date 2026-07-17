@@ -1,12 +1,13 @@
 # Better Backgrounds
 
 Better Backgrounds is an early-stage cross-platform desktop application for
-reconstructing a room from video and using that scene as a coherent webcam
-background. The current Phase 5 foundation adds explicit local webcam capture,
-offline MediaPipe person matting, a retained reconstructed-room composite, and
-one original-versus-standard-composite wipe. It builds on explainable video
-analysis and the cancellable, resumable local FFmpeg/PyCOLMAP/Brush/
-SplatTransform room pipeline from Phase 4.
+using a reconstructed room as a coherent webcam background. The current pivot
+focuses exclusively on making live matting reliable: Qt Multimedia owns camera
+capture, MatAnyone 2 is the only continuous matting model, and a native
+exact-frame compositor prevents source/matte tearing. MediaPipe is loaded only
+long enough to propose the first-frame person mask and is unloaded before live
+matting starts. SHARP, harmonisation, virtual-camera output, and further room
+reconstruction work are deferred until the matting gates pass.
 
 ## Requirements
 
@@ -14,6 +15,12 @@ SplatTransform room pipeline from Phase 4.
 - Node.js 20 or newer
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - GNU Make
+
+Real-time live matting requires an NVIDIA CUDA device on Windows/Linux or Apple
+silicon with MPS on macOS. A functional CPU path is retained without a
+real-time guarantee. The bundled MatAnyone 2 runtime and checkpoint are
+licensed for non-commercial use; commercial distribution requires separate
+permission from its authors.
 
 uv installs and selects the standard CPython 3.14 runtime declared by the
 project. A free-threaded Python build is not used.
@@ -77,7 +84,15 @@ uv run better-backgrounds setup --samples
 uv run better-backgrounds doctor
 uv run better-backgrounds analyse <video> [--ffprobe <path>]
 uv run better-backgrounds reconstruct <video> [--quality preview|balanced|quality] [--job-id <id>] [--resume]
+uv run better-backgrounds matting-benchmark <video> --mask <first-frame-mask>
 ```
+
+`matting-benchmark` runs the pinned upstream stateful `step()` path at 360p,
+432p, and 540p, synchronizes accelerator timings, and emits a machine-readable
+gate report. The hidden `matting-worker-smoke` command additionally exercises
+the spawned worker and three-slot shared-memory ring. Run the benchmark on each
+release reference machine before packaging; passing on one operating system is
+not evidence that another platform passed.
 
 Reconstruction defaults to `balanced`. `preview` selects 60 frames capped at a
 1280-pixel long edge and trains Brush for 3,000 steps; `balanced` uses 80 frames,
@@ -119,32 +134,39 @@ authority.
 
 Show enumerates local video inputs through Qt Multimedia, follows device
 hot-plug changes, and remembers the user's preferred camera in application
-data. The local preview starts independently when Show has a selected camera,
-and WebEngine requests video permission when that retained surface is ready.
-It stays active across tabs and is released on device loss or application
-shutdown. The Start virtual camera control is a separate publication boundary;
-an OS virtual-camera backend is not bundled yet.
+data. `QCamera` sends frames to `QVideoSink`; browser media permission and the
+old JavaScript/WASM matting worker are no longer part of the build. Capture
+stays active across tabs and is released on device loss or application
+shutdown. The Start virtual camera control remains a separate, currently
+unimplemented publication boundary.
 
-The retained pipeline uses `requestVideoFrameCallback`, one in-flight MediaPipe
-Image Segmenter worker, timestamped confidence masks, temporal smoothing, edge
-feathering, and local standard alpha compositing. Compare presents the same
-source frame, mask, PlayCanvas scene renderer, and composite as Show; it does
-not create another stream or model. The MediaPipe 0.10.35 WASM files and Apache
-2.0 selfie-segmentation model are packaged locally and verified against
-`assets/matting/manifest-v1.json`; there is no CDN fallback and webcam frames
-are never uploaded. Adjust owns foreground-only mirroring and bounded mask
-controls. The room is never silently mirrored, and the standard composite is
-labelled as not yet harmonised.
+After a stable frame is captured, the UI previews MediaPipe's proposed person
+mask and requires confirmation or retry. MatAnyone 2 then performs ten warm-up
+passes in a dedicated spawned Python process. Startup calibration selects the
+highest of 360p, 432p, or 540p that meets the 66 ms inference budget. A
+three-slot shared-memory ring holds one active inference and one replaceable
+newest pending frame; stale frames are dropped instead of queued. Every result
+retains its source `frame_id` and capture timestamp, and the native compositor
+rejects mismatched pairs. The PlayCanvas room is captured as an immutable
+background snapshot and atomically refreshed after viewpoint changes.
+
+The MediaPipe Python runtime and its verified Apache 2.0 model exist solely for
+first-frame seeding. The vendored MatAnyone 2 inference subset is pinned to the
+revision recorded in `_vendor/matanyone2/UPSTREAM.md`; its checkpoint, checksum,
+and S-Lab non-commercial license are under `assets/matanyone2/`. Webcam frames
+remain local. Adjust owns only foreground mirroring; MatAnyone 2 owns continuous
+alpha and temporal memory, and Show exposes an explicit Re-select person action.
 
 The prepared Table Tennis Room sample is downloaded only when requested in
 Show, verified against the checked-in manifest, and then available offline. It
 is attributed to Ethan (`ethan3111`) under CC BY 4.0 in the application.
 
-The renderer source lives under `renderer/`. `npm test` covers its camera math,
-and `npm run build` regenerates the packaged renderer asset. These commands are
-included in `make test` and `make build`. Reliable splat depth has not yet been
-selected, so depth/confidence overlays and depth-aware focus are visibly
-disabled while RGB spatial rendering remains available.
+The room-renderer source lives under `renderer/`. `npm test` covers scene and
+viewpoint math, and `npm run build` regenerates the single packaged room
+renderer asset. Camera capture and matting have no Node build step. These
+commands remain included in `make test` and `make build`. Reliable splat depth
+has not yet been selected, so depth/confidence overlays and depth-aware focus
+remain disabled while RGB spatial rendering is available.
 
 `make fixture-build` reproducibly converts the small Brush-compatible PLY under
 `tests/fixtures` to its checked-in SOG using the pinned SplatTransform version.

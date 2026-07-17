@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "MatAnyone 2",
+  "version": "1.0.0",
+  "upstream_revision": "d3bb5a1ebedf259a5453c6d168e6840fff85581e",
+  "source": "https://github.com/pq-yang/MatAnyone2",
+  "license": "S-Lab-1.0-NC",
+  "checkpoint": {
+    "path": "matanyone2.pth",
+    "size": 141429115,
+    "sha256": "5e9821e4087231427376b437c85bb6e072b41e582314f06fd524f75bc4af5914"
+  }
+}

@@ -1,21 +1,18 @@
-"""Versioned local settings for webcam mask refinement and presentation."""
+"""Versioned presentation preferences and the one-shot seed model asset."""
 
 from __future__ import annotations
 
 import hashlib
 from importlib.resources import files
-from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError, field_validator
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError
 
 
 class MattingSettings(BaseModel):
-    """Bound confidence shaping controls sent to the local worker."""
+    """Accept legacy refinement preferences during the MatAnyone 2 migration."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -23,46 +20,6 @@ class MattingSettings(BaseModel):
     temporal: float = Field(default=0.65, ge=0.0, le=0.95, allow_inf_nan=False)
     feather: float = Field(default=0.06, ge=0.01, le=0.5, allow_inf_nan=False)
     edge_radius: int = Field(default=0, ge=0, le=4)
-
-    def worker_payload(self) -> str:
-        """Serialize with the JavaScript worker's camel-case edge key."""
-        return self.model_dump_json().replace('"edge_radius"', '"edgeRadius"')
-
-
-class PackagedMattingAsset(BaseModel):
-    """Identify one immutable runtime file by safe path and digest."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    path: str = Field(min_length=1, max_length=200)
-    size: int = Field(gt=0)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-    @field_validator("path")
-    @classmethod
-    def safe_path(cls, value: str) -> str:
-        """Reject absolute and traversing package paths."""
-        path = PurePosixPath(value)
-        if (
-            path.is_absolute()
-            or value != path.as_posix()
-            or any(part in {".", ".."} for part in path.parts)
-        ):
-            msg = "matting asset path must be normalized and relative"
-            raise ValueError(msg)
-        return value
-
-
-class MattingRuntimeMetadata(BaseModel):
-    """Record the exact locally bundled MediaPipe runtime."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    version: str
-    source: HttpUrl
-    license: Literal["Apache-2.0"]
-    assets: tuple[PackagedMattingAsset, ...]
 
 
 class MattingModelMetadata(BaseModel):
@@ -81,12 +38,11 @@ class MattingModelMetadata(BaseModel):
 
 
 class MattingAssetManifest(BaseModel):
-    """Validate source, license, version, size, and checksum metadata."""
+    """Validate the one-shot MediaPipe seed model metadata."""
 
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal[1] = 1
-    runtime: MattingRuntimeMetadata
     model: MattingModelMetadata
 
 
@@ -101,23 +57,32 @@ def load_matting_asset_manifest() -> MattingAssetManifest:
 
 
 def verify_packaged_matting_assets() -> MattingAssetManifest:
-    """Refuse altered or incomplete offline runtime and model assets."""
+    """Refuse an altered or incomplete one-shot MediaPipe seed model."""
     manifest = load_matting_asset_manifest()
-    root = files("better_backgrounds.desktop").joinpath("assets/matting")
-    expected = [
-        *manifest.runtime.assets,
-        PackagedMattingAsset(
-            path=manifest.model.path,
-            size=manifest.model.size,
-            sha256=manifest.model.sha256,
-        ),
-    ]
-    for asset in expected:
-        content = root.joinpath(asset.path).read_bytes()
-        if len(content) != asset.size or hashlib.sha256(content).hexdigest() != asset.sha256:
-            msg = f"Packaged matting asset failed verification: {asset.path}"
-            raise ValueError(msg)
+    model = files("better_backgrounds.desktop").joinpath(
+        "assets",
+        "matting",
+        manifest.model.path,
+    )
+    content = model.read_bytes()
+    if (
+        len(content) != manifest.model.size
+        or hashlib.sha256(content).hexdigest() != manifest.model.sha256
+    ):
+        msg = f"Packaged seed model failed verification: {manifest.model.path}"
+        raise ValueError(msg)
     return manifest
+
+
+def packaged_seed_model_path() -> Path:
+    """Return the verified MediaPipe model used only for first-frame seeding."""
+    manifest = verify_packaged_matting_assets()
+    resource = files("better_backgrounds.desktop").joinpath(
+        "assets",
+        "matting",
+        manifest.model.path,
+    )
+    return Path(str(resource))
 
 
 class LivePreferences(BaseModel):

@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
 )
 
 from better_backgrounds.desktop.preview import ComparisonPreview
-from better_backgrounds.matting import MattingSettings
 from better_backgrounds.scene import CropRegion, SceneReference, Viewpoint
 
 if TYPE_CHECKING:
@@ -73,6 +72,9 @@ class ShowPage(QWidget):
     preview_restart_requested = Signal()
     input_camera_selected = Signal(str)
     sample_install_requested = Signal()
+    seed_confirmed = Signal()
+    seed_retry_requested = Signal()
+    reseed_requested = Signal()
 
     def __init__(
         self,
@@ -136,7 +138,7 @@ class ShowPage(QWidget):
         overlay_layout.addStretch()
         overlay_layout.addWidget(
             _label(
-                "LOCAL ONLY  ·  STANDARD MATTING  ·  NOT YET HARMONISED",
+                "LOCAL ONLY  ·  MATANYONE 2  ·  NOT YET HARMONISED",
                 object_name="feedMeta",
             ),
         )
@@ -169,6 +171,25 @@ class ShowPage(QWidget):
         restart_preview.setObjectName("quietAction")
         restart_preview.clicked.connect(self.preview_restart_requested)
         sidebar_layout.addWidget(restart_preview)
+        self._seed_controls = QWidget()
+        seed_layout = QHBoxLayout(self._seed_controls)
+        seed_layout.setContentsMargins(0, 0, 0, 0)
+        seed_layout.setSpacing(7)
+        self._confirm_seed = QPushButton("Confirm person")
+        self._confirm_seed.setObjectName("primary")
+        self._confirm_seed.clicked.connect(self.seed_confirmed)
+        seed_layout.addWidget(self._confirm_seed)
+        self._retry_seed = QPushButton("Retry")
+        self._retry_seed.setObjectName("quietAction")
+        self._retry_seed.clicked.connect(self.seed_retry_requested)
+        seed_layout.addWidget(self._retry_seed)
+        self._seed_controls.hide()
+        sidebar_layout.addWidget(self._seed_controls)
+        self._reselect_person = QPushButton("Re-select person")
+        self._reselect_person.setObjectName("quietAction")
+        self._reselect_person.clicked.connect(self.reseed_requested)
+        self._reselect_person.hide()
+        sidebar_layout.addWidget(self._reselect_person)
         sidebar_layout.addWidget(
             _label(
                 "Select the webcam that will provide the foreground feed.",
@@ -352,10 +373,21 @@ class ShowPage(QWidget):
             setter(path)
 
     def set_camera_state(self, state: str, message: str) -> None:
-        """Reflect the independent browser preview lifecycle."""
-        self._preview_active = state in {"starting", "live"}
+        """Reflect the native preview and one-time target-selection lifecycle."""
+        self._preview_active = state in {
+            "starting",
+            "seeding",
+            "seed-error",
+            "seed-ready",
+            "initializing",
+            "live",
+        }
         labels = {
             "starting": "●  PREVIEW STARTING",
+            "seeding": "●  FINDING PERSON",
+            "seed-error": "●  SEED FAILED",
+            "seed-ready": "●  CONFIRM PERSON",
+            "initializing": "●  MATTING STARTING",
             "live": "●  PREVIEW LIVE",
             "lost": "●  LOST",
             "error": "●  ERROR",
@@ -363,8 +395,15 @@ class ShowPage(QWidget):
         }
         self._feed_status.setText(labels.get(state, "●  IDLE"))
         self._preview_note.setText("" if state == "live" else message)
+        self._seed_controls.setVisible(state in {"seed-ready", "seed-error"})
+        self._confirm_seed.setVisible(state == "seed-ready")
+        self._reselect_person.setVisible(state == "live")
         if state == "live":
-            self._preview_hint.setText("Local preview · start the virtual camera to use it in apps")
+            self._preview_hint.setText("MatAnyone 2 · local preview")
+        elif state in {"seeding", "seed-ready", "initializing"}:
+            self._preview_hint.setText("One-time target selection · webcam frames stay local")
+        elif state == "seed-error":
+            self._preview_hint.setText("Move into a clearer position, then retry person selection")
         elif state in {"error", "lost"}:
             self._preview_hint.setText("Check permission or device availability, then restart")
         else:
@@ -765,7 +804,6 @@ class AdjustPage(QWidget):
 
     viewpoint_saved = Signal(str, object)
     viewpoint_previewed = Signal(object)
-    matting_changed = Signal(object)
     mirroring_changed = Signal(bool)
 
     def __init__(
@@ -782,7 +820,6 @@ class AdjustPage(QWidget):
         self._sliders: dict[str, QSlider] = {}
         self._slider_labels: dict[str, QLabel] = {}
         self._loaded_scene_id = ""
-        self._matting = MattingSettings()
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -875,9 +912,14 @@ class AdjustPage(QWidget):
         self._mirrored.setToolTip("Mirrors the webcam foreground only; the room is never mirrored")
         self._mirrored.toggled.connect(self.mirroring_changed)
         controls.addWidget(self._mirrored)
-        self._add_slider(controls, "Mask threshold", 5, 95, 50)
-        self._add_slider(controls, "Temporal smoothing", 0, 95, 65)
-        self._add_slider(controls, "Edge feather", 1, 50, 12)
+        controls.addWidget(
+            _label(
+                "MatAnyone 2 owns the live matte and temporal memory. "
+                "Use Re-select person in Show if tracking is lost.",
+                object_name="muted",
+                word_wrap=True,
+            ),
+        )
         controls.addSpacing(6)
         controls.addWidget(_label("Harmonisation", object_name="section"))
         phase_six = _label(
@@ -890,23 +932,11 @@ class AdjustPage(QWidget):
         controls.addStretch()
         root.addWidget(inspector)
 
-    def set_live_preferences(self, settings: MattingSettings, *, mirrored: bool) -> None:
-        """Restore Python-owned foreground controls without emitting changes."""
-        self._matting = settings
+    def set_live_preferences(self, *, mirrored: bool) -> None:
+        """Restore foreground presentation without emitting changes."""
         self._mirrored.blockSignals(True)  # noqa: FBT003
         self._mirrored.setChecked(mirrored)
         self._mirrored.blockSignals(False)  # noqa: FBT003
-        values = {
-            "Mask threshold": round(settings.threshold * 100),
-            "Temporal smoothing": round(settings.temporal * 100),
-            "Edge feather": round(settings.feather * 100),
-        }
-        for title, value in values.items():
-            slider = self._sliders[title]
-            slider.blockSignals(True)  # noqa: FBT003
-            slider.setValue(value)
-            slider.blockSignals(False)  # noqa: FBT003
-            self._slider_labels[title].setText(self._format_slider(title, value))
 
     def set_room(
         self,
@@ -1033,15 +1063,6 @@ class AdjustPage(QWidget):
 
     def _control_changed(self, title: str, value: int) -> None:
         self._slider_labels[title].setText(self._format_slider(title, value))
-        if title in {"Mask threshold", "Temporal smoothing", "Edge feather"}:
-            update = {
-                "Mask threshold": {"threshold": value / 100},
-                "Temporal smoothing": {"temporal": value / 100},
-                "Edge feather": {"feather": value / 100},
-            }[title]
-            self._matting = self._matting.model_copy(update=update)
-            self.matting_changed.emit(self._matting)
-            return
         if title == "Field of view":
             update: dict[str, object] = {"field_of_view": float(value)}
         elif title == "Horizon":
@@ -1078,9 +1099,6 @@ class AdjustPage(QWidget):
             "Output crop": round(self._viewpoint.crop.left * 100),
             "Depth in scene": round(self._viewpoint.subject_depth * 10),
             "Virtual focus": round(self._viewpoint.focus_depth * 10),
-            "Mask threshold": round(self._matting.threshold * 100),
-            "Temporal smoothing": round(self._matting.temporal * 100),
-            "Edge feather": round(self._matting.feather * 100),
         }
         for title, value in values.items():
             slider = self._sliders[title]
