@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import cv2
 import numpy as np
@@ -11,12 +11,32 @@ import numpy as np
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from better_backgrounds.harmonization import AppearanceHarmonizer
+    from better_backgrounds.harmonization import HarmonizationResult
     from better_backgrounds.live_matting import FramePacket, MatteResult
 
 RGB_DIMENSIONS = 3
 RGB_CHANNELS = 3
 MINIMUM_BACKGROUND_BRIGHTNESS_RANGE = 12
+
+
+class LiveHarmonizer(Protocol):
+    """Describe the exact-frame appearance boundary used by the compositor."""
+
+    @property
+    def active(self) -> bool:
+        """Return whether this stage was requested."""
+        ...
+
+    def apply(
+        self,
+        source: NDArray[np.uint8],
+        alpha: NDArray[np.uint8],
+        background: NDArray[np.uint8],
+        *,
+        captured_at: float,
+    ) -> HarmonizationResult:
+        """Process one exact frame and matte pair."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +75,7 @@ def compose_live_frame(
     background: NDArray[np.uint8],
     *,
     revision: int,
-    harmonizer: AppearanceHarmonizer | None = None,
+    harmonizer: LiveHarmonizer | None = None,
 ) -> LiveComposite:
     """Blend one matching source/matte pair against an immutable background."""
     if (

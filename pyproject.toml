@@ -12,9 +12,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "efficientnet-pytorch==0.7.1",
     "hydra-core>=1.3.4",
     "huggingface-hub>=1.24.0",
     "imageio>=2.37.3",
+    "kornia==0.8.3",
     "mediapipe==0.10.35",
     "numpy>=2.5.1",
     "omegaconf>=2.3.1",
@@ -158,6 +160,10 @@ files = [
     "src/better_backgrounds/desktop/theme.py",
     "src/better_backgrounds/desktop/webview.py",
     "src/better_backgrounds/desktop/live_preview.py",
+    "src/better_backgrounds/harmonizer_runtime.py",
+    "src/better_backgrounds/_vendor/harmonizer/__init__.py",
+    "src/better_backgrounds/_vendor/harmonizer/model.py",
+    "src/better_backgrounds/_vendor/harmonizer/UPSTREAM.md",
     "src/better_backgrounds/compositor.py",
     "src/better_backgrounds/frame_ring.py",
     "src/better_backgrounds/harmonization.py",

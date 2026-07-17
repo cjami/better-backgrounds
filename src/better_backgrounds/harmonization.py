@@ -68,6 +68,7 @@ class HarmonizationSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    global_harmonization: bool = False
     global_appearance: bool = False
     directional_shading: bool = False
     edge_decontamination: bool = False
@@ -80,6 +81,7 @@ class HarmonizationSettings(BaseModel):
         """Return whether any component was explicitly requested."""
         return any(
             (
+                self.global_harmonization,
                 self.global_appearance,
                 self.directional_shading,
                 self.edge_decontamination,

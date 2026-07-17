@@ -929,18 +929,14 @@ class AdjustPage(QWidget):
         controls.addWidget(_label("Harmonisation", object_name="section"))
         controls.addWidget(
             _label(
-                "Experimental and off by default until the platform quality and "
-                "performance gates pass.",
+                "Harmonizer uses an external non-commercial checkpoint. Global adjustments are "
+                "smoothed over time; edge cleanup and fallback are automatic.",
                 object_name="muted",
                 word_wrap=True,
             ),
         )
         harmonization_components = (
-            ("global_appearance", "Global appearance match"),
-            ("directional_shading", "Directional shading"),
-            ("edge_decontamination", "Edge decontamination"),
-            ("light_wrap", "Light wrap"),
-            ("detail_match", "Sharpness and grain match"),
+            ("global_harmonization", "Global harmonization"),
             ("depth_effects", "Depth-dependent effects"),
         )
         for key, title in harmonization_components:

@@ -41,6 +41,7 @@ def test_all_harmonization_components_have_an_off_state() -> None:
     settings = HarmonizationSettings()
 
     assert not settings.active
+    assert not settings.global_harmonization
     assert not settings.global_appearance
     assert not settings.directional_shading
     assert not settings.edge_decontamination

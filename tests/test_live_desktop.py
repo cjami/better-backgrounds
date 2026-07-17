@@ -183,27 +183,23 @@ def test_adjust_persists_and_applies_foreground_only_mirroring(tmp_path: Path) -
 
 
 def test_harmonization_is_off_by_default_and_independently_enabled(tmp_path: Path) -> None:
-    """Keep phase-six effects opt-in while exposing each supported component."""
+    """Expose one opt-in AI stage while keeping depth separate and unavailable."""
     application()
     pipeline = TrackingLiveRenderer()
     window = create_window(tmp_path, pipeline)
     controls = {checkbox.text(): checkbox for checkbox in window.findChildren(QCheckBox)}
 
     expected = {
-        "Global appearance match",
-        "Directional shading",
-        "Edge decontamination",
-        "Light wrap",
-        "Sharpness and grain match",
+        "Global harmonization",
         "Depth-dependent effects",
     }
     assert expected <= controls.keys()
     assert all(not controls[title].isChecked() for title in expected)
     assert not controls["Depth-dependent effects"].isEnabled()
 
-    controls["Global appearance match"].setChecked(True)
+    controls["Global harmonization"].setChecked(True)
 
-    assert pipeline.harmonization[-1] == HarmonizationSettings(global_appearance=True)
+    assert pipeline.harmonization[-1] == HarmonizationSettings(global_harmonization=True)
     pipeline.harmonization_status_changed.emit("Experimental appearance preview: 18 ms/frame")
     statuses = [
         label

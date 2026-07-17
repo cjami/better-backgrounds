@@ -111,14 +111,18 @@ report for a release reference machine:
 uv run better-backgrounds matting-benchmark capture.mp4 --mask first-mask.png
 ```
 
-Appearance harmonization is available as an experimental, off-by-default stage
-in Adjust. Room analysis is cached when the selected render changes; masked
-foreground estimates run at 5 Hz and adjustment parameters are interpolated at
-frame rate. CUDA or Metal performs the full-resolution adjustment and fused
-composite with cached room tensors; systems without either use the guarded
-portable fallback. Each component has an independent off state, Compare retains
-the standard exact-frame composite, and reports measured frame cost. The
-production budget policy provides the documented ordered fallback.
+Harmonizer appearance matching is available as one experimental, off-by-default
+stage in Adjust. The upstream non-commercial research checkpoint is not
+distributed with the application: point
+`BETTER_BACKGROUNDS_HARMONIZER_CHECKPOINT` at an external `harmonizer.pth` file
+before starting the desktop application. Harmonizer predicts six interpretable
+global adjustments for every exact frame. A time-based exponential moving
+average prevents abrupt colour jumps, while edge decontamination is automatic.
+The stage runs in FP32 on CUDA or Metal; Compare retains the standard exact-frame
+composite, reports measured frame cost, and immediately falls back to that
+baseline when the checkpoint, accelerator, or inference pass is unavailable.
+The legacy hand-authored effects remain internal rather than appearing as
+parallel product controls. Depth-dependent effects remain disabled.
 Harmonization must not become the default until both real SHARP and MatAnyone
 gates plus its quality, latency, and soak gates pass on each supported reference
 platform.
@@ -145,8 +149,15 @@ by size and SHA-256 in `src/better_backgrounds/assets/sharp/manifest-v1.json`.
 The vendored MatAnyone 2 revision and checkpoint identity are recorded beside
 its runtime assets.
 
+The adapted Harmonizer inference subset is pinned to revision
+`48ecd70becbff50ccaf576db0e64212dbc494e26`; its provenance and modification
+notes are under `src/better_backgrounds/_vendor/harmonizer/`. Both that runtime
+and the separately supplied official checkpoint are governed by Creative
+Commons Attribution-NonCommercial-ShareAlike 4.0 terms.
+
 Better Backgrounds source is available under the [MIT License](LICENSE). That
 license does not replace third-party terms. In particular, the Apple SHARP
 model license excludes commercial use and product development, and the bundled
-MatAnyone 2 model/runtime terms are non-commercial. Review and obtain any
-necessary third-party permissions before distributing or using a build.
+MatAnyone 2 model/runtime and Harmonizer terms are non-commercial. Review and
+obtain any necessary third-party permissions before distributing or using a
+build.

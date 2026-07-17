@@ -19,10 +19,7 @@ from better_backgrounds.compositor import (
     compose_live_frame,
 )
 from better_backgrounds.desktop.camera_capture import QtCameraCapture, qimage_to_rgb
-from better_backgrounds.harmonization import (
-    AcceleratedAppearanceHarmonizer,
-    HarmonizationSettings,
-)
+from better_backgrounds.harmonizer_runtime import HarmonizerAppearanceHarmonizer
 from better_backgrounds.live_matting import LiveDiagnostics, MattingConfig
 from better_backgrounds.matanyone_runtime import packaged_checkpoint_path
 from better_backgrounds.matting_engine import (
@@ -38,6 +35,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
+    from better_backgrounds.harmonization import HarmonizationSettings
     from better_backgrounds.scene import ManagedSceneResolver, SceneReference, Viewpoint
 
 EngineFactory = Callable[[], ProcessMattingEngine]
@@ -93,9 +91,7 @@ class NativeCompositeSurface(QWidget):
         self._mirrored = True
         self._diagnostics = "Waiting for camera"
         self._last_composite: LiveComposite | None = None
-        self._harmonizer = AcceleratedAppearanceHarmonizer(
-            enforce_accelerated_budget=False,
-        )
+        self._harmonizer = HarmonizerAppearanceHarmonizer()
 
     @property
     def last_composite(self) -> LiveComposite | None:
@@ -106,6 +102,11 @@ class NativeCompositeSurface(QWidget):
     def harmonization_backend(self) -> str:
         """Return the active full-resolution appearance backend."""
         return self._harmonizer.backend_name
+
+    @property
+    def harmonization_error(self) -> str | None:
+        """Return the bounded external-model failure for user-facing diagnostics."""
+        return self._harmonizer.error
 
     def set_background(self, image: QImage) -> bool:
         """Atomically replace the immutable room snapshot."""
@@ -130,7 +131,7 @@ class NativeCompositeSurface(QWidget):
         self._recompose()
 
     def set_harmonization(self, settings: HarmonizationSettings) -> None:
-        """Apply explicit component switches and refresh the retained frame."""
+        """Apply the room-scoped global harmonization switch and refresh the retained frame."""
         self._harmonizer.configure(settings)
         self._recompose()
 
@@ -499,15 +500,15 @@ class NativeLivePreview(QWidget):
         self._surface.set_mirroring(mirrored=mirrored)
 
     def set_harmonization(self, settings: HarmonizationSettings) -> None:
-        """Apply explicit room-scoped experimental appearance switches."""
+        """Apply the room-scoped experimental global harmonization switch."""
         self._surface.set_harmonization(settings)
         if settings.active:
             self.harmonization_status_changed.emit(
-                "Experimental appearance preview enabled; preparing the accelerated pass…",
+                "Global harmonization enabled; preparing the external checkpoint…",
             )
         else:
             self.harmonization_status_changed.emit(
-                "Harmonisation is off. Enable components in Adjust; identical sides are expected.",
+                "Global harmonization is off; identical comparison sides are expected.",
             )
 
     @Slot(int, int)
@@ -622,13 +623,14 @@ class NativeLivePreview(QWidget):
         composite = self._surface.apply_matte(completed)
         if composite.harmonized:
             self.harmonization_status_changed.emit(
-                f"Experimental appearance preview: {composite.harmonization_ms:.1f} ms/frame "
-                f"on {self._surface.harmonization_backend} (production target: 2.0 ms).",
+                f"Global Harmonizer: {composite.harmonization_ms:.1f} ms/frame "
+                f"on {self._surface.harmonization_backend} (30 FPS budget: 33.3 ms).",
             )
         elif composite.harmonization_degraded:
+            detail = self._surface.harmonization_error
             self.harmonization_status_changed.emit(
-                "Appearance preview fell back to the standard composite: "
-                + ", ".join(composite.harmonization_degraded),
+                "Global harmonization fell back to the standard composite: "
+                + (detail or ", ".join(composite.harmonization_degraded)),
             )
         self._mask_count += 1
         now = time.monotonic()
