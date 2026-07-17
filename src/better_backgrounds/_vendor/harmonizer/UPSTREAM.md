@@ -6,9 +6,10 @@
 - Paper: *Harmonizer: Learning to Perform White-Box Image and Video Harmonization*, ECCV 2022.
 - License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International,
   https://creativecommons.org/licenses/by-nc-sa/4.0/
-- Included: an adapted inference-only model, cascade argument regressor, and six white-box filters.
-- Excluded: training code, validation code, demos, datasets, example media, and checkpoint.
+- Included: an adapted inference-only backbone and cascade argument regressor.
+- Excluded: training code, validation code, demos, datasets, example media, filters, and checkpoint.
 
 Better Backgrounds supplies the official checkpoint externally and uses this subset only for its
 non-commercial hackathon build. The implementation has been modernised for the current runtime,
-uses the separately packaged EfficientNet-PyTorch backbone, and returns only the final filter output.
+uses the separately packaged EfficientNet-PyTorch backbone, and supplies six global controls to the
+application's optimized affine and tone renderer.

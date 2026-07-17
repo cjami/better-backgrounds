@@ -8,11 +8,36 @@ from PySide6.QtWidgets import QApplication
 
 from better_backgrounds.compositor import background_has_content, compose_live_frame
 from better_backgrounds.desktop.live_preview import NativeCompositeSurface, rgb_to_qimage
-from better_backgrounds.harmonization import AppearanceHarmonizer, HarmonizationSettings
+from better_backgrounds.harmonization import HarmonizationResult
 from better_backgrounds.live_matting import FramePacket, MatteResult
 from better_backgrounds.matting_engine import CompletedMatte
 
 _APPLICATION: QApplication | None = None
+
+
+class StubHarmonizer:
+    """Return a visibly changed exact frame through the compositor protocol."""
+
+    active = True
+
+    def apply(
+        self,
+        source: np.ndarray,
+        alpha: np.ndarray,
+        background: np.ndarray,
+        *,
+        captured_at: float,
+    ) -> HarmonizationResult:
+        """Produce deterministic changed pixels for comparison testing."""
+        assert alpha.shape == source.shape[:2]
+        assert background.shape == source.shape
+        assert captured_at >= 0
+        return HarmonizationResult(
+            image=np.clip(source.astype(np.uint16) + 10, 0, 255).astype(np.uint8),
+            processing_ms=1.0,
+            degraded_components=(),
+            applied=True,
+        )
 
 
 def application() -> QApplication:
@@ -125,11 +150,7 @@ def test_compositor_retains_standard_baseline_when_harmonization_is_enabled() ->
     alpha = np.full((8, 8), 255, dtype=np.uint8)
     packet = FramePacket(8, 80.0, 8, 8, 0)
     matte = MatteResult(8, 80.0, 0, 10.0)
-    harmonizer = AppearanceHarmonizer(
-        HarmonizationSettings(global_appearance=True),
-        statistics_interval=0.0,
-    )
-    harmonizer.set_room(background, revision=2)
+    harmonizer = StubHarmonizer()
 
     composite = compose_live_frame(
         packet,

@@ -99,7 +99,7 @@ before continuous inference begins. The pinned MatAnyone 2 `step()` pipeline
 then runs in a spawned process with temporal memory.
 
 Startup calibration chooses the highest of 360p, 432p, and 540p that meets the
-66 ms inference budget. A three-slot shared-memory ring allows one active frame
+33.3 ms inference budget. A three-slot shared-memory ring allows one active frame
 and one replaceable newest pending frame, dropping stale work instead of
 building latency. Every matte retains its source frame identity and timestamp;
 the native exact-frame compositor rejects mismatched source/matte pairs.
@@ -116,13 +116,16 @@ stage in Adjust. The upstream non-commercial research checkpoint is not
 distributed with the application: point
 `BETTER_BACKGROUNDS_HARMONIZER_CHECKPOINT` at an external `harmonizer.pth` file
 before starting the desktop application. Harmonizer predicts six interpretable
-global adjustments for every exact frame. A time-based exponential moving
-average prevents abrupt colour jumps, while edge decontamination is automatic.
-The stage runs in FP32 on CUDA or Metal; Compare retains the standard exact-frame
-composite, reports measured frame cost, and immediately falls back to that
-baseline when the checkpoint, accelerator, or inference pass is unavailable.
-The legacy hand-authored effects remain internal rather than appearing as
-parallel product controls. Depth-dependent effects remain disabled.
+global adjustments at a bounded rate and applies the smoothed result to every
+exact frame. A time-based exponential moving average prevents abrupt colour
+jumps, while edge decontamination is automatic.
+The predictor runs in FP32 on CUDA or Metal, while an optimized affine and tone
+renderer applies the smoothed controls without a competing per-frame GPU context.
+Compare retains the standard exact-frame composite, reports measured frame cost,
+and immediately falls back to that baseline when the checkpoint, accelerator,
+or inference pass is unavailable.
+The superseded hand-authored effects have been removed rather than retained as
+parallel product controls.
 Harmonization must not become the default until both real SHARP and MatAnyone
 gates plus its quality, latency, and soak gates pass on each supported reference
 platform.

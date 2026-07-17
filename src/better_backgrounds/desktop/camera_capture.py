@@ -23,6 +23,7 @@ RGB_CHANNELS = 3
 TARGET_WIDTH = 1280
 TARGET_HEIGHT = 720
 TARGET_FRAME_RATE = 30.0
+CAPTURE_JITTER_TOLERANCE = 0.1
 
 
 class FrameRateLimiter:
@@ -34,27 +35,23 @@ class FrameRateLimiter:
             msg = "target frame rate must be positive"
             raise ValueError(msg)
         self._interval_ms = 1_000.0 / target_frame_rate
-        self._next_frame_at_ms: float | None = None
+        self._tolerance_ms = self._interval_ms * CAPTURE_JITTER_TOLERANCE
+        self._last_frame_at_ms: float | None = None
 
     def allows(self, captured_at_ms: float) -> bool:
         """Accept the nearest available frame at each target deadline."""
-        deadline = self._next_frame_at_ms
-        if deadline is None:
-            self._next_frame_at_ms = captured_at_ms + self._interval_ms
+        previous = self._last_frame_at_ms
+        if previous is None:
+            self._last_frame_at_ms = captured_at_ms
             return True
-        if captured_at_ms < deadline:
+        if captured_at_ms - previous + self._tolerance_ms < self._interval_ms:
             return False
-        next_deadline = deadline + self._interval_ms
-        self._next_frame_at_ms = (
-            captured_at_ms + self._interval_ms
-            if next_deadline <= captured_at_ms - self._interval_ms
-            else next_deadline
-        )
+        self._last_frame_at_ms = captured_at_ms
         return True
 
     def reset(self) -> None:
         """Forget timing from the previous camera session."""
-        self._next_frame_at_ms = None
+        self._last_frame_at_ms = None
 
 
 def camera_format_score(
@@ -62,10 +59,11 @@ def camera_format_score(
     height: int,
     minimum_frame_rate: float,
     maximum_frame_rate: float,
-) -> tuple[int, float, float, int]:
+) -> tuple[int, int, int, float, float]:
     """Rank capture formats by 720p fidelity and a real 30 fps delivery rate."""
     resolution_distance = abs(width - TARGET_WIDTH) + abs(height - TARGET_HEIGHT)
     below_quality_target = int(width < TARGET_WIDTH or height < TARGET_HEIGHT)
+    below_rate_target = int(maximum_frame_rate < TARGET_FRAME_RATE * 0.95)
     frame_rate_distance = (
         0.0
         if minimum_frame_rate <= TARGET_FRAME_RATE <= maximum_frame_rate
@@ -76,9 +74,10 @@ def camera_format_score(
     )
     return (
         below_quality_target,
+        below_rate_target,
+        resolution_distance,
         frame_rate_distance,
         abs(maximum_frame_rate - TARGET_FRAME_RATE),
-        resolution_distance,
     )
 
 

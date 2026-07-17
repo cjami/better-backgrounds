@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 RING_SLOTS = 3
+MINIMUM_RATE_SAMPLES = 2
 INTERNAL_SIZES = (360, 432, 540)
 InternalSize = Literal[360, 432, 540]
 
@@ -92,14 +94,54 @@ class LiveDiagnostics(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    capture_fps: float = Field(ge=0, le=1_000, allow_inf_nan=False)
     display_fps: float = Field(ge=0, le=1_000, allow_inf_nan=False)
     mask_fps: float = Field(ge=0, le=1_000, allow_inf_nan=False)
     mask_age_ms: float = Field(ge=0, le=60_000, allow_inf_nan=False)
     dropped_frames: int = Field(ge=0)
     worker_time_ms: float = Field(ge=0, le=60_000, allow_inf_nan=False)
+    capture_width: int = Field(gt=0, le=8_192)
+    capture_height: int = Field(gt=0, le=8_192)
     processing_width: int = Field(gt=0, le=8_192)
     processing_height: int = Field(gt=0, le=8_192)
     device_type: Literal["cuda", "mps", "cpu"]
+
+
+class SlidingFrameRate:
+    """Measure recent cadence without hiding current stalls in a session average."""
+
+    def __init__(self, *, window_ms: float = 2_000.0) -> None:
+        """Retain timestamps from one bounded rolling window."""
+        if not math.isfinite(window_ms) or window_ms <= 0:
+            msg = "frame-rate window must be finite and positive"
+            raise ValueError(msg)
+        self.window_ms = window_ms
+        self._timestamps: deque[float] = deque()
+
+    @property
+    def rate(self) -> float:
+        """Return intervals per second across the retained window."""
+        if len(self._timestamps) < MINIMUM_RATE_SAMPLES:
+            return 0.0
+        elapsed_ms = self._timestamps[-1] - self._timestamps[0]
+        return 0.0 if elapsed_ms <= 0 else (len(self._timestamps) - 1) * 1_000.0 / elapsed_ms
+
+    def record(self, timestamp_ms: float) -> float:
+        """Add one monotonic event and return its updated recent rate."""
+        if not math.isfinite(timestamp_ms) or timestamp_ms < 0:
+            msg = "frame timestamp must be finite and non-negative"
+            raise ValueError(msg)
+        if self._timestamps and timestamp_ms < self._timestamps[-1]:
+            self.reset()
+        self._timestamps.append(timestamp_ms)
+        cutoff = timestamp_ms - self.window_ms
+        while len(self._timestamps) > 1 and self._timestamps[0] < cutoff:
+            self._timestamps.popleft()
+        return self.rate
+
+    def reset(self) -> None:
+        """Forget cadence from the previous camera or worker session."""
+        self._timestamps.clear()
 
 
 @dataclass(frozen=True, slots=True)

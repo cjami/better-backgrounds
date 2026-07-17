@@ -18,8 +18,6 @@ from better_backgrounds.harmonizer_runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     import pytest
 
 
@@ -41,17 +39,8 @@ class StubHarmonizerModel(HarmonizerInferenceModel):
         assert mask.ndim == 4
         self.predictions += 1
         value = 0.2 if self.predictions == 1 else 0.8
-        return [composite.new_full((1, 1), value)]
-
-    def restore_image(
-        self,
-        composite: torch.Tensor,
-        mask: torch.Tensor,
-        arguments: Sequence[torch.Tensor],
-    ) -> torch.Tensor:
-        """Render the smoothed argument while retaining the exact background."""
-        foreground = torch.ones_like(composite) * arguments[0].flatten()[0]
-        return foreground * mask + composite * (1.0 - mask)
+        zero = composite.new_zeros((1, 1))
+        return [zero, composite.new_full((1, 1), value), zero, zero, zero, zero]
 
 
 def test_external_checkpoint_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,8 +73,10 @@ def test_missing_checkpoint_falls_back_to_standard_composite(tmp_path: Path) -> 
     assert "not found" in harmonizer.error
 
 
-def test_global_arguments_are_predicted_each_frame_and_smoothed(tmp_path: Path) -> None:
-    """Prevent a new global prediction from producing an abrupt colour jump."""
+def test_global_arguments_are_predicted_at_ten_hz_and_smoothed_each_frame(
+    tmp_path: Path,
+) -> None:
+    """Reduce model work without introducing abrupt global colour jumps."""
     checkpoint = tmp_path / "harmonizer.pth"
     model = StubHarmonizerModel()
     torch.save(model.state_dict(), checkpoint)
@@ -104,18 +95,24 @@ def test_global_arguments_are_predicted_each_frame_and_smoothed(tmp_path: Path) 
     first = harmonizer.apply(source, alpha, background, captured_at=0.0)
     second = harmonizer.apply(source, alpha, background, captured_at=1_000.0 / 30.0)
     third = harmonizer.apply(source, alpha, background, captured_at=2_000.0 / 30.0)
+    harmonizer.apply(source, alpha, background, captured_at=5_000.0 - 1_000.0 / 30.0)
+    fourth = harmonizer.apply(source, alpha, background, captured_at=5_000.0)
+    fifth = harmonizer.apply(source, alpha, background, captured_at=5_000.0 + 1_000.0 / 30.0)
 
     assert first.applied
     assert second.applied
     assert third.applied
-    assert first.statistics_updated
-    assert second.statistics_updated
-    assert third.statistics_updated
-    assert model.predictions == 3
+    assert fourth.applied
+    assert fifth.applied
+    assert model.predictions == 2
     assert first.image is not None
     assert second.image is not None
     assert third.image is not None
+    assert fourth.image is not None
+    assert fifth.image is not None
     assert np.array_equal(first.image[:, :2], background[:, :2])
-    assert np.all(first.image[:, 2:6] == 51)
-    assert np.all(second.image[:, 2:6] == 56)
-    assert np.all(third.image[:, 2:6] == 61)
+    first_value = int(first.image[0, 2, 0])
+    assert np.all(second.image[:, 2:6] == first.image[:, 2:6])
+    assert np.all(third.image[:, 2:6] == first.image[:, 2:6])
+    assert np.all(fourth.image[:, 2:6] > first_value)
+    assert np.all(fifth.image[:, 2:6] >= fourth.image[:, 2:6])

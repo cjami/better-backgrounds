@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QRect, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
+    QImage,
     QLinearGradient,
     QPainter,
     QPaintEvent,
@@ -97,7 +98,8 @@ class ComparisonPreview(QWidget):
         """Create the comparison surface with a centered wipe."""
         super().__init__(parent)
         self._wipe = 52
-        self._live_frame = QPixmap()
+        self._standard_frame = QImage()
+        self._enhanced_frame = QImage()
         self.setMinimumSize(640, 360)
         self.setAccessibleName("Placeholder standard and Better Backgrounds comparison")
 
@@ -106,9 +108,10 @@ class ComparisonPreview(QWidget):
         self._wipe = min(100, max(0, value))
         self.update()
 
-    def set_live_frame(self, frame: QPixmap) -> None:
-        """Display the current retained-pipeline frame without new capture work."""
-        self._live_frame = frame
+    def set_live_frames(self, standard: QImage, enhanced: QImage) -> None:
+        """Display retained exact-frame images without new capture or widget grabs."""
+        self._standard_frame = standard
+        self._enhanced_frame = enhanced
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: ARG002, N802
@@ -116,19 +119,15 @@ class ComparisonPreview(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        if not self._live_frame.isNull():
-            scaled = self._live_frame.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            source = QRect(
-                max(0, (scaled.width() - self.width()) // 2),
-                max(0, (scaled.height() - self.height()) // 2),
-                self.width(),
-                self.height(),
-            )
-            painter.drawPixmap(self.rect(), scaled, source)
+        if not self._standard_frame.isNull() and not self._enhanced_frame.isNull():
+            self._draw_cover(painter, self._enhanced_frame)
+            split = round(self.width() * self._wipe / 100)
+            painter.save()
+            painter.setClipRect(QRect(0, 0, split, self.height()))
+            self._draw_cover(painter, self._standard_frame)
+            painter.restore()
+            painter.setPen(QPen(QColor("#e0a34a"), 2))
+            painter.drawLine(split, 0, split, self.height())
             return
         self._paint_scene(painter, bounds, warm=False)
         split = bounds.left() + bounds.width() * self._wipe / 100
@@ -166,6 +165,21 @@ class ComparisonPreview(QWidget):
         painter.drawEllipse(handle)
         painter.setPen(QColor("#1a1204"))
         painter.drawText(handle, Qt.AlignmentFlag.AlignCenter, "↔")
+
+    @staticmethod
+    def _draw_cover(painter: QPainter, image: QImage) -> None:
+        target = painter.viewport()
+        scale = max(target.width() / image.width(), target.height() / image.height())
+        source_width = target.width() / scale
+        source_height = target.height() / scale
+        source = QRectF(
+            (image.width() - source_width) / 2,
+            (image.height() - source_height) / 2,
+            source_width,
+            source_height,
+        )
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawImage(QRectF(target), image, source)
 
     @staticmethod
     def _paint_scene(painter: QPainter, bounds: QRectF, *, warm: bool) -> None:

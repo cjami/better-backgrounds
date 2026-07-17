@@ -14,6 +14,7 @@ from better_backgrounds.live_matting import (
     LatestFrameScheduler,
     MatteResult,
     MattingConfig,
+    SlidingFrameRate,
     choose_internal_size,
 )
 
@@ -100,6 +101,20 @@ def test_calibration_selects_highest_size_within_budget(
 ) -> None:
     """Prefer detail while preserving the fixed p95 latency budget."""
     assert choose_internal_size(latencies, budget_ms=66.0) == expected
+
+
+def test_sliding_frame_rate_reports_recent_cadence_and_recovers_from_clock_reset() -> None:
+    """Report current delivery rate instead of a lifetime average."""
+    rate = SlidingFrameRate(window_ms=1_000.0)
+
+    for index in range(31):
+        rate.record(index * (1_000.0 / 30.0))
+
+    assert rate.rate == pytest.approx(30.0)
+
+    rate.record(0.0)
+
+    assert rate.rate == 0.0
 
 
 def test_frame_packet_rejects_invalid_shared_slot() -> None:

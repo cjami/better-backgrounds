@@ -76,6 +76,7 @@ def compose_live_frame(
     *,
     revision: int,
     harmonizer: LiveHarmonizer | None = None,
+    retain_standard: bool = True,
 ) -> LiveComposite:
     """Blend one matching source/matte pair against an immutable background."""
     if (
@@ -109,21 +110,7 @@ def compose_live_frame(
                 interpolation=cv2.INTER_LINEAR,
             ),
         )
-    weight = cv2.cvtColor(alpha, cv2.COLOR_GRAY2RGB)
-    weighted_source = cv2.multiply(source, weight, dtype=cv2.CV_16U)
-    weighted_background = cv2.multiply(
-        background,
-        cv2.bitwise_not(weight),
-        dtype=cv2.CV_16U,
-    )
-    standard_image = cast(
-        "NDArray[np.uint8]",
-        cv2.convertScaleAbs(
-            cv2.add(weighted_source, weighted_background),
-            alpha=1 / 255,
-        ),
-    )
-    image = standard_image
+    image: NDArray[np.uint8] | None = None
     harmonization_ms = 0.0
     harmonization_degraded: tuple[str, ...] = ()
     harmonized = harmonizer is not None and harmonizer.active
@@ -139,6 +126,13 @@ def compose_live_frame(
         harmonization_ms = result.processing_ms
         harmonization_degraded = result.degraded_components
         harmonized = result.applied
+    standard_image = (
+        _standard_composite(source, alpha, background)
+        if image is None or retain_standard
+        else image
+    )
+    if image is None:
+        image = standard_image
     return LiveComposite(
         frame_id=packet.frame_id,
         source=source,
@@ -149,4 +143,26 @@ def compose_live_frame(
         harmonized=harmonized,
         harmonization_ms=harmonization_ms,
         harmonization_degraded=harmonization_degraded,
+    )
+
+
+def _standard_composite(
+    source: NDArray[np.uint8],
+    alpha: NDArray[np.uint8],
+    background: NDArray[np.uint8],
+) -> NDArray[np.uint8]:
+    """Blend the baseline only when display or Compare needs it."""
+    weight = cv2.cvtColor(alpha, cv2.COLOR_GRAY2RGB)
+    weighted_source = cv2.multiply(source, weight, dtype=cv2.CV_16U)
+    weighted_background = cv2.multiply(
+        background,
+        cv2.bitwise_not(weight),
+        dtype=cv2.CV_16U,
+    )
+    return cast(
+        "NDArray[np.uint8]",
+        cv2.convertScaleAbs(
+            cv2.add(weighted_source, weighted_background),
+            alpha=1 / 255,
+        ),
     )

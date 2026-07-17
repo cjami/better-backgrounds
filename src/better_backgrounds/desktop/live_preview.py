@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import cv2
@@ -20,7 +22,7 @@ from better_backgrounds.compositor import (
 )
 from better_backgrounds.desktop.camera_capture import QtCameraCapture, qimage_to_rgb
 from better_backgrounds.harmonizer_runtime import HarmonizerAppearanceHarmonizer
-from better_backgrounds.live_matting import LiveDiagnostics, MattingConfig
+from better_backgrounds.live_matting import LiveDiagnostics, MattingConfig, SlidingFrameRate
 from better_backgrounds.matanyone_runtime import packaged_checkpoint_path
 from better_backgrounds.matting_engine import (
     CompletedMatte,
@@ -45,7 +47,10 @@ MINIMUM_MATTE_OCCUPANCY = 0.01
 MAXIMUM_MATTE_OCCUPANCY = 0.95
 LOST_MATTE_LIMIT = 15
 TARGET_MATTE_FPS = 30.0
-TARGET_MATTE_LATENCY_MS = 1_000.0 / TARGET_MATTE_FPS
+TARGET_FRAME_BUDGET_MS = 1_000.0 / TARGET_MATTE_FPS
+MATTE_INFERENCE_BUDGET_MS = TARGET_FRAME_BUDGET_MS
+PRESENTATION_INTERVAL_MS = 33
+PRESENTATION_BUFFER_SIZE = 2
 BACKGROUND_CAPTURE_DELAY_MS = 120
 BACKGROUND_CAPTURE_RETRY_MS = 50
 BACKGROUND_CAPTURE_RETRY_LIMIT = 20
@@ -62,6 +67,30 @@ def rgb_to_qimage(pixels: NDArray[np.uint8]) -> QImage:
         contiguous.strides[0],
         QImage.Format.Format_RGB888,
     ).copy()
+
+
+def gray_to_qimage(pixels: NDArray[np.uint8]) -> QImage:
+    """Copy one grayscale plane without expanding it to three channels."""
+    contiguous = np.ascontiguousarray(pixels)
+    height, width = contiguous.shape
+    return QImage(
+        contiguous.data,
+        width,
+        height,
+        contiguous.strides[0],
+        QImage.Format.Format_Grayscale8,
+    ).copy()
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedComposite:
+    """Carry exact-frame pixels from background composition to Qt presentation."""
+
+    completed: CompletedMatte
+    source: NDArray[np.uint8]
+    alpha: NDArray[np.uint8]
+    composite: LiveComposite
+    compare_mode: bool
 
 
 class NativeCompositeSurface(QWidget):
@@ -107,6 +136,17 @@ class NativeCompositeSurface(QWidget):
     def harmonization_error(self) -> str | None:
         """Return the bounded external-model failure for user-facing diagnostics."""
         return self._harmonizer.error
+
+    def prepare_harmonization(self) -> None:
+        """Load the external model outside the live frame callback."""
+        self._harmonizer.prepare()
+
+    @property
+    def comparison_frames(self) -> tuple[QImage, QImage] | None:
+        """Return retained standard and enhanced frames without repainting the widget."""
+        if self._standard_composite_image.isNull() or self._composite_image.isNull():
+            return None
+        return self._standard_composite_image, self._composite_image
 
     def set_background(self, image: QImage) -> bool:
         """Atomically replace the immutable room snapshot."""
@@ -162,30 +202,85 @@ class NativeCompositeSurface(QWidget):
         self._raw_source = source.copy()
         self._source_image = rgb_to_qimage(display_source)
         self._seed_image = rgb_to_qimage(preview)
-        self._mask_image = rgb_to_qimage(np.repeat(display_mask[..., None], 3, axis=2))
+        self._mask_image = gray_to_qimage(display_mask)
         self._mask_label = "PERSON FOUND"
         self.update()
 
     def apply_matte(self, completed: CompletedMatte) -> LiveComposite:
         """Compose the exact frame/matte pair returned by the scheduler."""
-        self._packet = completed.packet
-        self._matte = completed.result
-        self._raw_source = completed.source
-        self._alpha = completed.alpha
+        prepared = self.prepare_matte(completed)
+        composite = self.present_matte(prepared)
+        if composite is None:
+            msg = "room changed before the composite could be presented"
+            raise RuntimeError(msg)
+        return composite
+
+    def prepare_matte(self, completed: CompletedMatte) -> PreparedComposite:
+        """Compose exact-frame pixels without touching QWidget presentation state."""
+        source = np.flip(completed.source, axis=1).copy() if self._mirrored else completed.source
+        alpha = np.flip(completed.alpha, axis=1).copy() if self._mirrored else completed.alpha
+        background = self._background
+        revision = self._background_revision
+        if background is None:
+            background = np.zeros_like(source)
+        elif background.shape != source.shape:
+            shape = source.shape[:2]
+            resized = self._resized_backgrounds.get(shape)
+            if resized is None:
+                resized = cast(
+                    "NDArray[np.uint8]",
+                    cv2.resize(
+                        background,
+                        (source.shape[1], source.shape[0]),
+                        interpolation=cv2.INTER_LINEAR,
+                    ),
+                )
+                self._resized_backgrounds[shape] = resized
+            background = resized
+        compare_mode = self._mode == "compare"
+        composite = compose_live_frame(
+            completed.packet,
+            completed.result,
+            source,
+            alpha,
+            background,
+            revision=revision,
+            harmonizer=self._harmonizer,
+            retain_standard=compare_mode,
+        )
+        return PreparedComposite(completed, source, alpha, composite, compare_mode)
+
+    def present_matte(self, prepared: PreparedComposite) -> LiveComposite | None:
+        """Publish one prepared image set on the Qt thread."""
+        composite = prepared.composite
+        if composite.background_revision != self._background_revision:
+            return None
+        self._packet = prepared.completed.packet
+        self._matte = prepared.completed.result
+        self._raw_source = prepared.completed.source
+        self._alpha = prepared.completed.alpha
         self._seed_image = QImage()
         self._mask_label = "LIVE MATTE"
-        composite = self._recompose()
-        if composite is None:
-            msg = "compositor did not produce an image"
-            raise RuntimeError(msg)
+        self._source_image = QImage()
+        self._composite_image = rgb_to_qimage(composite.image)
+        self._standard_composite_image = (
+            rgb_to_qimage(composite.standard_image) if prepared.compare_mode else QImage()
+        )
+        self._mask_image = gray_to_qimage(prepared.alpha)
+        self._last_composite = composite
+        self.update()
         return composite
 
     def set_presentation(self, mode: str, wipe: int) -> None:
         """Switch presentation without duplicating camera or inference work."""
+        changed = mode in {"show", "compare"} and mode != self._mode
         if mode in {"show", "compare"}:
             self._mode = mode
         self._wipe = min(100, max(0, wipe))
-        self.update()
+        if changed and self._packet is not None:
+            self._recompose()
+        else:
+            self.update()
 
     def set_mirroring(self, *, mirrored: bool) -> None:
         """Mirror source and alpha together while keeping the room unchanged."""
@@ -198,9 +293,11 @@ class NativeCompositeSurface(QWidget):
     def set_diagnostics(self, diagnostics: LiveDiagnostics) -> None:
         """Paint local performance evidence without adding product controls."""
         self._diagnostics = (
-            f"{diagnostics.mask_fps:.0f} mattes/s · {diagnostics.mask_age_ms:.0f} ms · "
+            f"{diagnostics.capture_fps:.0f} camera · {diagnostics.display_fps:.0f} output fps · "
+            f"{diagnostics.mask_age_ms:.0f} ms · "
             f"{diagnostics.worker_time_ms:.1f} ms worker · "
-            f"{diagnostics.processing_width}x{diagnostics.processing_height} · "
+            f"{diagnostics.capture_width}x{diagnostics.capture_height} input → "
+            f"{diagnostics.processing_width}x{diagnostics.processing_height} matte · "
             f"{diagnostics.device_type.upper()} · {diagnostics.dropped_frames} dropped"
         )
         composite = self._last_composite
@@ -271,55 +368,26 @@ class NativeCompositeSurface(QWidget):
         ):
             self.update()
             return None
-        source = np.flip(self._raw_source, axis=1).copy() if self._mirrored else self._raw_source
-        alpha = np.flip(self._alpha, axis=1).copy() if self._mirrored else self._alpha
-        background = self._background
-        if background is None:
-            background = np.zeros_like(source)
-        elif background.shape != source.shape:
-            shape = source.shape[:2]
-            resized = self._resized_backgrounds.get(shape)
-            if resized is None:
-                resized = cast(
-                    "NDArray[np.uint8]",
-                    cv2.resize(
-                        background,
-                        (source.shape[1], source.shape[0]),
-                        interpolation=cv2.INTER_LINEAR,
-                    ),
-                )
-                self._resized_backgrounds[shape] = resized
-            background = resized
-        composite = compose_live_frame(
+        completed = CompletedMatte(
             self._packet,
             self._matte,
-            source,
-            alpha,
-            background,
-            revision=self._background_revision,
-            harmonizer=self._harmonizer,
+            self._raw_source,
+            self._alpha,
         )
-        self._source_image = rgb_to_qimage(source)
-        self._composite_image = rgb_to_qimage(composite.image)
-        self._standard_composite_image = rgb_to_qimage(composite.standard_image)
-        self._mask_image = rgb_to_qimage(np.repeat(alpha[..., None], 3, axis=2))
-        self._last_composite = composite
-        self.update()
-        return composite
+        return self.present_matte(self.prepare_matte(completed))
 
     def _draw_cover(self, painter: QPainter, image: QImage) -> None:
-        scaled = image.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
+        scale = max(self.width() / image.width(), self.height() / image.height())
+        source_width = self.width() / scale
+        source_height = self.height() / scale
+        source = QRectF(
+            (image.width() - source_width) / 2,
+            (image.height() - source_height) / 2,
+            source_width,
+            source_height,
         )
-        source = QRect(
-            max(0, (scaled.width() - self.width()) // 2),
-            max(0, (scaled.height() - self.height()) // 2),
-            self.width(),
-            self.height(),
-        )
-        painter.drawImage(self.rect(), scaled, source)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawImage(QRectF(self.rect()), image, source)
 
 
 class NativeLivePreview(QWidget):
@@ -331,6 +399,8 @@ class NativeLivePreview(QWidget):
     harmonization_status_changed = Signal(str)
     _seed_generated = Signal(object, object)
     _seed_failed = Signal(str)
+    _composite_prepared = Signal(int, object)
+    _composite_failed = Signal(int, str)
 
     def __init__(
         self,
@@ -372,9 +442,12 @@ class NativeLivePreview(QWidget):
         self._background_timer.setSingleShot(True)
         self._background_timer.timeout.connect(self._capture_background)
         self._background_capture_attempts = 0
-        self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(5)
-        self._poll_timer.timeout.connect(self._poll_engine)
+        self._poll_timer = self._create_timer(5, self._poll_engine)
+        self._presentation_timer = self._create_timer(
+            PRESENTATION_INTERVAL_MS,
+            self._present_pending_matte,
+            precise=True,
+        )
         self._camera_capture = QtCameraCapture(self)
         self._camera_capture.frame_captured.connect(self._camera_frame_captured)
         self._camera_capture.failed.connect(self._camera_failed)
@@ -391,10 +464,40 @@ class NativeLivePreview(QWidget):
         self._invalid_matte_count = 0
         self._active_device = "cpu"
         self._internal_size = 360
-        self._mask_count = 0
-        self._rate_started = time.monotonic()
+        self._initialize_composition_state()
+        self._capture_rate = SlidingFrameRate()
+        self._display_rate = SlidingFrameRate()
+        self._connect_internal_signals()
+
+    def _initialize_composition_state(self) -> None:
+        self._pending_matte: CompletedMatte | None = None
+        self._prepared_composites: deque[PreparedComposite] = deque(
+            maxlen=PRESENTATION_BUFFER_SIZE,
+        )
+        self._composition_inflight = False
+        self._session_revision = 0
+        self._presentation_drops = 0
+        self._harmonizer_prepare_inflight = False
+
+    def _connect_internal_signals(self) -> None:
         self._seed_generated.connect(self._accept_seed)
         self._seed_failed.connect(self._reject_seed)
+        self._composite_prepared.connect(self._accept_prepared_composite)
+        self._composite_failed.connect(self._reject_prepared_composite)
+
+    def _create_timer(
+        self,
+        interval_ms: int,
+        callback: Callable[[], None],
+        *,
+        precise: bool = False,
+    ) -> QTimer:
+        timer = QTimer(self)
+        timer.setInterval(interval_ms)
+        if precise:
+            timer.setTimerType(Qt.TimerType.PreciseTimer)
+        timer.timeout.connect(callback)
+        return timer
 
     def start_camera(self, device_id: str, *, mirrored: bool) -> None:
         """Open the selected Qt camera and begin one-shot target selection."""
@@ -403,6 +506,8 @@ class NativeLivePreview(QWidget):
         self._surface.set_mirroring(mirrored=mirrored)
         self._surface.reset_camera_harmonization()
         self._selector.reset()
+        self._capture_rate.reset()
+        self._display_rate.reset()
         self._poll_timer.start()
         self._set_state("seeding", "Hold still while the person seed is captured…")
         if not self._camera_capture.start(device_id):
@@ -411,6 +516,7 @@ class NativeLivePreview(QWidget):
     def stop_camera(self) -> None:
         """Release camera, model worker, and all queued frame ownership."""
         self._poll_timer.stop()
+        self._presentation_timer.stop()
         self._camera_capture.stop()
         if self._engine is not None:
             self._engine.close()
@@ -420,6 +526,13 @@ class NativeLivePreview(QWidget):
         self._seed_frame = None
         self._seed_mask = None
         self._seed_inflight = False
+        self._pending_matte = None
+        self._prepared_composites.clear()
+        self._composition_inflight = False
+        self._session_revision += 1
+        self._presentation_drops = 0
+        self._capture_rate.reset()
+        self._display_rate.reset()
         self._surface.reset_camera_harmonization()
         self._surface.clear_matte()
         if self._state != "idle":
@@ -440,7 +553,7 @@ class NativeLivePreview(QWidget):
                     internal_size=540,
                     warmup_iterations=10,
                     calibrate=True,
-                    latency_budget_ms=TARGET_MATTE_LATENCY_MS,
+                    latency_budget_ms=MATTE_INFERENCE_BUDGET_MS,
                 ),
             )
         except (OSError, RuntimeError, ValueError) as error:
@@ -503,6 +616,7 @@ class NativeLivePreview(QWidget):
         """Apply the room-scoped experimental global harmonization switch."""
         self._surface.set_harmonization(settings)
         if settings.active:
+            self._prepare_harmonizer()
             self.harmonization_status_changed.emit(
                 "Global harmonization enabled; preparing the external checkpoint…",
             )
@@ -510,6 +624,19 @@ class NativeLivePreview(QWidget):
             self.harmonization_status_changed.emit(
                 "Global harmonization is off; identical comparison sides are expected.",
             )
+
+    def _prepare_harmonizer(self) -> None:
+        if self._harmonizer_prepare_inflight:
+            return
+        self._harmonizer_prepare_inflight = True
+
+        def prepare() -> None:
+            try:
+                self._surface.prepare_harmonization()
+            finally:
+                self._harmonizer_prepare_inflight = False
+
+        threading.Thread(target=prepare, name="harmonizer-prepare", daemon=True).start()
 
     @Slot(int, int)
     def _scene_progressed(self, loaded: int, total: int) -> None:
@@ -535,6 +662,7 @@ class NativeLivePreview(QWidget):
         if not isinstance(frame, np.ndarray):
             return
         source = cast("NDArray[np.uint8]", frame)
+        self._capture_rate.record(captured_at)
         if self._latest_frame is not None and source.shape != self._latest_frame.shape:
             self._begin_reseed("Camera format changed; capture a new person seed…")
         self._latest_frame = source
@@ -594,21 +722,84 @@ class NativeLivePreview(QWidget):
             if isinstance(event, EngineReady):
                 self._seed_frame = None
                 self._seed_mask = None
-                self._mask_count = 0
-                self._rate_started = time.monotonic()
+                self._display_rate.reset()
+                self._pending_matte = None
+                self._prepared_composites.clear()
+                self._composition_inflight = False
+                self._presentation_drops = 0
                 self._active_device = event.capabilities.device_type
                 self._internal_size = event.selected_internal_size
                 self._invalid_matte_count = 0
                 device = event.capabilities.device_type.upper()
                 self._set_state("live", f"Live · MatAnyone 2 · {device}")
             elif isinstance(event, CompletedMatte):
-                self._handle_matte(event)
+                self._queue_composition(event)
             elif isinstance(event, EngineFailure):
                 self._pause_tracking(
                     f"Matting stopped: {event.message}. Re-select the person to retry.",
                 )
 
-    def _handle_matte(self, completed: CompletedMatte) -> None:
+    @Slot()
+    def _present_pending_matte(self) -> None:
+        if not self._prepared_composites:
+            return
+        prepared = self._prepared_composites.popleft()
+        composite = self._surface.present_matte(prepared)
+        if composite is not None:
+            self._handle_composite(prepared.completed, composite)
+
+    def _queue_composition(self, completed: CompletedMatte) -> None:
+        if self._composition_inflight:
+            if self._pending_matte is not None:
+                self._presentation_drops += 1
+            self._pending_matte = completed
+            return
+        self._start_composition(completed)
+
+    def _start_composition(self, completed: CompletedMatte) -> None:
+        self._composition_inflight = True
+        revision = self._session_revision
+
+        def compose() -> None:
+            try:
+                prepared = self._surface.prepare_matte(completed)
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                self._composite_failed.emit(revision, str(error)[:240])
+            else:
+                self._composite_prepared.emit(revision, prepared)
+
+        threading.Thread(target=compose, name="live-compositor", daemon=True).start()
+
+    @Slot(int, object)
+    def _accept_prepared_composite(self, revision: int, prepared: object) -> None:
+        if revision != self._session_revision or not isinstance(prepared, PreparedComposite):
+            return
+        self._composition_inflight = False
+        if len(self._prepared_composites) == PRESENTATION_BUFFER_SIZE:
+            self._presentation_drops += 1
+        self._prepared_composites.append(prepared)
+        pending = self._pending_matte
+        self._pending_matte = None
+        if pending is not None:
+            self._start_composition(pending)
+        if (
+            not self._presentation_timer.isActive()
+            and len(self._prepared_composites) == PRESENTATION_BUFFER_SIZE
+        ):
+            self._presentation_timer.start()
+
+    @Slot(int, str)
+    def _reject_prepared_composite(self, revision: int, message: str) -> None:
+        if revision != self._session_revision:
+            return
+        self._composition_inflight = False
+        self._pause_tracking(f"Compositing stopped: {message}. Re-select the person to retry.")
+
+    def _handle_composite(
+        self,
+        completed: CompletedMatte,
+        composite: LiveComposite,
+    ) -> None:
         occupancy = (
             float(np.count_nonzero(completed.alpha >= ALPHA_MIDPOINT)) / completed.alpha.size
         )
@@ -620,11 +811,11 @@ class NativeLivePreview(QWidget):
         if self._invalid_matte_count >= LOST_MATTE_LIMIT:
             self._pause_tracking("Tracking paused. Re-select the person to continue.")
             return
-        composite = self._surface.apply_matte(completed)
         if composite.harmonized:
             self.harmonization_status_changed.emit(
                 f"Global Harmonizer: {composite.harmonization_ms:.1f} ms/frame "
-                f"on {self._surface.harmonization_backend} (30 FPS budget: 33.3 ms).",
+                f"on {self._surface.harmonization_backend} "
+                f"(30 FPS budget: {TARGET_FRAME_BUDGET_MS:.1f} ms).",
             )
         elif composite.harmonization_degraded:
             detail = self._surface.harmonization_error
@@ -632,17 +823,19 @@ class NativeLivePreview(QWidget):
                 "Global harmonization fell back to the standard composite: "
                 + (detail or ", ".join(composite.harmonization_degraded)),
             )
-        self._mask_count += 1
         now = time.monotonic()
-        elapsed = max(0.001, now - self._rate_started)
-        rate = self._mask_count / elapsed
+        display_rate = self._display_rate.record(now * 1_000.0)
         engine = self._engine
         diagnostics = LiveDiagnostics(
-            display_fps=rate,
-            mask_fps=rate,
+            capture_fps=self._capture_rate.rate,
+            display_fps=display_rate,
+            mask_fps=display_rate,
             mask_age_ms=max(0.0, now * 1000.0 - completed.packet.captured_at),
-            dropped_frames=0 if engine is None else engine.dropped_frames,
+            dropped_frames=(0 if engine is None else engine.dropped_frames)
+            + self._presentation_drops,
             worker_time_ms=completed.result.inference_ms,
+            capture_width=completed.packet.width,
+            capture_height=completed.packet.height,
             processing_width=round(
                 completed.packet.width
                 * self._internal_size
@@ -664,7 +857,9 @@ class NativeLivePreview(QWidget):
         self._surface.set_diagnostics(diagnostics)
         self.diagnostics_changed.emit(diagnostics)
         if self._mode == "compare":
-            self.comparison_frame.emit(self._surface.grab())
+            comparison = self._surface.comparison_frames
+            if comparison is not None:
+                self.comparison_frame.emit(comparison)
 
     def _begin_reseed(self, message: str) -> None:
         self._reset_tracking()
@@ -675,6 +870,11 @@ class NativeLivePreview(QWidget):
         self._set_state("lost", message)
 
     def _reset_tracking(self) -> None:
+        self._presentation_timer.stop()
+        self._pending_matte = None
+        self._prepared_composites.clear()
+        self._composition_inflight = False
+        self._session_revision += 1
         if self._engine is not None:
             self._engine.close()
             self._engine = None

@@ -1,10 +1,7 @@
-"""Adapted inference subset from ZHKKKe/Harmonizer, CC BY-NC-SA 4.0."""
+"""Adapted argument-prediction subset from ZHKKKe/Harmonizer, CC BY-NC-SA 4.0."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
-import kornia
 import torch
 from efficientnet_pytorch import EfficientNet
 from efficientnet_pytorch.utils import get_same_padding_conv2d, round_filters
@@ -83,111 +80,8 @@ class _CascadeArgumentRegressor(nn.Module):
         return arguments
 
 
-class _BrightnessFilter(nn.Module):
-    def forward(self, image: torch.Tensor, argument: torch.Tensor) -> torch.Tensor:
-        hsv = kornia.color.rgb_to_hsv(image)
-        hue, saturation, value = hsv[:, 0:1], hsv[:, 1:2], hsv[:, 2:3]
-        positive = (argument >= 0).float()
-        alpha = (1 / (1 - argument + 1e-6)) * positive + (argument + 1) * (1 - positive)
-        adjusted = torch.cat((hue, saturation, value * alpha), dim=1)
-        return kornia.color.hsv_to_rgb(adjusted).clamp(0.0, 1.0)
-
-
-class _ContrastFilter(nn.Module):
-    def forward(self, image: torch.Tensor, argument: torch.Tensor) -> torch.Tensor:
-        threshold = torch.mean(image, dim=(1, 2, 3), keepdim=True)
-        positive = (argument.detach() > 0).float()
-        adjusted_argument = 255 / (256 - torch.floor(argument * 255)) - 1
-        adjusted_argument = argument * (1 - positive) + adjusted_argument * positive
-        return (image + (image - threshold) * adjusted_argument).clamp(0.0, 1.0)
-
-
-class _SaturationFilter(nn.Module):
-    def forward(self, image: torch.Tensor, argument: torch.Tensor) -> torch.Tensor:
-        minimum = torch.min(image, dim=1, keepdim=True)[0]
-        maximum = torch.max(image, dim=1, keepdim=True)[0]
-        spread = maximum - minimum
-        total = maximum + minimum
-        mean = total / 2
-        positive = (argument.detach() >= 0).float()
-        lower_half = (mean < 0.5).float()
-        saturation = (spread / (total + 1e-6)) * lower_half
-        saturation += (spread / (2 - total + 1e-6)) * (1 - lower_half)
-        clipped = ((argument + saturation) > 1).float()
-        positive_alpha = saturation * clipped + (1 - argument) * (1 - clipped)
-        positive_alpha = 1 / (positive_alpha + 1e-6) - 1
-        alpha = positive_alpha * positive + (1 + argument) * (1 - positive)
-        adjusted = image * positive + mean * (1 - positive) + (image - mean) * alpha
-        return adjusted.clamp(0.0, 1.0)
-
-
-class _TemperatureFilter(nn.Module):
-    def forward(self, image: torch.Tensor, argument: torch.Tensor) -> torch.Tensor:
-        red, green, blue = image[:, 0:1], image[:, 1:2], image[:, 2:3]
-        mean_red = torch.mean(red, dim=(2, 3), keepdim=True)
-        mean_green = torch.mean(green, dim=(2, 3), keepdim=True)
-        mean_blue = torch.mean(blue, dim=(2, 3), keepdim=True)
-        gray = (mean_red + mean_green + mean_blue) / 3
-        red_bias = 1 - gray / (mean_red + 1e-6)
-        green_bias = 1 - gray / (mean_green + 1e-6)
-        blue_bias = 1 - gray / (mean_blue + 1e-6)
-        positive = (argument.detach() > 0).float()
-        negative = (argument.detach() < 0).float()
-        zero = (argument.detach() == 0).float()
-        target_red = mean_red + argument * torch.sign(argument) * negative
-        target_green = mean_green + argument * torch.sign(argument) * 0.5 * (1 - zero)
-        target_blue = mean_blue + argument * torch.sign(argument) * positive
-        target_gray = (target_red + target_green + target_blue) / 3
-        red_coefficient = target_gray / (target_red + 1e-6) + red_bias
-        green_coefficient = target_gray / (target_green + 1e-6) + green_bias
-        blue_coefficient = target_gray / (target_blue + 1e-6) + blue_bias
-        return torch.cat(
-            (red_coefficient * red, green_coefficient * green, blue_coefficient * blue),
-            dim=1,
-        ).clamp(0.0, 1.0)
-
-
-class _HighlightFilter(nn.Module):
-    def forward(self, image: torch.Tensor, argument: torch.Tensor) -> torch.Tensor:
-        inverted = kornia.enhance.invert(image, image.detach() * 0 + 1)
-        adjusted = torch.pow(inverted + 1e-9, argument + 1).clamp(0.0, 1.0)
-        return kornia.enhance.invert(adjusted, adjusted.detach() * 0 + 1).clamp(0.0, 1.0)
-
-
-class _ShadowFilter(nn.Module):
-    def forward(self, image: torch.Tensor, argument: torch.Tensor) -> torch.Tensor:
-        return torch.pow(image + 1e-9, -argument + 1).clamp(0.0, 1.0)
-
-
-class _FilterPerformer(nn.Module):
-    """Apply only the final foreground composite instead of retaining six intermediates."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.filters = (
-            _TemperatureFilter(),
-            _BrightnessFilter(),
-            _ContrastFilter(),
-            _SaturationFilter(),
-            _HighlightFilter(),
-            _ShadowFilter(),
-        )
-
-    def restore(
-        self,
-        composite: torch.Tensor,
-        mask: torch.Tensor,
-        arguments: Sequence[torch.Tensor],
-    ) -> torch.Tensor:
-        transformed = composite
-        clamped = [argument.clamp(-1, 1).view(-1, 1, 1, 1) for argument in arguments]
-        for filter_module, argument in zip(self.filters, clamped, strict=True):
-            transformed = filter_module(transformed, argument)
-        return transformed * mask + composite * (1 - mask)
-
-
 class HarmonizerInferenceModel(nn.Module):
-    """Inference-only global Harmonizer matching the official checkpoint state dictionary."""
+    """Predict the six global Harmonizer controls from the official checkpoint."""
 
     input_size = (256, 256)
 
@@ -195,7 +89,6 @@ class HarmonizerInferenceModel(nn.Module):
         super().__init__()
         self.backbone = _EfficientBackbone.from_name("efficientnet-b0", include_top=False)
         self.regressor = _CascadeArgumentRegressor(1280, 160, 1, 6)
-        self.performer = _FilterPerformer()
 
     def predict_arguments(
         self,
@@ -213,11 +106,3 @@ class HarmonizerInferenceModel(nn.Module):
         background = torch.cat((composite, 1 - mask), dim=1)
         *_, features = self.backbone(foreground, background)
         return self.regressor(features)
-
-    def restore_image(
-        self,
-        composite: torch.Tensor,
-        mask: torch.Tensor,
-        arguments: Sequence[torch.Tensor],
-    ) -> torch.Tensor:
-        return self.performer.restore(composite, mask, arguments)

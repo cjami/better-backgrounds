@@ -55,7 +55,7 @@ class TrackingLiveRenderer(ScenePreview):
         self.matting.append(payload)
 
     def set_harmonization(self, settings: HarmonizationSettings) -> None:
-        """Record room-scoped appearance component changes."""
+        """Record the room-scoped global appearance switch."""
         self.harmonization.append(settings)
 
 
@@ -183,19 +183,16 @@ def test_adjust_persists_and_applies_foreground_only_mirroring(tmp_path: Path) -
 
 
 def test_harmonization_is_off_by_default_and_independently_enabled(tmp_path: Path) -> None:
-    """Expose one opt-in AI stage while keeping depth separate and unavailable."""
+    """Expose only the opt-in global Harmonizer stage."""
     application()
     pipeline = TrackingLiveRenderer()
     window = create_window(tmp_path, pipeline)
     controls = {checkbox.text(): checkbox for checkbox in window.findChildren(QCheckBox)}
 
-    expected = {
-        "Global harmonization",
-        "Depth-dependent effects",
-    }
+    expected = {"Global harmonization"}
     assert expected <= controls.keys()
     assert all(not controls[title].isChecked() for title in expected)
-    assert not controls["Depth-dependent effects"].isEnabled()
+    assert "Depth-dependent effects" not in controls
 
     controls["Global harmonization"].setChecked(True)
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from PIL import Image, ImageOps
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -47,6 +47,7 @@ STAGE_ORDER = (
     ("publication", "Publishing scene"),
     ("preview_generation", "Preparing preview"),
 )
+COMPARISON_FRAME_COUNT = 2
 COMPLETE_PROGRESS = 100
 
 
@@ -935,21 +936,13 @@ class AdjustPage(QWidget):
                 word_wrap=True,
             ),
         )
-        harmonization_components = (
-            ("global_harmonization", "Global harmonization"),
-            ("depth_effects", "Depth-dependent effects"),
-        )
+        harmonization_components = (("global_harmonization", "Global harmonization"),)
         for key, title in harmonization_components:
             component = QCheckBox(title)
             component.setObjectName(f"harmonization-{key.replace('_', '-')}")
             component.toggled.connect(self._harmonization_control_changed)
             self._harmonization_controls[key] = component
             controls.addWidget(component)
-        depth_effects = self._harmonization_controls["depth_effects"]
-        depth_effects.setEnabled(False)
-        depth_effects.setToolTip(
-            "Unavailable until the room renderer provides reliable depth and confidence",
-        )
         controls.addWidget(
             _label(
                 "Compare retains the standard exact-frame composite as its baseline.",
@@ -1189,7 +1182,7 @@ class ComparePage(QWidget):
         self._preview_layout.addWidget(self._placeholder)
         root.addWidget(self._preview_host, 1)
         self._harmonization_status = _label(
-            "Harmonisation is off. Enable components in Adjust; identical sides are expected.",
+            "Global harmonization is off; identical comparison sides are expected.",
             object_name="muted",
             word_wrap=True,
         )
@@ -1208,10 +1201,13 @@ class ComparePage(QWidget):
         root.addLayout(wipe_row)
 
     def set_live_frame(self, frame: object) -> None:
-        """Show a frame copied from the retained live surface."""
-        if isinstance(frame, QPixmap):
+        """Show retained standard and enhanced images without recapturing the widget."""
+        if not isinstance(frame, tuple) or len(frame) != COMPARISON_FRAME_COUNT:
+            return
+        standard, enhanced = frame
+        if isinstance(standard, QImage) and isinstance(enhanced, QImage):
             self._placeholder.show()
-            self._placeholder.set_live_frame(frame)
+            self._placeholder.set_live_frames(standard, enhanced)
 
     def set_room(self, room: str) -> None:
         """Update the room named by the comparison."""
