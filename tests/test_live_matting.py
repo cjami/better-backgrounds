@@ -15,6 +15,7 @@ from better_backgrounds.live_matting import (
     MatteResult,
     MattingConfig,
     SlidingFrameRate,
+    calibration_p95_latency,
     choose_internal_size,
 )
 
@@ -42,10 +43,20 @@ def result(source: FramePacket) -> MatteResult:
 
 def test_matting_config_restricts_calibrated_sizes() -> None:
     """Accept only the resolutions evaluated by startup calibration."""
-    assert MattingConfig(internal_size=432).warmup_iterations == 10
+    config = MattingConfig(internal_size=432)
+
+    assert config.warmup_iterations == 10
+    assert config.calibration_frames == 20
 
     with pytest.raises(ValidationError):
         MattingConfig(internal_size=500)  # ty: ignore[invalid-argument-type]
+
+
+def test_calibration_p95_ignores_one_isolated_scheduling_spike() -> None:
+    """Measure sustained inference rather than one unrelated startup stall."""
+    samples = [20.0] * 19 + [80.0]
+
+    assert calibration_p95_latency(samples) == pytest.approx(23.0)
 
 
 def test_scheduler_keeps_one_active_and_only_the_newest_pending_frame() -> None:

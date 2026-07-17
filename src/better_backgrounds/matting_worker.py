@@ -14,6 +14,7 @@ from better_backgrounds.live_matting import (
     MatteResult,
     MattingCapabilities,
     MattingConfig,
+    calibration_p95_latency,
     choose_internal_size,
 )
 
@@ -73,7 +74,6 @@ def matting_worker_main(
                 trial = config.model_copy(
                     update={
                         "internal_size": size,
-                        "warmup_iterations": 1,
                         "calibrate": False,
                     },
                 )
@@ -86,8 +86,7 @@ def matting_worker_main(
                     runtime.step(seed_frame)
                     runtime.synchronize()
                     timings.append((time.perf_counter() - frame_started) * 1000.0)
-                timings.sort()
-                latencies[size] = timings[min(len(timings) - 1, round(len(timings) * 0.95))]
+                latencies[size] = calibration_p95_latency(timings)
             if runtime.capabilities.accelerated and not any(
                 latency <= config.latency_budget_ms for latency in latencies.values()
             ):

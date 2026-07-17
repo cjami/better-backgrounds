@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from better_backgrounds.compositor import background_has_content, compose_live_frame
-from better_backgrounds.desktop.live_preview import NativeCompositeSurface, rgb_to_qimage
-from better_backgrounds.harmonization import HarmonizationResult
-from better_backgrounds.live_matting import FramePacket, MatteResult
-from better_backgrounds.matting_engine import CompletedMatte
+from better_backgrounds.desktop.live_preview import (
+    NativeCompositeSurface,
+    NativeLivePreview,
+    rgb_to_qimage,
+)
+from better_backgrounds.harmonization import HarmonizationResult, HarmonizationSettings
+from better_backgrounds.live_matting import FramePacket, MatteResult, MattingCapabilities
+from better_backgrounds.matting_engine import CompletedMatte, EngineReady
 
 _APPLICATION: QApplication | None = None
 
@@ -37,6 +41,23 @@ class StubHarmonizer:
             processing_ms=1.0,
             degraded_components=(),
             applied=True,
+        )
+
+
+class ReadyEngine:
+    """Publish one successful MatAnyone calibration event."""
+
+    ready = False
+
+    @staticmethod
+    def poll() -> tuple[EngineReady, ...]:
+        """Return the event that permits deferred Harmonizer preparation."""
+        return (
+            EngineReady(
+                capabilities=MattingCapabilities(device_type="cuda", accelerated=True),
+                initialization_ms=100.0,
+                selected_internal_size=540,
+            ),
         )
 
 
@@ -165,3 +186,27 @@ def test_compositor_retains_standard_baseline_when_harmonization_is_enabled() ->
     assert np.array_equal(composite.standard_image, source)
     assert not np.array_equal(composite.image, composite.standard_image)
     assert composite.harmonized
+
+
+def test_harmonizer_preparation_waits_for_matanyone_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep CPU checkpoint loading outside the strict matting inference gate."""
+    application()
+    preview = NativeLivePreview(background_factory=QWidget)
+    preparations: list[str] = []
+
+    def prepare() -> None:
+        preparations.append("prepared")
+
+    monkeypatch.setattr(preview, "_prepare_harmonizer", prepare)
+    preview.set_harmonization(HarmonizationSettings(global_harmonization=True))
+
+    assert not preparations
+
+    monkeypatch.setattr(preview, "_engine", ReadyEngine())
+    preview._poll_engine()  # noqa: SLF001
+
+    assert preparations == ["prepared"]
+    monkeypatch.setattr(preview, "_engine", None)
+    preview.close()

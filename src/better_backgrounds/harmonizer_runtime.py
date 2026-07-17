@@ -15,6 +15,7 @@ import torch
 
 from better_backgrounds._vendor.harmonizer import HarmonizerInferenceModel
 from better_backgrounds.harmonization import HarmonizationResult, HarmonizationSettings
+from better_backgrounds.harmonizer_filters import HarmonizerFilterRenderer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -22,20 +23,15 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 HARMONIZER_CHECKPOINT_ENV = "BETTER_BACKGROUNDS_HARMONIZER_CHECKPOINT"
-HARMONIZER_TARGET_FPS = 30.0
-HARMONIZER_FRAME_INTERVAL_MS = 1_000.0 / HARMONIZER_TARGET_FPS
-HARMONIZER_FRAME_RETENTION = 1.0 - 1.0 / HARMONIZER_TARGET_FPS
-HARMONIZER_PREDICTION_INTERVAL_MS = 5_000.0
+SESSION_PREDICTION_SAMPLE_COUNT = 3
+SESSION_PREDICTION_SAMPLE_INTERVAL_MS = 100.0
+SESSION_TRANSITION_MS = 750.0
 EDGE_DECONTAMINATION_STRENGTH = 0.12
-MINIMUM_GLOBAL_SCALE = 0.75
-MAXIMUM_GLOBAL_SCALE = 1.5
 RGB_CHANNELS = 3
 RGB_DIMENSIONS = 3
-GLOBAL_ARGUMENT_COUNT = 6
 OPAQUE_ALPHA = 255
 EDGE_ALPHA_MINIMUM = 16
 EDGE_ALPHA_MAXIMUM = 239
-LUMINANCE_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 
 def checkpoint_from_environment() -> Path | None:
@@ -61,10 +57,10 @@ class HarmonizerAppearanceHarmonizer:
         self._model_factory = model_factory
         self._model: HarmonizerInferenceModel | None = None
         self._device: torch.device | None = None
-        self._arguments: list[float] | None = None
-        self._target_arguments: list[float] | None = None
-        self._last_frame_at: float | None = None
-        self._last_prediction_at: float | None = None
+        self._renderer: HarmonizerFilterRenderer | None = None
+        self._prediction_samples: list[tuple[NDArray[np.uint8], NDArray[np.uint8]]] = []
+        self._last_sample_at: float | None = None
+        self._transition_started_at: float | None = None
         self._room_revision: int | None = None
         self._error: str | None = None
         self._model_lock = threading.Lock()
@@ -116,10 +112,10 @@ class HarmonizerAppearanceHarmonizer:
 
     def reset_camera(self) -> None:
         """Discard global controls that must not cross camera identities."""
-        self._arguments = None
-        self._target_arguments = None
-        self._last_frame_at = None
-        self._last_prediction_at = None
+        self._renderer = None
+        self._prediction_samples.clear()
+        self._last_sample_at = None
+        self._transition_started_at = None
 
     def apply(
         self,
@@ -135,12 +131,28 @@ class HarmonizerAppearanceHarmonizer:
         if degraded is not None:
             return self._fallback(started, degraded)
         try:
+            if self._renderer is None:
+                self._ensure_model()
             composite = self._prepare_composite(source, alpha, background)
-            if self._prediction_due(captured_at):
-                self._target_arguments = self._predict_arguments(composite, alpha)
-                self._last_prediction_at = captured_at
-            arguments = self._smooth_arguments(captured_at)
-            host = self._restore_global(composite, alpha, arguments)
+            if self._renderer is None:
+                self._collect_prediction_sample(composite, alpha, captured_at)
+                if len(self._prediction_samples) < SESSION_PREDICTION_SAMPLE_COUNT:
+                    return self._fallback(started, ())
+                arguments = self._predict_arguments(self._prediction_samples)
+                reference = np.median(
+                    np.stack([sample for sample, _alpha in self._prediction_samples]),
+                    axis=0,
+                ).astype(np.uint8)
+                self._renderer = HarmonizerFilterRenderer.compile(reference, arguments)
+                self._prediction_samples.clear()
+                self._transition_started_at = captured_at
+            transition_started_at = self._transition_started_at
+            transition = (
+                1.0
+                if transition_started_at is None
+                else (captured_at - transition_started_at) / SESSION_TRANSITION_MS
+            )
+            host = self._renderer.render(composite, alpha, transition=transition)
         except (OSError, RuntimeError, TypeError, ValueError) as error:
             self._error = str(error)[:240]
             return self._fallback(started, ("harmonizer",))
@@ -165,25 +177,54 @@ class HarmonizerAppearanceHarmonizer:
 
     def _predict_arguments(
         self,
-        composite: NDArray[np.uint8],
-        alpha: NDArray[np.uint8],
+        samples: list[tuple[NDArray[np.uint8], NDArray[np.uint8]]],
     ) -> list[float]:
         model, device = self._ensure_model()
-        image_tensor = torch.from_numpy(np.ascontiguousarray(composite)).to(
+        composites = np.stack([composite for composite, _alpha in samples])
+        alphas = np.stack([alpha for _composite, alpha in samples])
+        image_tensor = torch.from_numpy(np.ascontiguousarray(composites)).to(
             device=device,
             dtype=torch.float32,
         )
-        image_tensor = image_tensor.permute(2, 0, 1).unsqueeze(0).div(255.0)
-        matte_tensor = torch.from_numpy(np.ascontiguousarray(alpha)).to(
+        image_tensor = image_tensor.permute(0, 3, 1, 2).div(255.0)
+        matte_tensor = torch.from_numpy(np.ascontiguousarray(alphas)).to(
             device=device,
             dtype=torch.float32,
         )
-        matte_tensor = matte_tensor.unsqueeze(0).unsqueeze(0).div(255.0)
+        matte_tensor = matte_tensor.unsqueeze(1).div(255.0)
         with torch.inference_mode():
             return [
-                float(argument.item())
+                float(torch.median(argument.flatten()).item())
                 for argument in model.predict_arguments(image_tensor, matte_tensor)
             ]
+
+    def _collect_prediction_sample(
+        self,
+        composite: NDArray[np.uint8],
+        alpha: NDArray[np.uint8],
+        captured_at: float,
+    ) -> None:
+        previous_at = self._last_sample_at
+        if (
+            previous_at is not None
+            and captured_at - previous_at < SESSION_PREDICTION_SAMPLE_INTERVAL_MS
+        ):
+            return
+        width, height = HarmonizerInferenceModel.input_size
+        sample_size = (width, height)
+        self._prediction_samples.append(
+            (
+                cast(
+                    "NDArray[np.uint8]",
+                    cv2.resize(composite, sample_size, interpolation=cv2.INTER_LINEAR),
+                ),
+                cast(
+                    "NDArray[np.uint8]",
+                    cv2.resize(alpha, sample_size, interpolation=cv2.INTER_LINEAR),
+                ),
+            ),
+        )
+        self._last_sample_at = captured_at
 
     def _ensure_model(self) -> tuple[HarmonizerInferenceModel, torch.device]:
         if self._model is not None and self._device is not None:
@@ -212,19 +253,19 @@ class HarmonizerAppearanceHarmonizer:
 
     def _select_device(self) -> torch.device:
         requested = self.preferred_device
-        if requested == "cpu":
-            return torch.device("cpu")
-        if requested == "cuda" or (requested is None and torch.cuda.is_available()):
+        if requested == "cuda":
             if not torch.cuda.is_available():
                 msg = "CUDA was requested but is unavailable"
                 raise RuntimeError(msg)
             return torch.device("cuda")
-        if requested == "mps" or (requested is None and torch.backends.mps.is_available()):
+        if requested == "mps":
             if not torch.backends.mps.is_available():
                 msg = "Metal was requested but is unavailable"
                 raise RuntimeError(msg)
             return torch.device("mps")
-        msg = "Harmonizer requires CUDA or Metal acceleration"
+        if requested is None or requested == "cpu":
+            return torch.device("cpu")
+        msg = f"Unsupported Harmonizer device: {requested}"
         raise RuntimeError(msg)
 
     def _prepare_composite(
@@ -258,91 +299,6 @@ class HarmonizerAppearanceHarmonizer:
             composite,
         )
         return cast("NDArray[np.uint8]", composite)
-
-    @staticmethod
-    def _restore_global(
-        composite: NDArray[np.uint8],
-        alpha: NDArray[np.uint8],
-        arguments: list[float],
-    ) -> NDArray[np.uint8]:
-        if len(arguments) != GLOBAL_ARGUMENT_COUNT:
-            msg = "Harmonizer must predict six global arguments"
-            raise ValueError(msg)
-        temperature, brightness, contrast, saturation, highlight, shadow = np.clip(
-            arguments,
-            -1.0,
-            1.0,
-        )
-        temperature_gains = np.array(
-            [1.0 + 0.15 * temperature, 1.0, 1.0 - 0.15 * temperature],
-            dtype=np.float32,
-        )
-        brightness_scale = 1.0 / (1.0 - brightness + 1e-6) if brightness >= 0 else 1.0 + brightness
-        brightness_scale = float(
-            np.clip(brightness_scale, MINIMUM_GLOBAL_SCALE, MAXIMUM_GLOBAL_SCALE),
-        )
-        contrast_scale = (
-            255.0 / (256.0 - np.floor(contrast * 255.0)) if contrast > 0 else 1.0 + contrast
-        )
-        contrast_scale = float(
-            np.clip(contrast_scale, MINIMUM_GLOBAL_SCALE, MAXIMUM_GLOBAL_SCALE),
-        )
-        saturation_scale = float(
-            np.clip(1.0 + saturation, MINIMUM_GLOBAL_SCALE, MAXIMUM_GLOBAL_SCALE),
-        )
-        saturation_matrix = np.eye(RGB_CHANNELS, dtype=np.float32) * saturation_scale + np.outer(
-            np.ones(RGB_CHANNELS, dtype=np.float32), LUMINANCE_WEIGHTS
-        ) * (1.0 - saturation_scale)
-        matrix = saturation_matrix @ np.diag(temperature_gains) * brightness_scale * contrast_scale
-        offset = np.full(
-            (RGB_CHANNELS, 1),
-            127.5 * (1.0 - contrast_scale),
-            dtype=np.float32,
-        )
-        transformed = cv2.transform(composite, np.concatenate((matrix, offset), axis=1))
-        values = np.linspace(0.0, 1.0, 256, dtype=np.float32)
-        values = 1.0 - np.power(1.0 - values + 1e-9, highlight + 1.0)
-        values = np.power(values + 1e-9, -shadow + 1.0)
-        lookup = np.rint(np.clip(values, 0.0, 1.0) * 255.0).astype(np.uint8)
-        transformed = cv2.LUT(transformed, lookup)
-        weight = alpha.astype(np.float32) / 255.0
-        restored = cv2.blendLinear(transformed, composite, weight, 1.0 - weight)
-        cv2.copyTo(composite, np.equal(alpha, 0).astype(np.uint8), restored)
-        cv2.copyTo(
-            transformed,
-            np.equal(alpha, OPAQUE_ALPHA).astype(np.uint8),
-            restored,
-        )
-        return cast("NDArray[np.uint8]", restored)
-
-    def _prediction_due(self, captured_at: float) -> bool:
-        previous_at = self._last_prediction_at
-        return (
-            self._target_arguments is None
-            or previous_at is None
-            or captured_at - previous_at >= HARMONIZER_PREDICTION_INTERVAL_MS
-        )
-
-    def _smooth_arguments(self, captured_at: float) -> list[float]:
-        target = self._target_arguments
-        if target is None:
-            msg = "Harmonizer did not predict global arguments"
-            raise RuntimeError(msg)
-        previous = self._arguments
-        previous_at = self._last_frame_at
-        if previous is None or previous_at is None:
-            self._arguments = target
-            self._last_frame_at = captured_at
-            return target
-        elapsed_frames = max(captured_at - previous_at, 0.0) / HARMONIZER_FRAME_INTERVAL_MS
-        retention = HARMONIZER_FRAME_RETENTION**elapsed_frames
-        smoothed = [
-            retention * old + (1.0 - retention) * new
-            for old, new in zip(previous, target, strict=True)
-        ]
-        self._arguments = smoothed
-        self._last_frame_at = captured_at
-        return smoothed
 
     @staticmethod
     def _validate_rgb(image: NDArray[np.uint8], *, name: str) -> None:

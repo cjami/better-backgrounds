@@ -12,4 +12,5 @@
 Better Backgrounds supplies the official checkpoint externally and uses this subset only for its
 non-commercial hackathon build. The implementation has been modernised for the current runtime,
 uses the separately packaged EfficientNet-PyTorch backbone, and supplies six global controls to the
-application's optimized affine and tone renderer.
+application's session-compiled native renderer. That renderer preserves the trained filter order and
+equations within bounded 8-bit interpolation error without retaining a per-frame Torch workload.

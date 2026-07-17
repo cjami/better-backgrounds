@@ -464,6 +464,7 @@ class NativeLivePreview(QWidget):
         self._invalid_matte_count = 0
         self._active_device = "cpu"
         self._internal_size = 360
+        self._harmonization_requested = False
         self._initialize_composition_state()
         self._capture_rate = SlidingFrameRate()
         self._display_rate = SlidingFrameRate()
@@ -615,10 +616,18 @@ class NativeLivePreview(QWidget):
     def set_harmonization(self, settings: HarmonizationSettings) -> None:
         """Apply the room-scoped experimental global harmonization switch."""
         self._surface.set_harmonization(settings)
+        self._harmonization_requested = settings.active
         if settings.active:
-            self._prepare_harmonizer()
+            engine = self._engine
+            live = engine is not None and engine.ready
+            if live:
+                self._prepare_harmonizer()
             self.harmonization_status_changed.emit(
-                "Global harmonization enabled; preparing the external checkpoint…",
+                (
+                    "Global harmonization enabled; preparing the external checkpoint…"
+                    if live
+                    else "Global harmonization queued until MatAnyone startup completes."
+                ),
             )
         else:
             self.harmonization_status_changed.emit(
@@ -730,6 +739,8 @@ class NativeLivePreview(QWidget):
                 self._active_device = event.capabilities.device_type
                 self._internal_size = event.selected_internal_size
                 self._invalid_matte_count = 0
+                if self._harmonization_requested:
+                    self._prepare_harmonizer()
                 device = event.capabilities.device_type.upper()
                 self._set_state("live", f"Live · MatAnyone 2 · {device}")
             elif isinstance(event, CompletedMatte):

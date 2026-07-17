@@ -166,6 +166,7 @@ files = [
     "src/better_backgrounds/compositor.py",
     "src/better_backgrounds/frame_ring.py",
     "src/better_backgrounds/harmonization.py",
+    "src/better_backgrounds/harmonizer_filters.py",
     "src/better_backgrounds/input_camera.py",
     "src/better_backgrounds/live_matting.py",
     "src/better_backgrounds/matting.py",

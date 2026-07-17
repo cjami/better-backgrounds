@@ -51,7 +51,7 @@ class MattingConfig(BaseModel):
     warmup_iterations: int = Field(default=10, ge=1, le=30)
     calibrate: bool = False
     latency_budget_ms: float = Field(default=66.0, gt=0, le=1_000, allow_inf_nan=False)
-    calibration_frames: int = Field(default=3, ge=2, le=10)
+    calibration_frames: int = Field(default=20, ge=2, le=120)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,3 +220,18 @@ def choose_internal_size(
         and p95_latency_by_size[size] <= budget_ms
     ]
     return cast("InternalSize", max(eligible, default=INTERNAL_SIZES[0]))
+
+
+def calibration_p95_latency(latencies_ms: list[float]) -> float:
+    """Interpolate p95 from enough synchronized samples to reject isolated jitter."""
+    if not latencies_ms or any(
+        not math.isfinite(latency) or latency < 0 for latency in latencies_ms
+    ):
+        msg = "calibration latencies must be finite and non-negative"
+        raise ValueError(msg)
+    ordered = sorted(latencies_ms)
+    rank = (len(ordered) - 1) * 0.95
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    fraction = rank - lower
+    return ordered[lower] + ((ordered[upper] - ordered[lower]) * fraction)

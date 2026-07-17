@@ -116,14 +116,15 @@ stage in Adjust. The upstream non-commercial research checkpoint is not
 distributed with the application: point
 `BETTER_BACKGROUNDS_HARMONIZER_CHECKPOINT` at an external `harmonizer.pth` file
 before starting the desktop application. Harmonizer predicts six interpretable
-global adjustments at a bounded rate and applies the smoothed result to every
-exact frame. A time-based exponential moving average prevents abrupt colour
-jumps, while edge decontamination is automatic.
-The predictor runs in FP32 on CUDA or Metal, while an optimized affine and tone
-renderer applies the smoothed controls without a competing per-frame GPU context.
+global adjustments from three startup samples, takes their median, and locks the
+result until the camera or background changes. The one-shot predictor runs in
+FP32 on CPU and its checkpoint preparation remains queued until MatAnyone
+finishes startup calibration. A session-compiled native renderer preserves
+Harmonizer's trained six-filter sequence on every exact frame, with a short
+automatic transition and automatic edge decontamination.
 Compare retains the standard exact-frame composite, reports measured frame cost,
-and immediately falls back to that baseline when the checkpoint, accelerator,
-or inference pass is unavailable.
+and immediately falls back to that baseline when the checkpoint or inference
+pass is unavailable.
 The superseded hand-authored effects have been removed rather than retained as
 parallel product controls.
 Harmonization must not become the default until both real SHARP and MatAnyone

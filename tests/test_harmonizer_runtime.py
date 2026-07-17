@@ -39,8 +39,9 @@ class StubHarmonizerModel(HarmonizerInferenceModel):
         assert mask.ndim == 4
         self.predictions += 1
         value = 0.2 if self.predictions == 1 else 0.8
-        zero = composite.new_zeros((1, 1))
-        return [zero, composite.new_full((1, 1), value), zero, zero, zero, zero]
+        shape = (composite.shape[0], 1)
+        zero = composite.new_zeros(shape)
+        return [zero, composite.new_full(shape, value), zero, zero, zero, zero]
 
 
 def test_external_checkpoint_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,10 +74,10 @@ def test_missing_checkpoint_falls_back_to_standard_composite(tmp_path: Path) -> 
     assert "not found" in harmonizer.error
 
 
-def test_global_arguments_are_predicted_at_ten_hz_and_smoothed_each_frame(
+def test_global_arguments_are_aggregated_once_and_transitioned_each_frame(
     tmp_path: Path,
 ) -> None:
-    """Reduce model work without introducing abrupt global colour jumps."""
+    """Lock median session controls without introducing abrupt colour jumps."""
     checkpoint = tmp_path / "harmonizer.pth"
     model = StubHarmonizerModel()
     torch.save(model.state_dict(), checkpoint)
@@ -93,26 +94,22 @@ def test_global_arguments_are_predicted_at_ten_hz_and_smoothed_each_frame(
     harmonizer.configure(HarmonizationSettings(global_harmonization=True))
 
     first = harmonizer.apply(source, alpha, background, captured_at=0.0)
-    second = harmonizer.apply(source, alpha, background, captured_at=1_000.0 / 30.0)
-    third = harmonizer.apply(source, alpha, background, captured_at=2_000.0 / 30.0)
-    harmonizer.apply(source, alpha, background, captured_at=5_000.0 - 1_000.0 / 30.0)
-    fourth = harmonizer.apply(source, alpha, background, captured_at=5_000.0)
-    fifth = harmonizer.apply(source, alpha, background, captured_at=5_000.0 + 1_000.0 / 30.0)
+    second = harmonizer.apply(source, alpha, background, captured_at=100.0)
+    third = harmonizer.apply(source, alpha, background, captured_at=200.0)
+    fourth = harmonizer.apply(source, alpha, background, captured_at=1_000.0)
+    fifth = harmonizer.apply(source, alpha, background, captured_at=5_000.0)
 
-    assert first.applied
-    assert second.applied
+    assert not first.applied
+    assert not second.applied
     assert third.applied
     assert fourth.applied
     assert fifth.applied
-    assert model.predictions == 2
-    assert first.image is not None
-    assert second.image is not None
+    assert model.predictions == 1
+    assert first.image is None
+    assert second.image is None
     assert third.image is not None
     assert fourth.image is not None
     assert fifth.image is not None
-    assert np.array_equal(first.image[:, :2], background[:, :2])
-    first_value = int(first.image[0, 2, 0])
-    assert np.all(second.image[:, 2:6] == first.image[:, 2:6])
-    assert np.all(third.image[:, 2:6] == first.image[:, 2:6])
-    assert np.all(fourth.image[:, 2:6] > first_value)
+    assert np.array_equal(third.image[:, :2], background[:, :2])
+    assert np.all(fourth.image[:, 2:6] > third.image[:, 2:6])
     assert np.all(fifth.image[:, 2:6] >= fourth.image[:, 2:6])
