@@ -32,6 +32,7 @@ from better_backgrounds.reconstruction.sharp.worker import (
     SharpCheckpointWorker,
     watch_control,
 )
+from better_backgrounds.reconstruction.splat_worker import SplatImportWorker
 
 if TYPE_CHECKING:
     import numpy as np
@@ -160,6 +161,35 @@ def sharp_build_command(
         source_kind=source_kind,
         device=_sharp_device(device),
         checkpoint_path=checkpoint or installer.checkpoint_path,
+        scene_cache_root=scene_cache or cache_root / "scenes-v1",
+        catalogue_path=catalogue or data_root / "scene-catalogue-v1.json",
+    )
+    watch_control(actual_job_id, worker.cancel)
+    raise typer.Exit(worker.run())
+
+
+@app.command("splat-import")
+def splat_import_command(
+    source: Annotated[Path, typer.Argument(exists=True, dir_okay=False, resolve_path=True)],
+    job_id: Annotated[str | None, typer.Option(help="Stable worker job identifier.")] = None,
+    scene_cache: Annotated[
+        Path | None,
+        typer.Option(file_okay=False, resolve_path=True),
+    ] = None,
+    catalogue: Annotated[
+        Path | None,
+        typer.Option(dir_okay=False, resolve_path=True),
+    ] = None,
+) -> None:
+    """Import one local Gaussian PLY or Streamed SOG through the worker boundary."""
+    if source.suffix.lower() not in {".ply", ".ssog", ".zip"}:
+        msg = "Choose a Gaussian PLY or Streamed SOG .ssog/.zip archive."
+        raise typer.BadParameter(msg, param_hint="source")
+    cache_root, data_root = _application_roots()
+    actual_job_id = job_id or uuid4().hex
+    worker = SplatImportWorker(
+        job_id=actual_job_id,
+        source=source,
         scene_cache_root=scene_cache or cache_root / "scenes-v1",
         catalogue_path=catalogue or data_root / "scene-catalogue-v1.json",
     )

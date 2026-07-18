@@ -25,6 +25,7 @@ from better_backgrounds.desktop.pages.common import card as _card
 from better_backgrounds.desktop.pages.common import label as _label
 
 if TYPE_CHECKING:
+    from better_backgrounds.reconstruction import SplatDiagnostics, SplatSelection
     from better_backgrounds.reconstruction.sharp import SceneImageDiagnostics, SceneImageSelection
 
 
@@ -41,9 +42,10 @@ COMPLETE_PROGRESS = 100
 
 
 class BuildPage(QWidget):
-    """Upload and process one room image within a self-contained tab."""
+    """Build from one room image or import one Gaussian scene."""
 
     image_requested = Signal()
+    splat_requested = Signal()
     build_requested = Signal(str)
     cancel_requested = Signal()
     retry_requested = Signal()
@@ -59,6 +61,8 @@ class BuildPage(QWidget):
         self._create_upload()
         self._create_review()
         self._create_progress()
+        self._active_stage_order = STAGE_ORDER
+        self._importing = False
 
     def _create_upload(self) -> None:
         page = QWidget()
@@ -70,12 +74,12 @@ class BuildPage(QWidget):
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         layout.addWidget(
-            _label("Turn one photo into a room", object_name="heroTitle"),
+            _label("Add a spatial room", object_name="heroTitle"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         subtitle = _label(
-            "Choose a clear room photo. Apple SHARP creates a metric Gaussian scene "
-            "for nearby viewpoint changes, entirely on this device.",
+            "Build locally from one room photo, or import an existing Gaussian splat "
+            "directly into your room library.",
             object_name="subtitle",
             word_wrap=True,
         )
@@ -99,8 +103,12 @@ class BuildPage(QWidget):
         choose.setObjectName("dropAction")
         choose.clicked.connect(self.image_requested)
         drop_layout.addWidget(choose, alignment=Qt.AlignmentFlag.AlignHCenter)
+        import_splat = QPushButton("Import Gaussian splat")
+        import_splat.setObjectName("quietAction")
+        import_splat.clicked.connect(self.splat_requested)
+        drop_layout.addWidget(import_splat, alignment=Qt.AlignmentFlag.AlignHCenter)
         drop_layout.addWidget(
-            _label("JPEG  /  PNG  /  WEBP  ·  UPLOAD FIRST", object_name="feedMeta"),
+            _label("JPEG  /  PNG  /  WEBP  /  PLY  /  STREAMED SOG", object_name="feedMeta"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         layout.addWidget(drop, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -140,10 +148,13 @@ class BuildPage(QWidget):
             ("alpha", "Transparency"),
         )
         self._diagnostic_values: dict[str, QLabel] = {}
+        self._diagnostic_titles: dict[str, QLabel] = {}
         for key, title in diagnostics:
             row = QHBoxLayout()
             row.addWidget(_label("✓", object_name="success"))
-            row.addWidget(_label(title))
+            title_label = _label(title)
+            self._diagnostic_titles[key] = title_label
+            row.addWidget(title_label)
             row.addStretch()
             value = _label("—", object_name="muted")
             self._diagnostic_values[key] = value
@@ -158,7 +169,8 @@ class BuildPage(QWidget):
         self._model_status = _label("SHARP model status pending", object_name="muted")
         footer.addWidget(self._model_status)
         footer.addStretch()
-        footer.addWidget(_label("Device", object_name="muted"))
+        self._device_label = _label("Device", object_name="muted")
+        footer.addWidget(self._device_label)
         self._device = QComboBox()
         self._device.setObjectName("sharpDevice")
         self._device.setAccessibleName("SHARP inference device")
@@ -241,6 +253,7 @@ class BuildPage(QWidget):
         diagnostics: SceneImageDiagnostics | None = None,
     ) -> None:
         """Show the oriented image, dimensions, and pre-inference warnings."""
+        self._set_review_mode(importing=False)
         self._selection_name.setText(selection.display_name)
         self._content.setCurrentIndex(1)
         if selection.source_path is None or diagnostics is None:
@@ -284,9 +297,49 @@ class BuildPage(QWidget):
         )
         self._build_action.setEnabled(True)
 
+    def show_splat_review(
+        self,
+        selection: SplatSelection,
+        diagnostics: SplatDiagnostics | None = None,
+    ) -> None:
+        """Show direct-import scene metadata without decoding a pixel preview."""
+        self._set_review_mode(importing=True)
+        self._selection_name.setText(selection.display_name)
+        self._content.setCurrentIndex(1)
+        self._image_preview.clear()
+        self._image_preview.setText("Gaussian splat ready for managed import")
+        self._readiness.setText("READY" if diagnostics is not None else "SPLAT UNAVAILABLE")
+        self._set_label_style(
+            self._readiness,
+            "success" if diagnostics is not None else "danger",
+        )
+        self._review_summary.setText(
+            "The scene will be copied into the local library; the source stays untouched."
+        )
+        if diagnostics is None:
+            for value in self._diagnostic_values.values():
+                value.setText("—")
+            self._build_action.setEnabled(False)
+            return
+        size_mib = diagnostics.file_size / 1024**2
+        values = {
+            "dimensions": f"{diagnostics.gaussian_count:,}",
+            "format": diagnostics.encoding,
+            "orientation": (
+                f"{diagnostics.lod_levels} LOD levels / {diagnostics.resource_count} files"
+                if diagnostics.layout == "streamed-sog"
+                else diagnostics.layout.title()
+            ),
+            "focal": diagnostics.framing,
+            "alpha": f"{size_mib:.1f} MiB",
+        }
+        for key, value in values.items():
+            self._diagnostic_values[key].setText(value)
+        self._build_action.setEnabled(True)
+
     def set_image_error(self, message: str) -> None:
         """Show an actionable decode or validation failure."""
-        self._readiness.setText("IMAGE UNAVAILABLE")
+        self._readiness.setText("SPLAT UNAVAILABLE" if self._importing else "IMAGE UNAVAILABLE")
         self._set_label_style(self._readiness, "danger")
         self._review_summary.setText(message)
         self._build_action.setEnabled(False)
@@ -297,8 +350,17 @@ class BuildPage(QWidget):
             "SHARP model ready offline" if ready else "SHARP model needs preparation"
         )
 
-    def reset_progress(self) -> None:
+    def reset_progress(self, *, importing: bool = False) -> None:
         """Prepare the progress surface for a new job."""
+        self._active_stage_order = (
+            (
+                ("validation", "Reading scene"),
+                ("ply_validation", "Validating splats"),
+                ("publication", "Publishing scene"),
+            )
+            if importing
+            else STAGE_ORDER
+        )
         self._content.setCurrentIndex(2)
         self._status.setText("Preparing the build")
         self._progress.setRange(0, 100)
@@ -308,8 +370,10 @@ class BuildPage(QWidget):
         self._retry.hide()
         self._new_build.hide()
         self._cancel.show()
+        active_keys = {key for key, _title in self._active_stage_order}
         for key, title in STAGE_ORDER:
             label = self._stage_labels[key]
+            label.setVisible(key in active_keys)
             label.setText(f"○  {title}")
             self._set_label_style(label, "stagePending")
 
@@ -322,10 +386,10 @@ class BuildPage(QWidget):
             self._progress.setRange(0, 100)
             self._progress.setValue(round(progress * 100))
         active_index = next(
-            (index for index, item in enumerate(STAGE_ORDER) if item[0] == stage),
+            (index for index, item in enumerate(self._active_stage_order) if item[0] == stage),
             0,
         )
-        for index, (key, title) in enumerate(STAGE_ORDER):
+        for index, (key, title) in enumerate(self._active_stage_order):
             label = self._stage_labels[key]
             if index < active_index:
                 label.setText(f"✓  {title}")
@@ -359,13 +423,33 @@ class BuildPage(QWidget):
         self._cancel.hide()
         self._new_build.show()
         self._log.append("> Runtime room is ready")
-        for key, title in STAGE_ORDER:
+        for key, title in self._active_stage_order:
             label = self._stage_labels[key]
             label.setText(f"✓  {title}")
             self._set_label_style(label, "stageDone")
 
     def _emit_build(self) -> None:
         self.build_requested.emit(str(self._device.currentData()))
+
+    def _set_review_mode(self, *, importing: bool) -> None:
+        self._importing = importing
+        titles = (
+            ("Splats", "Encoding", "Layout", "Framing", "File size")
+            if importing
+            else (
+                "Oriented dimensions",
+                "Format",
+                "EXIF orientation",
+                "Focal metadata",
+                "Transparency",
+            )
+        )
+        for key, title in zip(self._diagnostic_titles, titles, strict=True):
+            self._diagnostic_titles[key].setText(title)
+        self._model_status.setVisible(not importing)
+        self._device_label.setVisible(not importing)
+        self._device.setVisible(not importing)
+        self._build_action.setText("Import room" if importing else "Build room")
 
     @staticmethod
     def _set_label_style(label: QLabel, object_name: str) -> None:

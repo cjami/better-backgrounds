@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   SceneRenderer,
   buildDepthProxyGeometry,
+  buildViewDepthProxyGeometry,
+  collectDepthProxyCenters,
   depthOfFieldForStrength,
   harmonizationViewpointKey,
 } from '../src/main.mjs';
@@ -15,7 +17,8 @@ const viewpoint = {
 
 test('normal depth of field stays locked to subject depth', () => {
   const renderer = Object.create(SceneRenderer.prototype);
-  renderer.metricDepthAvailable = true;
+  renderer.sceneEntity = {};
+  renderer.depthProxyEntity = {};
   renderer.viewpoint = viewpoint;
   renderer.cameraFrame = {
     debug: null,
@@ -119,9 +122,72 @@ test('SHARP raster Gaussians produce a bounded depth-only proxy', () => {
   assert.deepEqual(Array.from(geometry.indices), [0, 2, 1, 1, 2, 3]);
 });
 
+test('generic splat centers produce a view-dependent depth proxy', () => {
+  const centers = new Float32Array([
+    -1, -1, 3,
+    1, -1, 3,
+    -1, 1, 3,
+    1, 1, 3,
+  ]);
+  const geometry = buildViewDepthProxyGeometry(
+    centers,
+    (x, y, depth) => ({ x: (x + 2) / 2, y: (y + 2) / 2, depth }),
+    (x, y, depth) => ({ x: x - 0.5, y: y - 0.5, z: depth }),
+    2,
+    2,
+    2,
+  );
+
+  assert.equal(geometry.columns, 2);
+  assert.equal(geometry.rows, 2);
+  assert.deepEqual(Array.from(geometry.indices), [0, 2, 1, 1, 2, 3]);
+});
+
+test('streamed SOG depth sampling combines currently resident LOD chunks', () => {
+  const first = { centers: new Float32Array([0, 0, 1, 1, 0, 1]) };
+  const second = { centers: new Float32Array([0, 1, 2, 1, 1, 2]) };
+  const environment = { centers: new Float32Array([0, 2, 4]) };
+  const resource = {
+    octree: {
+      fileResources: new Map([[0, first], [1, second]]),
+      environmentResource: environment,
+    },
+  };
+
+  const centers = collectDepthProxyCenters(resource, 5);
+
+  assert.deepEqual(Array.from(centers), [
+    0, 0, 1,
+    1, 0, 1,
+    0, 1, 2,
+    1, 1, 2,
+    0, 2, 4,
+  ]);
+});
+
+test('generic depth proxies do not bridge large depth discontinuities', () => {
+  const centers = new Float32Array([
+    -1, -1, 1,
+    1, -1, 1,
+    -1, 1, 1,
+    1, 1, 10,
+  ]);
+  const geometry = buildViewDepthProxyGeometry(
+    centers,
+    (x, y, depth) => ({ x: (x + 2) / 2, y: (y + 2) / 2, depth }),
+    (x, y, depth) => ({ x, y, z: depth }),
+    2,
+    2,
+    2,
+  );
+
+  assert.deepEqual(Array.from(geometry.indices), [0, 2, 1]);
+});
+
 test('zero background blur keeps a stable depth pipeline with a zero radius', () => {
   const renderer = Object.create(SceneRenderer.prototype);
-  renderer.metricDepthAvailable = true;
+  renderer.sceneEntity = {};
+  renderer.depthProxyEntity = {};
   renderer.viewpoint = { depth_of_field: { blur_strength: 0 } };
   renderer.cameraFrame = { debug: null, dof: {}, rendering: {}, update() {} };
 
@@ -141,4 +207,25 @@ test('interactive renderer remains live when requesting a scene frame', () => {
 
   assert.equal(renderer.app.autoRender, true);
   assert.equal(renderer.app.renderNextFrame, true);
+});
+
+test('interactive depth-proxy refreshes are debounced while cached snapshots rebuild now', async () => {
+  const interactive = Object.create(SceneRenderer.prototype);
+  interactive.cacheSceneFrames = false;
+  interactive.depthProxyRefreshTimer = null;
+  const interactiveCalls = [];
+  interactive.rebuildViewDepthProxy = (force) => interactiveCalls.push(force);
+
+  interactive.refreshViewDepthProxy(false);
+  interactive.refreshViewDepthProxy(true);
+  await new Promise((resolve) => setTimeout(resolve, 140));
+
+  assert.deepEqual(interactiveCalls, [true]);
+
+  const cached = Object.create(SceneRenderer.prototype);
+  cached.cacheSceneFrames = true;
+  const cachedCalls = [];
+  cached.rebuildViewDepthProxy = (force) => cachedCalls.push(force);
+  cached.refreshViewDepthProxy(true);
+  assert.deepEqual(cachedCalls, [true]);
 });

@@ -14,6 +14,8 @@ const DEPTH_PROXY_COLUMNS = 384;
 const DEPTH_PROXY_SAMPLE_RANK = 3;
 const DEPTH_PROXY_MAX_RELATIVE_STEP = 0.2;
 const DEPTH_PROXY_MIN_STEP_METRES = 0.5;
+const DEPTH_PROXY_MAX_CENTERS = 1_000_000;
+const DEPTH_PROXY_REFRESH_DELAY_MS = 120;
 
 const depthOfFieldForStrength = (strength, fieldOfView = REFERENCE_FIELD_OF_VIEW) => {
   const blurStrength = Math.min(1, Math.max(0, strength));
@@ -148,6 +150,137 @@ const buildDepthProxyGeometry = (gsplatData, requestedColumns = DEPTH_PROXY_COLU
   return { columns, rows, positions, indices: new Uint32Array(indices) };
 };
 
+const buildViewDepthProxyGeometry = (
+  centers,
+  projectCenter,
+  unprojectDepth,
+  viewportWidth,
+  viewportHeight,
+  requestedColumns = DEPTH_PROXY_COLUMNS,
+) => {
+  if (!centers || centers.length < 9 || viewportWidth < 2 || viewportHeight < 2) return null;
+  const columns = Math.max(2, Math.min(viewportWidth, Math.trunc(requestedColumns)));
+  const rows = Math.max(2, Math.min(
+    viewportHeight,
+    Math.round((viewportHeight / viewportWidth) * columns),
+  ));
+  const depths = new Float32Array(columns * rows);
+  const valid = new Uint8Array(columns * rows);
+  const positions = new Float32Array(columns * rows * 3);
+  const rankedDepths = Array.from(
+    { length: DEPTH_PROXY_SAMPLE_RANK },
+    () => new Float32Array(columns * rows).fill(Number.POSITIVE_INFINITY),
+  );
+  const centerCount = Math.floor(centers.length / 3);
+  const stride = Math.max(1, Math.ceil(centerCount / DEPTH_PROXY_MAX_CENTERS));
+  for (let centerIndex = 0; centerIndex < centerCount; centerIndex += stride) {
+    const offset = centerIndex * 3;
+    const projected = projectCenter(centers[offset], centers[offset + 1], centers[offset + 2]);
+    if (
+      !projected
+      || !Number.isFinite(projected.x)
+      || !Number.isFinite(projected.y)
+      || !Number.isFinite(projected.depth)
+      || projected.depth <= 0
+    ) continue;
+    const column = Math.floor(projected.x * columns / viewportWidth);
+    const row = Math.floor(projected.y * rows / viewportHeight);
+    if (column < 0 || column >= columns || row < 0 || row >= rows) continue;
+    const targetIndex = row * columns + column;
+    for (let rank = 0; rank < DEPTH_PROXY_SAMPLE_RANK; rank += 1) {
+      if (projected.depth >= rankedDepths[rank][targetIndex]) continue;
+      for (let move = DEPTH_PROXY_SAMPLE_RANK - 1; move > rank; move -= 1) {
+        rankedDepths[move][targetIndex] = rankedDepths[move - 1][targetIndex];
+      }
+      rankedDepths[rank][targetIndex] = projected.depth;
+      break;
+    }
+  }
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const targetIndex = row * columns + column;
+      const rankedDepth = rankedDepths[DEPTH_PROXY_SAMPLE_RANK - 1][targetIndex];
+      const depth = Number.isFinite(rankedDepth) ? rankedDepth : rankedDepths[0][targetIndex];
+      if (!Number.isFinite(depth)) continue;
+      const point = unprojectDepth(
+        (column + 0.5) * viewportWidth / columns,
+        (row + 0.5) * viewportHeight / rows,
+        depth,
+      );
+      if (!point) continue;
+      const positionOffset = targetIndex * 3;
+      positions[positionOffset] = point.x;
+      positions[positionOffset + 1] = point.y;
+      positions[positionOffset + 2] = point.z;
+      depths[targetIndex] = depth;
+      valid[targetIndex] = 1;
+    }
+  }
+  const indices = [];
+  const addTriangle = (first, second, third) => {
+    if (!valid[first] || !valid[second] || !valid[third]) return;
+    const nearest = Math.min(depths[first], depths[second], depths[third]);
+    const farthest = Math.max(depths[first], depths[second], depths[third]);
+    const maximumStep = Math.max(
+      DEPTH_PROXY_MIN_STEP_METRES,
+      nearest * DEPTH_PROXY_MAX_RELATIVE_STEP,
+    );
+    if (farthest - nearest <= maximumStep) indices.push(first, second, third);
+  };
+  for (let row = 0; row < rows - 1; row += 1) {
+    for (let column = 0; column < columns - 1; column += 1) {
+      const topLeft = row * columns + column;
+      const topRight = topLeft + 1;
+      const bottomLeft = topLeft + columns;
+      const bottomRight = bottomLeft + 1;
+      addTriangle(topLeft, bottomLeft, topRight);
+      addTriangle(topRight, bottomLeft, bottomRight);
+    }
+  }
+  if (!indices.length) return null;
+  return { columns, rows, positions, indices: new Uint32Array(indices) };
+};
+
+const collectDepthProxyCenters = (
+  resource,
+  maximumCenters = DEPTH_PROXY_MAX_CENTERS,
+) => {
+  if (!resource || maximumCenters < 1) return null;
+  const resources = [];
+  if (resource.centers) resources.push(resource);
+  const octree = resource.octree;
+  if (octree) {
+    for (const loaded of octree.fileResources?.values?.() ?? []) {
+      if (loaded?.centers) resources.push(loaded);
+    }
+    if (octree.environmentResource?.centers) resources.push(octree.environmentResource);
+  }
+  const unique = [...new Set(resources)];
+  const arrays = unique.map((item) => item.centers).filter((centers) => centers?.length >= 3);
+  if (!arrays.length) return null;
+  const totalCenters = arrays.reduce((total, centers) => total + Math.floor(centers.length / 3), 0);
+  if (arrays.length === 1 && totalCenters <= maximumCenters) return arrays[0];
+
+  const sampled = new Float32Array(Math.min(totalCenters, maximumCenters) * 3);
+  let outputCenter = 0;
+  for (const centers of arrays) {
+    const centerCount = Math.floor(centers.length / 3);
+    const quota = Math.max(1, Math.floor(maximumCenters * centerCount / totalCenters));
+    const stride = Math.max(1, centerCount / quota);
+    for (let sample = 0; sample < quota && outputCenter < maximumCenters; sample += 1) {
+      const sourceCenter = Math.min(centerCount - 1, Math.floor(sample * stride));
+      sampled.set(
+        centers.subarray(sourceCenter * 3, sourceCenter * 3 + 3),
+        outputCenter * 3,
+      );
+      outputCenter += 1;
+    }
+  }
+  return outputCenter === sampled.length / 3
+    ? sampled
+    : sampled.slice(0, outputCenter * 3);
+};
+
 const bytesToBase64 = (bytes) => {
   let binary = '';
   const chunkSize = 32_768;
@@ -192,9 +325,14 @@ class SceneRenderer {
     this.cameraFrame = null;
     this.sceneEntity = null;
     this.sceneAsset = null;
+    this.sceneResource = null;
     this.depthProxyEntity = null;
     this.depthProxyMesh = null;
     this.depthProxyMaterial = null;
+    this.depthProxyUsesSceneTransform = false;
+    this.gsplatData = null;
+    this.depthProxyViewpointKey = '';
+    this.depthProxyRefreshTimer = null;
     this.sceneTransformKey = '';
     this.assetId = '';
     this.viewpoint = null;
@@ -207,7 +345,6 @@ class SceneRenderer {
     this.scenePixels = null;
     this.sceneCaptureAttempts = 0;
     this.sceneSettled = false;
-    this.metricDepthAvailable = false;
     this.snapshotRevision = 0;
     this.pendingSnapshotKind = null;
     this.pendingSnapshotRevision = 0;
@@ -258,12 +395,16 @@ class SceneRenderer {
       this.bindInput(canvas);
       window.addEventListener('resize', () => {
         this.app?.resizeCanvas();
+        this.refreshViewDepthProxy(true);
         this.requestSceneFrame();
       });
       this.connectBridge();
       this.app.systems.gsplat.on('frame:ready', (_camera, _layer, ready, loadingCount) => {
         this.sceneSettled = ready && loadingCount === 0;
-        if (this.sceneSettled && this.pendingSnapshotKind) this.requestSceneFrame(1);
+        if (this.sceneSettled) {
+          this.refreshViewDepthProxy();
+          if (this.pendingSnapshotKind) this.requestSceneFrame(1);
+        }
       });
       this.app.systems.gsplat.on('frame:request', () => this.requestSceneFrame(1));
     } catch (error) {
@@ -273,8 +414,8 @@ class SceneRenderer {
   }
 
   connectBridge() {
-    this.bridge.scene_requested.connect((assetId, url, payload, metricDepthAvailable) => {
-      this.loadScene(assetId, url, payload, metricDepthAvailable);
+    this.bridge.scene_requested.connect((assetId, url, payload) => {
+      this.loadScene(assetId, url, payload);
     });
     this.bridge.viewpoint_requested.connect((payload) => this.applyViewpoint(payload));
     this.bridge.reset_requested.connect(() => {
@@ -288,10 +429,9 @@ class SceneRenderer {
     });
   }
 
-  loadScene(assetId, url, payload, metricDepthAvailable = false) {
+  loadScene(assetId, url, payload) {
     if (!this.app || !this.camera) return;
     this.assetId = assetId;
-    this.metricDepthAvailable = metricDepthAvailable;
     this.sceneSettled = false;
     this.removeScene();
     this.applyViewpoint(payload, true);
@@ -306,10 +446,12 @@ class SceneRenderer {
       const entity = new pc.Entity(assetId);
       entity.addComponent('gsplat', { asset: loadedAsset, unified: true });
       this.sceneEntity = entity;
-      this.createDepthProxy(loadedAsset.resource?.gsplatData);
+      this.sceneResource = loadedAsset.resource ?? null;
+      this.gsplatData = this.sceneResource?.gsplatData ?? null;
       this.sceneCaptureAttempts = 0;
-      this.applySceneTransform();
       this.app.root.addChild(entity);
+      this.applySceneTransform();
+      this.createDepthProxy(this.sceneResource);
       this.configureNormalFrame();
       if (this.cacheSceneFrames) this.queueSnapshotRefresh(true);
       else this.requestSceneFrame();
@@ -331,6 +473,12 @@ class SceneRenderer {
     this.depthProxyEntity = null;
     this.depthProxyMesh = null;
     this.depthProxyMaterial = null;
+    this.depthProxyUsesSceneTransform = false;
+    this.gsplatData = null;
+    this.sceneResource = null;
+    this.depthProxyViewpointKey = '';
+    if (this.depthProxyRefreshTimer) clearTimeout(this.depthProxyRefreshTimer);
+    this.depthProxyRefreshTimer = null;
     this.sceneEntity?.destroy();
     this.sceneEntity = null;
     if (this.sceneAsset && this.app) {
@@ -344,10 +492,20 @@ class SceneRenderer {
     this.harmonizationViewpointKey = '';
   }
 
-  createDepthProxy(gsplatData) {
-    if (!this.metricDepthAvailable || !this.app) return;
-    const geometry = buildDepthProxyGeometry(gsplatData);
-    if (!geometry) return;
+  createDepthProxy(resource) {
+    if (!this.app || !this.sceneEntity) return;
+    const intrinsicGeometry = buildDepthProxyGeometry(resource?.gsplatData);
+    if (intrinsicGeometry) {
+      this.installDepthProxy(intrinsicGeometry, true);
+      return;
+    }
+    this.rebuildViewDepthProxy(true);
+  }
+
+  installDepthProxy(geometry, usesSceneTransform) {
+    this.depthProxyEntity?.destroy();
+    this.depthProxyMesh?.destroy();
+    this.depthProxyMaterial?.destroy();
 
     const mesh = new pc.Mesh(this.app.graphicsDevice);
     mesh.setPositions(geometry.positions);
@@ -359,14 +517,68 @@ class SceneRenderer {
     material.depthWrite = true;
     material.update();
 
-    const entity = new pc.Entity('sharp-depth-proxy');
+    const entity = new pc.Entity('splat-depth-proxy');
     const meshInstance = new pc.MeshInstance(mesh, material, entity);
     meshInstance.shaderPassMask &= ~(1 << pc.SHADER_FORWARD);
     entity.addComponent('render', { meshInstances: [meshInstance] });
     this.depthProxyEntity = entity;
     this.depthProxyMesh = mesh;
     this.depthProxyMaterial = material;
+    this.depthProxyUsesSceneTransform = usesSceneTransform;
     this.app.root.addChild(entity);
+    if (usesSceneTransform) this.applySceneTransform(true);
+    this.configureNormalFrame();
+  }
+
+  rebuildViewDepthProxy(force = false) {
+    if (!this.sceneResource || !this.sceneEntity || !this.camera || !this.app) return;
+    const octree = this.sceneResource.octree;
+    const sourceKey = octree
+      ? `${[...(octree.fileResources?.keys?.() ?? [])].sort((a, b) => a - b).join(',')}:${Boolean(octree.environmentResource)}`
+      : `single:${this.sceneResource.centersVersion ?? 0}`;
+    const key = `${harmonizationViewpointKey(this.viewpoint)}:${sourceKey}`;
+    if (!force && key === this.depthProxyViewpointKey) return;
+    this.depthProxyViewpointKey = key;
+    const centers = collectDepthProxyCenters(this.sceneResource);
+    if (!centers) return;
+    const worldTransform = this.sceneEntity.getWorldTransform();
+    const cameraPosition = this.camera.getPosition();
+    const cameraForward = this.camera.forward;
+    const local = new pc.Vec3();
+    const world = new pc.Vec3();
+    const delta = new pc.Vec3();
+    const screen = new pc.Vec3();
+    const output = new pc.Vec3();
+    const device = this.app.graphicsDevice;
+    const width = device.clientRect.width;
+    const height = device.clientRect.height;
+    const geometry = buildViewDepthProxyGeometry(
+      centers,
+      (x, y, z) => {
+        local.set(x, y, z);
+        worldTransform.transformPoint(local, world);
+        delta.sub2(world, cameraPosition);
+        if (delta.dot(cameraForward) <= 0) return null;
+        this.camera.camera.worldToScreen(world, screen);
+        return { x: screen.x, y: screen.y, depth: delta.length() };
+      },
+      (x, y, depth) => this.camera.camera.screenToWorld(x, y, depth, output),
+      width,
+      height,
+    );
+    if (geometry) this.installDepthProxy(geometry, false);
+  }
+
+  refreshViewDepthProxy(force = false) {
+    if (this.cacheSceneFrames) {
+      this.rebuildViewDepthProxy(force);
+      return;
+    }
+    if (this.depthProxyRefreshTimer) clearTimeout(this.depthProxyRefreshTimer);
+    this.depthProxyRefreshTimer = setTimeout(() => {
+      this.depthProxyRefreshTimer = null;
+      this.rebuildViewDepthProxy(force);
+    }, DEPTH_PROXY_REFRESH_DELAY_MS);
   }
 
   applyViewpoint(payload, rememberAsReset = false) {
@@ -396,6 +608,7 @@ class SceneRenderer {
         crop.bottom - crop.top,
       );
       this.applySceneTransform();
+      this.refreshViewDepthProxy();
       this.updateSubjectGuide();
       this.snapshotRevision += 1;
       const nextReferenceKey = harmonizationViewpointKey(current);
@@ -514,6 +727,7 @@ class SceneRenderer {
     const rotation = this.camera.getRotation();
     this.viewpoint.orientation = { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w };
     this.bridge.submit_viewpoint(JSON.stringify(this.viewpoint));
+    this.refreshViewDepthProxy();
   }
 
   updateSubjectGuide() {
@@ -533,7 +747,7 @@ class SceneRenderer {
     const requestedStrength = blurStrengthOverride ?? settings.blur_strength;
     const blurStrength = Math.min(1, Math.max(0, requestedStrength));
     const effect = depthOfFieldForStrength(blurStrength, this.viewpoint.field_of_view);
-    const enabled = this.metricDepthAvailable;
+    const enabled = Boolean(this.sceneEntity && this.depthProxyEntity);
     this.cameraFrame.debug = null;
     this.cameraFrame.dof.enabled = enabled;
     this.cameraFrame.dof.nearBlur = true;
@@ -562,14 +776,16 @@ class SceneRenderer {
     this.requestSceneFrame(2, next.kind, next.revision);
   }
 
-  applySceneTransform() {
+  applySceneTransform(force = false) {
     if (!this.sceneEntity || !this.viewpoint) return;
     const transform = this.viewpoint.scene_transform;
     const key = JSON.stringify(transform);
-    if (key === this.sceneTransformKey) return;
+    if (!force && key === this.sceneTransformKey) return;
     const translation = transform.translation;
     const orientation = transform.orientation;
-    for (const entity of [this.sceneEntity, this.depthProxyEntity]) {
+    const entities = [this.sceneEntity];
+    if (this.depthProxyUsesSceneTransform) entities.push(this.depthProxyEntity);
+    for (const entity of entities) {
       if (!entity) continue;
       entity.setLocalPosition(translation.x, translation.y, translation.z);
       entity.setLocalRotation(
@@ -703,6 +919,8 @@ const start = async (bridge, options = {}) => {
 export {
   SceneRenderer,
   buildDepthProxyGeometry,
+  buildViewDepthProxyGeometry,
+  collectDepthProxyCenters,
   bytesToBase64,
   depthOfFieldForStrength,
   harmonizationViewpointKey,

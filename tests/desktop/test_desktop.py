@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from better_backgrounds.desktop.app import (
     packaged_sharp_command,
+    packaged_splat_command,
     packaged_worker_command,
 )
 from better_backgrounds.desktop.bridge import LiveRendererBridge, RendererBridge
@@ -29,7 +30,6 @@ from better_backgrounds.desktop.webview import navigation_is_allowed
 from better_backgrounds.jobs.build_session import IdleBuild
 from better_backgrounds.scene import (
     Quaternion,
-    SceneProvenance,
     SceneReference,
     SceneTransform,
     Viewpoint,
@@ -202,8 +202,8 @@ def test_adjust_keeps_asset_normalization_when_restoring_a_saved_camera() -> Non
     page.close()
 
 
-def test_adjust_enables_depth_of_field_only_for_local_sharp_scenes() -> None:
-    """Gate subject-locked focus controls on metric SHARP provenance."""
+def test_adjust_enables_depth_of_field_for_every_spatial_scene() -> None:
+    """Expose zero-default depth blur for any loaded spatial room."""
     application()
     renderer = TrackingRenderer()
     page = AdjustPage(lambda: renderer)
@@ -213,31 +213,14 @@ def test_adjust_enables_depth_of_field_only_for_local_sharp_scenes() -> None:
 
     page.set_room(sample.asset_id, sample, installed=True)
 
-    assert not sliders["Depth-of-field blur"].isEnabled()
+    assert sliders["Depth-of-field blur"].isEnabled()
+    assert sliders["Depth-of-field blur"].value() == 0
     assert "Depth of field" not in checkboxes
     assert "Depth in scene" not in sliders
     assert "Focus band" not in sliders
     assert "Depth-aware occlusion" not in checkboxes
     assert "Subject size" not in sliders
 
-    sharp_scene = sample.model_copy(
-        update={
-            "format": "ply",
-            "provenance": SceneProvenance(
-                source_kind="camera",
-                source_sha256="1" * 64,
-                source_size=(1280, 720),
-                builder_revision="2" * 40,
-                checkpoint_sha256="3" * 64,
-                device="mps",
-                inference_ms=900,
-                license_name="Apple SHARP Research License",
-            ),
-        },
-    )
-    page.set_room("local-sharp", sharp_scene, installed=True)
-
-    assert sliders["Depth-of-field blur"].isEnabled()
     sliders["Depth-of-field blur"].setValue(70)
     assert renderer.viewpoints[-1].depth_of_field.blur_strength == 0.7
     page.close()
@@ -419,3 +402,19 @@ def test_frozen_application_reuses_its_executable_for_sharp(
     assert command[:2] == [str(Path(sys.argv[0]).resolve()), "--sharp-worker"]
     assert command[command.index("--device") + 1] == "cuda"
     assert command[command.index("--source-kind") + 1] == "upload"
+
+
+def test_frozen_application_reuses_its_executable_for_splat_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep direct PLY ingestion inside the packaged worker dispatch."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    command = packaged_splat_command("job-1", Path("room scene.ply"))
+
+    assert command[:2] == [str(Path(sys.argv[0]).resolve()), "--splat-worker"]
+    assert command[command.index("--source") + 1] == "room scene.ply"
+
+    streamed = packaged_splat_command("job-2", Path("whole room.ssog"))
+    assert streamed[:2] == [str(Path(sys.argv[0]).resolve()), "--splat-worker"]
+    assert streamed[streamed.index("--source") + 1] == "whole room.ssog"

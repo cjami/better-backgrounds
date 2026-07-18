@@ -70,6 +70,26 @@ uv run better-backgrounds sharp-build room.jpg \
   --source-kind upload
 ```
 
+An existing binary little-endian Gaussian PLY or packaged Streamed SOG environment
+can instead be imported without preparing or running SHARP:
+
+```text
+uv run better-backgrounds splat-import room.ply
+uv run better-backgrounds splat-import environment.ssog
+uv run better-backgrounds splat-import supersplat-export.zip
+```
+
+Standard 3DGS, SHARP, and PlayCanvas-compatible compressed PLY layouts are
+validated and copied into the checksummed local scene cache. Streamed SOG v1 and
+its compatible pre-release manifest are validated as `lod-meta.json` plus their
+referenced unbundled SOG v2 chunks, then safely extracted into the same managed
+cache. Both the official
+`.zip` packaging and `.ssog`-suffixed ZIPs are accepted. Unsafe archive paths,
+external resources, malformed trees, missing images, inconsistent chunk ranges,
+and scenes over the runtime Gaussian limit are rejected. Generic PLY splats use
+automatic COLMAP/Brush orientation; Streamed SOG uses its native PlayCanvas
+coordinate frame and tree bounds. The selected source remains untouched.
+
 The worker stages are validation, model preparation, model loading, inference,
 PLY validation, publication, and preview generation. It runs the exact pinned
 upstream predictor path, with accelerator synchronization around inference.
@@ -137,11 +157,18 @@ platform.
 
 ## Scene rendering and offline behavior
 
-The PlayCanvas renderer loads verified SOG samples and SHARP PLY scenes directly
+The PlayCanvas renderer loads verified SOG samples, SHARP PLY scenes, directly
+imported Gaussian PLY scenes, and progressively streamed SSOG environments
 through the managed `bbscene` scheme. It has no arbitrary filesystem, network,
 download, navigation, or media authority. Room viewpoints and catalogue state
 are stored in application data; generated scenes and prepared checkpoints are
 stored in application cache locations.
+
+Depth-of-field blur is available for every loaded spatial room and defaults to
+0%. SHARP scenes use their embedded raster camera metadata; other PLY and SOG
+scenes use a bounded view-dependent proxy generated from splat centers. SSOG
+proxies refresh from the LOD chunks currently resident in memory as streaming
+settles.
 
 The Table Tennis Room sample is downloaded only when requested in Show, checked
 against its manifest, and attributed to Ethan (`ethan3111`) under CC BY 4.0.

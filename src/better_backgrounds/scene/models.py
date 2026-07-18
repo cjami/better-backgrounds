@@ -265,7 +265,7 @@ class SceneReference(StrictModel):
 
     asset_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{2,63}$")
     display_name: str = Field(min_length=1, max_length=100)
-    format: Literal["sog", "ply"]
+    format: Literal["sog", "ssog", "ply"]
     entrypoint: str = Field(min_length=1, max_length=200)
     resources: tuple[AssetResource, ...] = Field(min_length=1)
     license_name: str = Field(min_length=1, max_length=80)

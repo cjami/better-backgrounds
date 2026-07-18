@@ -53,7 +53,7 @@ class AdjustPage(QWidget):
         self._sliders: dict[str, QSlider] = {}
         self._slider_labels: dict[str, QLabel] = {}
         self._loaded_scene_id = ""
-        self._metric_depth_available = False
+        self._spatial_depth_available = False
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -206,7 +206,7 @@ class AdjustPage(QWidget):
         self._room_id = room
         self.setAccessibleDescription(f"Adjust settings for {room}")
         self._default_viewpoint = scene.default_viewpoint if scene is not None else Viewpoint()
-        self._metric_depth_available = scene is not None and scene.supports_metric_depth
+        self._spatial_depth_available = scene is not None
         self._viewpoint = self._drafts.get(room, viewpoint or self._default_viewpoint)
         self._harmonization = self._harmonization_drafts.get(
             room,
@@ -394,12 +394,8 @@ class AdjustPage(QWidget):
         self._sync_depth_controls()
 
     def _sync_depth_controls(self) -> None:
-        tooltip = (
-            ""
-            if self._metric_depth_available
-            else "Available for locally generated metric SHARP scenes"
-        )
-        self._blur_strength.setEnabled(self._metric_depth_available)
+        tooltip = "" if self._spatial_depth_available else "Available when a spatial room is loaded"
+        self._blur_strength.setEnabled(self._spatial_depth_available)
         self._blur_strength.setToolTip(tooltip)
 
     @staticmethod

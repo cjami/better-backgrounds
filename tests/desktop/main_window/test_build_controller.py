@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from better_backgrounds.desktop.main_window.build_controller import BuildController
 from better_backgrounds.jobs.build_session import ReviewBuild
 from better_backgrounds.jobs.events import CancelledEvent, ErrorEvent, ResultEvent
+from better_backgrounds.reconstruction import SplatDiagnostics, SplatSelection
 from better_backgrounds.reconstruction.sharp import SceneImageSelection
 
 if TYPE_CHECKING:
@@ -24,6 +25,7 @@ class FakeBuildPage(QObject):
     """Provide the BuildPage signal and update boundary without widgets."""
 
     image_requested = Signal()
+    splat_requested = Signal()
     build_requested = Signal(str)
     cancel_requested = Signal()
     retry_requested = Signal()
@@ -33,6 +35,8 @@ class FakeBuildPage(QObject):
         super().__init__()
         self.completed: str | None = None
         self.reviewed: SceneImageSelection | None = None
+        self.splat_reviewed: SplatSelection | None = None
+        self.importing = False
 
     def set_model_ready(self, *, ready: bool) -> None:
         """Accept checkpoint status updates."""
@@ -44,6 +48,14 @@ class FakeBuildPage(QObject):
         """Record restored retry context."""
         self.reviewed = selection
 
+    def show_splat_review(
+        self,
+        selection: SplatSelection,
+        _diagnostics: object = None,
+    ) -> None:
+        """Record direct-import review updates."""
+        self.splat_reviewed = selection
+
     def set_completed(self, room_name: str) -> None:
         """Record successful publication."""
         self.completed = room_name
@@ -54,8 +66,9 @@ class FakeBuildPage(QObject):
     def set_progress(self, _stage: str, _progress: float, _message: str) -> None:
         """Accept progress updates."""
 
-    def reset_progress(self) -> None:
+    def reset_progress(self, *, importing: bool = False) -> None:
         """Accept a new build attempt."""
+        self.importing = importing
 
     def set_image_error(self, _message: str) -> None:
         """Accept image validation failures."""
@@ -160,3 +173,33 @@ def test_build_controller_completion_retry_cancellation_and_checkpoint_continuat
 def tmp_source() -> Path:
     """Return a source path; checkpoint continuation does not read it."""
     return Path("source.jpg")
+
+
+def test_splat_build_bypasses_checkpoint_and_uses_import_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Launch direct imports without entering SHARP preparation."""
+    controller, page = create_controller()
+    selection = SplatSelection("room.ply", Path("room.ply"))
+    controller._splat_factory = lambda job_id, source: [job_id, str(source)]  # noqa: SLF001
+    controller._splat_diagnostics = SplatDiagnostics(  # noqa: SLF001
+        gaussian_count=4,
+        file_size=128,
+        layout="standard",
+        framing="Automatic COLMAP framing",
+        bounds_minimum=(-1.0, -1.0, 2.0),
+        bounds_maximum=(1.0, 1.0, 3.0),
+    )
+    commands: list[tuple[list[str], str]] = []
+    monkeypatch.setattr(
+        controller,
+        "_start_runner",
+        lambda command, job_id: commands.append((list(command), job_id)),
+    )
+    controller.session.select_source(selection)
+
+    controller._start_build("cuda")  # noqa: SLF001
+
+    assert page.importing
+    assert len(commands) == 1
+    assert commands[0][0][1] == "room.ply"

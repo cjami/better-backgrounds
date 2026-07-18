@@ -25,6 +25,11 @@ from better_backgrounds.jobs.events import (
     WarningEvent,
 )
 from better_backgrounds.jobs.runner import JobRunner
+from better_backgrounds.reconstruction import (
+    SplatDiagnostics,
+    SplatSelection,
+    inspect_gaussian_scene,
+)
 from better_backgrounds.reconstruction.sharp import (
     SceneImageDiagnostics,
     SceneImageSelection,
@@ -39,6 +44,7 @@ if TYPE_CHECKING:
 CommandFactory = Callable[[str, str], Sequence[str]]
 SharpCommandFactory = Callable[[str, Path, str, str], Sequence[str]]
 SharpPrepareCommandFactory = Callable[[str], Sequence[str]]
+SplatCommandFactory = Callable[[str, Path], Sequence[str]]
 
 
 class RunnerSignals(QObject):
@@ -62,6 +68,7 @@ class BuildController(QObject):
         prepare_factory: SharpPrepareCommandFactory | None,
         checkpoint: SharpCheckpointInstaller,
         open_build_tab: Callable[[], None],
+        splat_factory: SplatCommandFactory | None = None,
     ) -> None:
         """Connect a build page to its reconstruction services."""
         super().__init__(parent)
@@ -72,6 +79,7 @@ class BuildController(QObject):
         self._sharp_factory = sharp_factory
         self._prepare_factory = prepare_factory
         self._checkpoint = checkpoint
+        self._splat_factory = splat_factory
         self._open_build_tab = open_build_tab
         self._session = BuildSession()
         self._runner: JobRunner | None = None
@@ -80,7 +88,9 @@ class BuildController(QObject):
         self._preparing_checkpoint = False
         self._pending_device = "auto"
         self._image_diagnostics: SceneImageDiagnostics | None = None
+        self._splat_diagnostics: SplatDiagnostics | None = None
         page.image_requested.connect(self._choose_image)
+        page.splat_requested.connect(self._choose_splat)
         page.build_requested.connect(self._start_build)
         page.cancel_requested.connect(self._cancel_build)
         page.retry_requested.connect(self._retry_build)
@@ -125,8 +135,21 @@ class BuildController(QObject):
                 SceneImageSelection(display_name=Path(path).name, source_path=Path(path)),
             )
 
+    @Slot()
+    def _choose_splat(self) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self._parent,
+            "Import a Gaussian splat",
+            "",
+            "Gaussian scenes (*.ply *.ssog *.zip);;"
+            "PLY files (*.ply);;Streamed SOG (*.ssog *.zip);;All files (*)",
+        )
+        if path:
+            self._select_splat(SplatSelection(Path(path).name, Path(path)))
+
     def _select_image(self, selection: SceneImageSelection) -> None:
-        self._session.select_image(selection)
+        self._session.select_source(selection)
+        self._splat_diagnostics = None
         if selection.source_path is None:
             self._image_diagnostics = None
             self._page.show_review(selection)
@@ -141,12 +164,42 @@ class BuildController(QObject):
         self._image_diagnostics = diagnostics
         self._page.show_review(selection, diagnostics)
 
+    def _select_splat(self, selection: SplatSelection) -> None:
+        self._session.select_source(selection)
+        self._image_diagnostics = None
+        try:
+            diagnostics = inspect_gaussian_scene(selection.source_path, validate_values=False)
+        except ValueError as error:
+            self._splat_diagnostics = None
+            self._page.show_splat_review(selection)
+            self._page.set_image_error(str(error))
+            return
+        self._splat_diagnostics = diagnostics
+        self._page.show_splat_review(selection, diagnostics)
+
     @Slot(str)
     def _start_build(self, device_name: str) -> None:
         state = self._session.state
         if not isinstance(state, ReviewBuild):
             return
         selection = state.selection
+        if isinstance(selection, SplatSelection):
+            job_id = uuid4().hex
+            self._session.start(job_id)
+            self._page.reset_progress(importing=True)
+            factory = self._splat_factory
+            if factory is None:
+                self._handle_job_event(
+                    ErrorEvent(
+                        job_id=job_id,
+                        code="splat_worker_unavailable",
+                        message="The Gaussian splat import worker is unavailable.",
+                        recovery_action="Reinstall the complete application runtime.",
+                    ),
+                )
+                return
+            self._start_runner(factory(job_id, selection.source_path), job_id)
+            return
         if selection.source_path is not None and not self._checkpoint.is_ready():
             if self._prepare_factory is None:
                 self._page.set_image_error(
@@ -167,7 +220,7 @@ class BuildController(QObject):
                 return
         job_id = uuid4().hex
         self._session.start(job_id)
-        self._page.reset_progress()
+        self._page.reset_progress(importing=False)
         self._pending_device = device_name
         if selection.source_path is None:
             self._start_runner(self._command_factory(job_id, "success"), job_id)
@@ -218,6 +271,18 @@ class BuildController(QObject):
     def _retry_build(self) -> None:
         state = self._session.retry()
         selection = state.selection
+        if isinstance(selection, SplatSelection):
+            try:
+                self._splat_diagnostics = inspect_gaussian_scene(
+                    selection.source_path,
+                    validate_values=False,
+                )
+            except ValueError as error:
+                self._page.show_splat_review(selection)
+                self._page.set_image_error(str(error))
+            else:
+                self._page.show_splat_review(selection, self._splat_diagnostics)
+            return
         if selection.source_path is None:
             self._page.show_review(selection)
             return
@@ -247,10 +312,13 @@ class BuildController(QObject):
             self._page.set_failed(state.message, state.recovery_action)
         elif isinstance(state, ReviewBuild):
             self._preparing_checkpoint = False
-            diagnostics = (
-                self._image_diagnostics if state.selection.source_path is not None else None
-            )
-            self._page.show_review(state.selection, diagnostics)
+            if isinstance(state.selection, SplatSelection):
+                self._page.show_splat_review(state.selection, self._splat_diagnostics)
+            else:
+                diagnostics = (
+                    self._image_diagnostics if state.selection.source_path is not None else None
+                )
+                self._page.show_review(state.selection, diagnostics)
         elif isinstance(state, CompletedBuild):
             room_name, room_id = self._library.register(
                 state.scene_id,
@@ -263,7 +331,11 @@ class BuildController(QObject):
         if not self._preparing_checkpoint or not isinstance(event, ResultEvent):
             return False
         state = self._session.state
-        if not isinstance(state, RunningBuild) or event.job_id != state.job_id:
+        if (
+            not isinstance(state, RunningBuild)
+            or event.job_id != state.job_id
+            or not isinstance(state.selection, SceneImageSelection)
+        ):
             return False
         self._preparing_checkpoint = False
         self._page.set_model_ready(ready=True)
@@ -271,5 +343,5 @@ class BuildController(QObject):
         return True
 
     @staticmethod
-    def _room_name_for(selection: SceneImageSelection) -> str:
+    def _room_name_for(selection: SceneImageSelection | SplatSelection) -> str:
         return Path(selection.display_name).stem.replace("_", " ").strip().title()

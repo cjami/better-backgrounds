@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 CommandFactory = Callable[[str, str], Sequence[str]]
 SharpCommandFactory = Callable[[str, Path, str, str], Sequence[str]]
 SharpPrepareCommandFactory = Callable[[str], Sequence[str]]
+SplatCommandFactory = Callable[[str, Path], Sequence[str]]
 RendererFactory = Callable[[], QWidget]
 
 COMPARE_TAB = 3
@@ -60,6 +61,7 @@ class MainWindow(QMainWindow):
         command_factory: CommandFactory,
         sharp_command_factory: SharpCommandFactory | None = None,
         sharp_prepare_command_factory: SharpPrepareCommandFactory | None = None,
+        splat_command_factory: SplatCommandFactory | None = None,
         renderer_factory: RendererFactory | None = None,
         live_renderer_factory: RendererFactory | None = None,
         camera_source: InputCameraSource | None = None,
@@ -123,6 +125,7 @@ class MainWindow(QMainWindow):
             sharp_prepare_command_factory,
             checkpoint,
             lambda: self.select_tab(1),
+            splat_factory=splat_command_factory,
         )
         self._connect_views()
         self._show_page.configure_sample(

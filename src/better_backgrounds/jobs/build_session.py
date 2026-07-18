@@ -15,7 +15,10 @@ from better_backgrounds.jobs.events import (
 )
 
 if TYPE_CHECKING:
+    from better_backgrounds.reconstruction import SplatSelection
     from better_backgrounds.reconstruction.sharp import SceneImageSelection
+
+    RoomSourceSelection = SceneImageSelection | SplatSelection
 
 
 class InvalidBuildStateError(RuntimeError):
@@ -24,21 +27,21 @@ class InvalidBuildStateError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class IdleBuild:
-    """Wait for a room image."""
+    """Wait for a room source."""
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewBuild:
-    """Show the correctly oriented image and its diagnostics."""
+    """Show the selected source and its diagnostics."""
 
-    selection: SceneImageSelection
+    selection: RoomSourceSelection
 
 
 @dataclass(frozen=True, slots=True)
 class RunningBuild:
-    """Track one active SHARP scene-build job."""
+    """Track one active room publication job."""
 
-    selection: SceneImageSelection
+    selection: RoomSourceSelection
     job_id: str
     stage: str = "validation"
     progress: float | None = 0.0
@@ -49,7 +52,7 @@ class RunningBuild:
 class FailedBuild:
     """Preserve enough context for an explicit retry."""
 
-    selection: SceneImageSelection
+    selection: RoomSourceSelection
     message: str
     recovery_action: str | None
 
@@ -58,7 +61,7 @@ class FailedBuild:
 class CompletedBuild:
     """Record the room created by a successful job."""
 
-    selection: SceneImageSelection
+    selection: RoomSourceSelection
     scene_id: str
 
 
@@ -66,7 +69,7 @@ BuildState = IdleBuild | ReviewBuild | RunningBuild | FailedBuild | CompletedBui
 
 
 class BuildSession:
-    """Own the lifecycle of a build without controlling the app's tabs."""
+    """Own the lifecycle of a room build or import without controlling tabs."""
 
     def __init__(self) -> None:
         """Start without a selected image."""
@@ -77,19 +80,23 @@ class BuildSession:
         """Return the current immutable build state."""
         return self._state
 
-    def select_image(self, selection: SceneImageSelection) -> ReviewBuild:
-        """Select an image unless a build is currently running."""
+    def select_source(self, selection: RoomSourceSelection) -> ReviewBuild:
+        """Select a room source unless a build is currently running."""
         if isinstance(self._state, RunningBuild):
-            msg = "An image cannot be replaced while its build is running."
+            msg = "A room source cannot be replaced while its build is running."
             raise InvalidBuildStateError(msg)
         next_state = ReviewBuild(selection)
         self._state = next_state
         return next_state
 
+    def select_image(self, selection: RoomSourceSelection) -> ReviewBuild:
+        """Retain the original selection API for existing callers."""
+        return self.select_source(selection)
+
     def start(self, job_id: str) -> RunningBuild:
         """Start a job after reviewing a selection."""
         if not isinstance(self._state, ReviewBuild):
-            msg = "A build requires a reviewed image selection."
+            msg = "A build requires a reviewed room source."
             raise InvalidBuildStateError(msg)
         next_state = RunningBuild(selection=self._state.selection, job_id=job_id)
         self._state = next_state

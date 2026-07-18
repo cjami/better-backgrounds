@@ -89,6 +89,28 @@ def packaged_sharp_prepare_command(job_id: str) -> list[str]:
     ]
 
 
+def packaged_splat_command(job_id: str, source: Path) -> list[str]:
+    """Choose a direct-import worker command that also works when frozen."""
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        return [
+            str(Path(sys.argv[0]).resolve()),
+            "--splat-worker",
+            "--source",
+            str(source),
+            "--job-id",
+            job_id,
+        ]
+    return [
+        sys.executable,
+        "-m",
+        "better_backgrounds.cli",
+        "splat-import",
+        str(source),
+        "--job-id",
+        job_id,
+    ]
+
+
 def _run_packaged_worker(arguments: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--fake-worker", action="store_true")
@@ -149,6 +171,24 @@ def _run_packaged_sharp_prepare(arguments: Sequence[str]) -> int:
     return 0
 
 
+def _run_packaged_splat(arguments: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--splat-worker", action="store_true")
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--job-id", required=True)
+    values = parser.parse_args(arguments)
+    from better_backgrounds.cli import app  # noqa: PLC0415
+
+    try:
+        app(
+            ["splat-import", values.source, "--job-id", values.job_id],
+            standalone_mode=False,
+        )
+    except SystemExit as error:
+        return int(error.code or 0)
+    return 0
+
+
 def main() -> int:
     """Run the desktop shell or its packaged fake-worker mode."""
     arguments = sys.argv[1:]
@@ -156,6 +196,8 @@ def main() -> int:
         return _run_packaged_sharp(arguments)
     if "--sharp-prepare-worker" in arguments:
         return _run_packaged_sharp_prepare(arguments)
+    if "--splat-worker" in arguments:
+        return _run_packaged_splat(arguments)
     if "--fake-worker" in arguments:
         return _run_packaged_worker(arguments)
 
@@ -168,6 +210,7 @@ def main() -> int:
         command_factory=packaged_worker_command,
         sharp_command_factory=packaged_sharp_command,
         sharp_prepare_command_factory=packaged_sharp_prepare_command,
+        splat_command_factory=packaged_splat_command,
     )
     window.showMaximized()
     if "--build-smoke-test" in arguments:
