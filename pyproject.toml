@@ -92,7 +92,7 @@ ignore = [
     "N802", # Qt virtual methods use the framework's camelCase API.
     "PLR0915", # Renderer policy setup is intentionally kept in one constructor.
 ]
-"src/better_backgrounds/desktop/pages.py" = [
+"src/better_backgrounds/desktop/pages/*.py" = [
     "PLR0915", # Declarative widget composition is clearest in page constructors.
 ]
 "src/better_backgrounds/cli.py" = [
@@ -100,13 +100,13 @@ ignore = [
     "FBT002", # Typer exposes boolean options through declarative function defaults.
     "PLR0913", # CLI signatures intentionally mirror their explicit options.
 ]
-"src/better_backgrounds/compositor.py" = [
+"src/better_backgrounds/matting/compositor.py" = [
     "PLR0913", # Exact-frame evidence remains explicit at the composition boundary.
 ]
-"src/better_backgrounds/matting_benchmark.py" = [
+"src/better_backgrounds/matting/benchmark.py" = [
     "PLR0913", # Benchmark gates are explicit inputs for reproducible reports.
 ]
-"src/better_backgrounds/matting_worker.py" = [
+"src/better_backgrounds/matting/worker.py" = [
     "C901", # Process lifecycle and calibration share one spawn-safe entry point.
     "PLR0913", # Spawn targets receive serializable dependencies explicitly.
     "PLR0915", # Process lifecycle and calibration share one spawn-safe entry point.
@@ -114,21 +114,29 @@ ignore = [
 "src/better_backgrounds/desktop/app.py" = [
     "FBT001", # The command-factory protocol passes the resume flag positionally.
 ]
-"src/better_backgrounds/desktop/main_window.py" = [
+"src/better_backgrounds/desktop/main_window/*.py" = [
     "PLR0913", # Constructor injection keeps native services replaceable in tests.
-    "PLR0915", # Declarative window composition is clearest in the constructor.
 ]
-"src/better_backgrounds/sharp.py" = [
+"src/better_backgrounds/desktop/live_preview/preview.py" = [
+    "PLR0915", # Retained Qt resource setup stays visible in one session constructor.
+]
+"src/better_backgrounds/reconstruction/sharp/ply.py" = [
     "C901", # Binary PLY parsing remains cohesive at one untrusted-file boundary.
     "PLR0912", # PLY validation branches mirror independent corruption checks.
     "PLR0913", # Build and PLY trust boundaries keep their evidence explicit.
     "PLR0915", # PLY validation remains cohesive at one managed publication boundary.
     "TRY301", # Validation failures stay beside the exact array check that found them.
 ]
-"src/better_backgrounds/sharp_worker.py" = [
+"src/better_backgrounds/reconstruction/sharp/builder.py" = [
+    "PLR0913", # Publication evidence remains explicit at the scene boundary.
+]
+"src/better_backgrounds/reconstruction/sharp/contracts.py" = [
+    "PLR0913", # Predictor protocols mirror the external model call.
+]
+"src/better_backgrounds/reconstruction/sharp/worker.py" = [
     "PLR0913", # Spawn-safe worker dependencies remain explicit and replaceable.
 ]
-"src/better_backgrounds/sharp_runtime.py" = [
+"src/better_backgrounds/reconstruction/sharp/runtime.py" = [
     "PLR0913", # The predictor boundary mirrors the exact inference inputs and stage callback.
 ]
 
@@ -148,41 +156,90 @@ exclude = ["src/better_backgrounds/_vendor"]
 
 [tool.pyside6-project]
 files = [
+    "src/better_backgrounds/__init__.py",
+    "src/better_backgrounds/_vendor/harmonizer/UPSTREAM.md",
+    "src/better_backgrounds/_vendor/harmonizer/__init__.py",
+    "src/better_backgrounds/_vendor/harmonizer/model.py",
+    "src/better_backgrounds/assets/matanyone2/LICENSE.txt",
+    "src/better_backgrounds/assets/matanyone2/manifest-v1.json",
+    "src/better_backgrounds/assets/matanyone2/matanyone2.pth",
+    "src/better_backgrounds/assets/sample-scenes-v1.json",
+    "src/better_backgrounds/assets/sharp/manifest-v1.json",
+    "src/better_backgrounds/cli.py",
     "src/better_backgrounds/desktop/__init__.py",
     "src/better_backgrounds/desktop/__main__.py",
     "src/better_backgrounds/desktop/app.py",
+    "src/better_backgrounds/desktop/assets/app-icon.svg",
+    "src/better_backgrounds/desktop/assets/background.html",
+    "src/better_backgrounds/desktop/assets/renderer.js",
+    "src/better_backgrounds/desktop/assets/viewer.html",
     "src/better_backgrounds/desktop/bridge.py",
-    "src/better_backgrounds/desktop/camera_capture.py",
-    "src/better_backgrounds/desktop/main_window.py",
-    "src/better_backgrounds/desktop/pages.py",
+    "src/better_backgrounds/desktop/camera/__init__.py",
+    "src/better_backgrounds/desktop/camera/capture.py",
+    "src/better_backgrounds/desktop/camera/devices.py",
+    "src/better_backgrounds/desktop/icon.py",
+    "src/better_backgrounds/desktop/live_preview/__init__.py",
+    "src/better_backgrounds/desktop/live_preview/composition.py",
+    "src/better_backgrounds/desktop/live_preview/preview.py",
+    "src/better_backgrounds/desktop/live_preview/seed.py",
+    "src/better_backgrounds/desktop/live_preview/surface.py",
+    "src/better_backgrounds/desktop/main_window/__init__.py",
+    "src/better_backgrounds/desktop/main_window/build_controller.py",
+    "src/better_backgrounds/desktop/main_window/header.py",
+    "src/better_backgrounds/desktop/main_window/live_preview_controller.py",
+    "src/better_backgrounds/desktop/main_window/main.py",
+    "src/better_backgrounds/desktop/pages/__init__.py",
+    "src/better_backgrounds/desktop/pages/adjust.py",
+    "src/better_backgrounds/desktop/pages/build.py",
+    "src/better_backgrounds/desktop/pages/common.py",
+    "src/better_backgrounds/desktop/pages/compare.py",
+    "src/better_backgrounds/desktop/pages/show.py",
     "src/better_backgrounds/desktop/preview.py",
     "src/better_backgrounds/desktop/theme.py",
     "src/better_backgrounds/desktop/webview.py",
-    "src/better_backgrounds/desktop/live_preview.py",
-    "src/better_backgrounds/harmonizer_runtime.py",
-    "src/better_backgrounds/_vendor/harmonizer/__init__.py",
-    "src/better_backgrounds/_vendor/harmonizer/model.py",
-    "src/better_backgrounds/_vendor/harmonizer/UPSTREAM.md",
-    "src/better_backgrounds/compositor.py",
-    "src/better_backgrounds/frame_ring.py",
-    "src/better_backgrounds/harmonization.py",
-    "src/better_backgrounds/harmonizer_filters.py",
-    "src/better_backgrounds/input_camera.py",
-    "src/better_backgrounds/live_matting.py",
-    "src/better_backgrounds/matting.py",
-    "src/better_backgrounds/matte_refinement.py",
-    "src/better_backgrounds/matanyone_runtime.py",
-    "src/better_backgrounds/matting_benchmark.py",
-    "src/better_backgrounds/matting_engine.py",
-    "src/better_backgrounds/matting_quality.py",
-    "src/better_backgrounds/matting_worker.py",
-    "src/better_backgrounds/scene.py",
-    "src/better_backgrounds/seed_mask.py",
-    "src/better_backgrounds/sharp.py",
-    "src/better_backgrounds/sharp_runtime.py",
-    "src/better_backgrounds/sharp_worker.py",
+    "src/better_backgrounds/harmonization/__init__.py",
+    "src/better_backgrounds/harmonization/contracts.py",
+    "src/better_backgrounds/harmonization/filters.py",
+    "src/better_backgrounds/harmonization/runtime.py",
+    "src/better_backgrounds/jobs/__init__.py",
+    "src/better_backgrounds/jobs/build_session.py",
+    "src/better_backgrounds/jobs/events.py",
+    "src/better_backgrounds/jobs/fake_worker.py",
+    "src/better_backgrounds/jobs/ndjson.py",
+    "src/better_backgrounds/jobs/runner.py",
+    "src/better_backgrounds/matting/__init__.py",
+    "src/better_backgrounds/matting/assets/THIRD_PARTY_NOTICES.md",
+    "src/better_backgrounds/matting/assets/manifest-v1.json",
+    "src/better_backgrounds/matting/assets/selfie_segmenter_landscape.tflite",
+    "src/better_backgrounds/matting/benchmark.py",
+    "src/better_backgrounds/matting/compositor.py",
+    "src/better_backgrounds/matting/contracts.py",
+    "src/better_backgrounds/matting/engine.py",
+    "src/better_backgrounds/matting/preferences.py",
+    "src/better_backgrounds/matting/quality.py",
+    "src/better_backgrounds/matting/refinement.py",
+    "src/better_backgrounds/matting/ring.py",
+    "src/better_backgrounds/matting/runtime.py",
+    "src/better_backgrounds/matting/seed.py",
+    "src/better_backgrounds/matting/worker.py",
+    "src/better_backgrounds/py.typed",
+    "src/better_backgrounds/reconstruction/__init__.py",
+    "src/better_backgrounds/reconstruction/images.py",
+    "src/better_backgrounds/reconstruction/sharp/__init__.py",
+    "src/better_backgrounds/reconstruction/sharp/builder.py",
+    "src/better_backgrounds/reconstruction/sharp/checkpoint.py",
+    "src/better_backgrounds/reconstruction/sharp/contracts.py",
+    "src/better_backgrounds/reconstruction/sharp/ply.py",
+    "src/better_backgrounds/reconstruction/sharp/runtime.py",
+    "src/better_backgrounds/reconstruction/sharp/worker.py",
+    "src/better_backgrounds/scene/__init__.py",
+    "src/better_backgrounds/scene/assets.py",
+    "src/better_backgrounds/scene/catalogue.py",
+    "src/better_backgrounds/scene/library.py",
+    "src/better_backgrounds/scene/models.py",
+    "src/better_backgrounds/scene/resolver.py",
+    "src/better_backgrounds/scene/viewpoints.py",
 ]
-
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"

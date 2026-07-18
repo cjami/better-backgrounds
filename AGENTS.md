@@ -2,17 +2,48 @@
 
 ## Project Description
 
-Better Backgrounds is a cross-platform desktop application that will reconstruct
-room video into a navigable local scene for coherent webcam compositing. The
-repository currently provides the Python tooling foundation only.
+Better Backgrounds is a cross-platform desktop application for reconstructing room
+photos into navigable local scenes and compositing a live, matted webcam subject into
+them. It includes the Qt desktop UI, local SHARP reconstruction workers, MatAnyone
+matting, appearance harmonization, scene persistence, and packaging tooling.
 
 ## Project Structure
 
+```text
+src/better_backgrounds/
+├── jobs/                    Worker events, NDJSON, runners, and build sessions
+├── scene/                   Scene models, assets, catalogue, resolver, and viewpoints
+├── reconstruction/
+│   └── sharp/               SHARP contracts, checkpoints, PLY, runtime, and workers
+├── matting/                 MatAnyone pipeline, refinement, composition, and benchmarks
+├── harmonization/           Settings, compiled filters, and learned runtime
+├── desktop/
+│   ├── camera/              Discovery, preferences, and native Qt capture
+│   ├── pages/               One module per product page plus shared widget helpers
+│   ├── live_preview/        Surface, session, seed, and composition coordination
+│   └── main_window/         Header, controllers, and window assembly
+├── assets/                  Package-level model and sample-scene assets
+├── _vendor/                 Isolated upstream model implementations
+└── cli.py                   Console and spawn-safe worker commands
+
+tests/
+├── jobs/                    Mirrors jobs
+├── scene/                   Mirrors scene
+├── reconstruction/          Mirrors reconstruction
+├── matting/                 Mirrors matting
+├── harmonization/           Mirrors harmonization
+└── desktop/                 Mirrors desktop, including camera and controllers
+
+docs/                        Local planning documents (gitignored)
 ```
-src/better_backgrounds/  Python package
-tests/                   Python tests
-docs/                    Local planning documents (gitignored)
-```
+
+## Dependency Direction
+
+- Desktop code may import domain packages; domain packages must not import desktop code.
+- Reconstruction may depend on scene and jobs. Scene and jobs remain independent of desktop.
+- Matting and harmonization remain reusable domain boundaries and do not own UI state.
+- Vendored code stays isolated under `_vendor`; first-party modules wrap it at explicit runtime edges.
+- Prefer aggregate imports only for stable domain APIs: `scene`, `matting`, and `harmonization`.
 
 ## Development Workflow
 

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow, development_worker_command
 from better_backgrounds.desktop.theme import STYLESHEET
-from better_backgrounds.fake_worker import FakeOutcome, run_fake_job
+from better_backgrounds.jobs.fake_worker import FakeOutcome, run_fake_job
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

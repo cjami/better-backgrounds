@@ -12,22 +12,22 @@ import cv2
 import typer
 from platformdirs import user_cache_path, user_data_path
 
-from better_backgrounds.fake_worker import FakeOutcome, run_fake_job
-from better_backgrounds.live_matting import MattingConfig
-from better_backgrounds.matanyone_runtime import packaged_checkpoint_path
-from better_backgrounds.matting_benchmark import load_video_frames, run_matting_benchmark
-from better_backgrounds.matting_engine import (
+from better_backgrounds.jobs.fake_worker import FakeOutcome, run_fake_job
+from better_backgrounds.matting.benchmark import load_video_frames, run_matting_benchmark
+from better_backgrounds.matting.contracts import MattingConfig
+from better_backgrounds.matting.engine import (
     CompletedMatte,
     EngineFailure,
     EngineReady,
     ProcessMattingEngine,
 )
-from better_backgrounds.sharp import (
+from better_backgrounds.matting.runtime import packaged_checkpoint_path
+from better_backgrounds.reconstruction.sharp import (
     SHARP_BUILDER_REVISION,
     SharpCheckpointInstaller,
     probe_sharp_capabilities,
 )
-from better_backgrounds.sharp_worker import (
+from better_backgrounds.reconstruction.sharp.worker import (
     SharpBuildWorker,
     SharpCheckpointWorker,
     watch_control,
@@ -37,8 +37,8 @@ if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
-    from better_backgrounds.matanyone_runtime import DeviceRequest
-    from better_backgrounds.sharp_runtime import SharpDeviceRequest
+    from better_backgrounds.matting.runtime import DeviceRequest
+    from better_backgrounds.reconstruction.sharp.runtime import SharpDeviceRequest
 
 app = typer.Typer(
     name="better-backgrounds",
