@@ -309,7 +309,9 @@ class MainWindow(QMainWindow):
                 setter(viewpoint)
 
     @Slot(str, str)
-    def _scene_completed(self, _scene_id: str, room_name: str) -> None:
+    def _scene_completed(self, scene_id: str, room_name: str) -> None:
+        self._library.viewpoints.delete(scene_id)
+        self._adjust_page.discard_viewpoint(scene_id)
         self._show_page.set_rooms(self._rooms, room_name)
         self.select_room(room_name)
         self.room_ready.emit()

@@ -65547,6 +65547,24 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	  };
 	};
 
+	const lookTarget = (position, target, deltaYaw, deltaPitch) => {
+	  const offset = {
+	    x: target.x - position.x,
+	    y: target.y - position.y,
+	    z: target.z - position.z,
+	  };
+	  const radius = Math.max(0.05, Math.hypot(offset.x, offset.y, offset.z));
+	  const yaw = Math.atan2(offset.x, offset.z) + deltaYaw;
+	  const currentPitch = Math.asin(clamp(offset.y / radius, -1, 1));
+	  const pitch = clamp(currentPitch + deltaPitch, -Math.PI * 0.47, Math.PI * 0.47);
+	  const planar = radius * Math.cos(pitch);
+	  return {
+	    x: position.x + planar * Math.sin(yaw),
+	    y: position.y + radius * Math.sin(pitch),
+	    z: position.z + planar * Math.cos(yaw),
+	  };
+	};
+
 	const zoomPosition = (position, target, scale) => ({
 	  x: target.x + (position.x - target.x) * scale,
 	  y: target.y + (position.y - target.y) * scale,
@@ -65556,7 +65574,40 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	const positionsEqual = (left, right) =>
 	  left.x === right.x && left.y === right.y && left.z === right.z;
 
+	const flySpeed = (bounds, accelerated = false) => {
+	  const width = bounds.maximum.x - bounds.minimum.x;
+	  const height = bounds.maximum.y - bounds.minimum.y;
+	  const depth = bounds.maximum.z - bounds.minimum.z;
+	  const base = clamp(Math.hypot(width, height, depth) * 0.08, 0.5, 12);
+	  return base * (accelerated ? 3 : 1);
+	};
+
+	const translateViewpoint = (position, target, translation, bounds) => {
+	  const candidate = {
+	    x: position.x + translation.x,
+	    y: position.y + translation.y,
+	    z: position.z + translation.z,
+	  };
+	  const nextPosition = clampPosition(candidate, bounds);
+	  const applied = {
+	    x: nextPosition.x - position.x,
+	    y: nextPosition.y - position.y,
+	    z: nextPosition.z - position.z,
+	  };
+	  return {
+	    position: nextPosition,
+	    target: {
+	      x: target.x + applied.x,
+	      y: target.y + applied.y,
+	      z: target.z + applied.z,
+	    },
+	    clamped: !positionsEqual(candidate, nextPosition),
+	  };
+	};
+
 	const MAX_SCENE_CAPTURE_ATTEMPTS = 12;
+	const STREAMED_LOD_UPDATE_ANGLE = 2;
+	const STREAMED_LOD_UPDATE_DISTANCE = 0.1;
 	const SUBJECT_FOCUS_DISTANCE = 1.5;
 	const MIN_SUBJECT_FOCUS_RANGE = 0.8;
 	const MAX_SUBJECT_FOCUS_RANGE = 8;
@@ -65870,6 +65921,13 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	  return false;
 	};
 
+	const configureGsplatStreaming = (scene) => {
+	  scene.gsplat.lodUpdateAngle = STREAMED_LOD_UPDATE_ANGLE;
+	  scene.gsplat.lodUpdateDistance = STREAMED_LOD_UPDATE_DISTANCE;
+	};
+
+	const isStreamedSceneUrl = (url) => /(?:^|\/)lod-meta\.json(?:[?#]|$)/i.test(url);
+
 	class SceneRenderer {
 	  constructor(bridge, { cacheSceneFrames = false } = {}) {
 	    this.bridge = bridge;
@@ -65892,6 +65950,9 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	    this.viewpoint = null;
 	    this.resetViewpoint = null;
 	    this.drag = null;
+	    this.flightKeys = new Set();
+	    this.flightDirty = false;
+	    this.firstPersonNavigation = false;
 	    this.sceneFramePending = false;
 	    this.sceneFramesRemaining = 0;
 	    this.sceneSnapshot = null;
@@ -65932,6 +65993,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	      this.app.setCanvasResolution(RESOLUTION_AUTO);
 	      this.app.scene.toneMapping = TONEMAP_NONE;
 	      this.app.scene.gammaCorrection = GAMMA_SRGB;
+	      configureGsplatStreaming(this.app.scene);
 
 	      this.camera = new Entity('virtual-camera');
 	      this.camera.addComponent('camera', {
@@ -65941,6 +66003,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	      this.cameraFrame = new CameraFrame(this.app, this.camera.camera);
 	      this.cameraFrame.update();
 	      this.app.start();
+	      this.app.on('update', (deltaTime) => this.updateFlight(deltaTime));
 	      this.app.autoRender = !this.cacheSceneFrames;
 	      this.requestSceneFrame();
 	      if (this.status) {
@@ -65988,6 +66051,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	    this.assetId = assetId;
 	    this.sceneSettled = false;
 	    this.removeScene();
+	    this.firstPersonNavigation = isStreamedSceneUrl(url);
 	    this.applyViewpoint(payload, true);
 	    this.setLoading(true, 'Loading spatial scene…');
 	    this.bridge.report_scene_progress(assetId, 0, 100);
@@ -66042,6 +66106,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	    this.sceneAsset = null;
 	    this.sceneTransformKey = '';
 	    this.sceneSettled = false;
+	    this.firstPersonNavigation = false;
 	    this.snapshotQueue.length = 0;
 	    this.harmonizationViewpointKey = '';
 	  }
@@ -66182,6 +66247,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	  bindInput(canvas) {
 	    canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 	    canvas.addEventListener('pointerdown', (event) => {
+	      canvas.focus();
 	      canvas.setPointerCapture(event.pointerId);
 	      this.drag = { x: event.clientX, y: event.clientY, pan: event.button === 2 || event.shiftKey };
 	    });
@@ -66196,6 +66262,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	      this.drag.x = event.clientX;
 	      this.drag.y = event.clientY;
 	      if (this.drag.pan) this.pan(dx, dy);
+	      else if (this.firstPersonNavigation) this.look(dx, dy);
 	      else this.orbit(dx, dy);
 	    });
 	    canvas.addEventListener(
@@ -66203,26 +66270,93 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	      (event) => {
 	        event.preventDefault();
 	        if (!this.viewpoint) return;
-	        const position = zoomPosition(
-	          this.viewpoint.position,
-	          this.viewpoint.orbit_target,
-	          Math.exp(event.deltaY * 0.001),
-	        );
-	        this.setInteractivePosition(position);
+	        if (this.firstPersonNavigation) this.dolly(event.deltaY);
+	        else {
+	          const position = zoomPosition(
+	            this.viewpoint.position,
+	            this.viewpoint.orbit_target,
+	            Math.exp(event.deltaY * 0.001),
+	          );
+	          this.setInteractivePosition(position);
+	        }
 	        this.publishViewpoint();
 	      },
 	      { passive: false },
 	    );
 	    canvas.addEventListener('keydown', (event) => {
 	      if (!this.viewpoint) return;
+	      const key = event.key.toLowerCase();
+	      if ('wasdqe'.includes(key) || key === 'shift') {
+	        event.preventDefault();
+	        this.flightKeys.add(key);
+	        return;
+	      }
 	      const orbitKeys = { ArrowLeft: [-12, 0], ArrowRight: [12, 0], ArrowUp: [0, -12], ArrowDown: [0, 12] };
 	      if (orbitKeys[event.key]) {
 	        event.preventDefault();
-	        this.orbit(...orbitKeys[event.key]);
+	        if (this.firstPersonNavigation) this.look(...orbitKeys[event.key]);
+	        else this.orbit(...orbitKeys[event.key]);
 	        this.publishViewpoint();
 	      }
 	      if (event.key === '0') this.bridge.reset_requested();
 	    });
+	    canvas.addEventListener('keyup', (event) => {
+	      const key = event.key.toLowerCase();
+	      if (!this.flightKeys.delete(key)) return;
+	      event.preventDefault();
+	      this.finishFlight();
+	    });
+	    const stopFlight = () => {
+	      this.flightKeys.clear();
+	      this.finishFlight();
+	    };
+	    canvas.addEventListener('blur', stopFlight);
+	    window.addEventListener('blur', stopFlight);
+	  }
+
+	  updateFlight(deltaTime) {
+	    if (!this.viewpoint || !this.camera || !this.flightKeys.size) return;
+	    const forwardAxis = Number(this.flightKeys.has('w')) - Number(this.flightKeys.has('s'));
+	    const rightAxis = Number(this.flightKeys.has('d')) - Number(this.flightKeys.has('a'));
+	    const verticalAxis = Number(this.flightKeys.has('e')) - Number(this.flightKeys.has('q'));
+	    if (!forwardAxis && !rightAxis && !verticalAxis) return;
+	    const forward = this.camera.forward;
+	    const right = this.camera.right;
+	    const direction = {
+	      x: forward.x * forwardAxis + right.x * rightAxis,
+	      y: forward.y * forwardAxis + right.y * rightAxis + verticalAxis,
+	      z: forward.z * forwardAxis + right.z * rightAxis,
+	    };
+	    const length = Math.hypot(direction.x, direction.y, direction.z);
+	    if (length <= 1e-6) return;
+	    const distance = flySpeed(
+	      this.viewpoint.safe_camera_region,
+	      this.flightKeys.has('shift'),
+	    ) * Math.min(Math.max(deltaTime, 0), 0.1);
+	    const moved = translateViewpoint(
+	      this.viewpoint.position,
+	      this.viewpoint.orbit_target,
+	      {
+	        x: direction.x / length * distance,
+	        y: direction.y / length * distance,
+	        z: direction.z / length * distance,
+	      },
+	      this.viewpoint.safe_camera_region,
+	    );
+	    this.viewpoint.position = moved.position;
+	    this.viewpoint.orbit_target = moved.target;
+	    this.warning.hidden = !moved.clamped;
+	    this.camera.setPosition(moved.position.x, moved.position.y, moved.position.z);
+	    this.camera.lookAt(moved.target.x, moved.target.y, moved.target.z);
+	    this.camera.rotateLocal(0, 0, this.viewpoint.horizon);
+	    this.flightDirty = true;
+	    this.requestSceneFrame();
+	  }
+
+	  finishFlight() {
+	    if (!this.flightDirty) return;
+	    this.flightDirty = false;
+	    this.publishViewpoint();
 	  }
 
 	  orbit(dx, dy) {
@@ -66233,6 +66367,43 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	      -dy * 0.006,
 	    );
 	    this.setInteractivePosition(position);
+	  }
+
+	  look(dx, dy) {
+	    const target = lookTarget(
+	      this.viewpoint.position,
+	      this.viewpoint.orbit_target,
+	      -dx * 0.006,
+	      -dy * 0.006,
+	    );
+	    this.viewpoint.orbit_target = target;
+	    this.camera.lookAt(target.x, target.y, target.z);
+	    this.camera.rotateLocal(0, 0, this.viewpoint.horizon);
+	    this.requestSceneFrame();
+	  }
+
+	  dolly(deltaY) {
+	    const position = this.viewpoint.position;
+	    const target = this.viewpoint.orbit_target;
+	    const direction = {
+	      x: target.x - position.x,
+	      y: target.y - position.y,
+	      z: target.z - position.z,
+	    };
+	    const length = Math.max(0.05, Math.hypot(direction.x, direction.y, direction.z));
+	    const distance = -deltaY * flySpeed(this.viewpoint.safe_camera_region) * 0.001;
+	    const moved = translateViewpoint(
+	      position,
+	      target,
+	      {
+	        x: direction.x / length * distance,
+	        y: direction.y / length * distance,
+	        z: direction.z / length * distance,
+	      },
+	      this.viewpoint.safe_camera_region,
+	    );
+	    this.viewpoint.orbit_target = moved.target;
+	    this.setInteractivePosition(moved.position);
 	  }
 
 	  pan(dx, dy) {
@@ -66303,7 +66474,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	    const effect = depthOfFieldForStrength(blurStrength, this.viewpoint.field_of_view);
 	    const enabled = Boolean(this.sceneEntity && this.depthProxyEntity);
 	    this.cameraFrame.debug = null;
-	    this.cameraFrame.dof.enabled = enabled;
+	    this.cameraFrame.dof.enabled = enabled && blurStrength > 0;
 	    this.cameraFrame.dof.nearBlur = true;
 	    this.cameraFrame.dof.highQuality = true;
 	    this.cameraFrame.dof.focusDistance = SUBJECT_FOCUS_DISTANCE;
@@ -66311,7 +66482,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	    this.cameraFrame.dof.blurRadius = effect.blurRadius;
 	    this.cameraFrame.dof.blurRings = 4;
 	    this.cameraFrame.dof.blurRingPoints = 5;
-	    this.cameraFrame.rendering.sharpness = enabled ? 0.24 : 0;
+	    this.cameraFrame.rendering.sharpness = 0;
 	    this.cameraFrame.update();
 	  }
 
@@ -66475,10 +66646,12 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	exports.buildViewDepthProxyGeometry = buildViewDepthProxyGeometry;
 	exports.bytesToBase64 = bytesToBase64;
 	exports.collectDepthProxyCenters = collectDepthProxyCenters;
+	exports.configureGsplatStreaming = configureGsplatStreaming;
 	exports.depthOfFieldForStrength = depthOfFieldForStrength;
 	exports.flipPixelRows = flipPixelRows;
 	exports.harmonizationViewpointKey = harmonizationViewpointKey;
 	exports.hasPixelVariation = hasPixelVariation;
+	exports.isStreamedSceneUrl = isStreamedSceneUrl;
 	exports.start = start;
 
 	Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });

@@ -291,6 +291,18 @@ def test_viewpoint_round_trips_through_application_data(tmp_path: Path) -> None:
     assert restored.camera_fingerprint == viewpoint.camera_fingerprint
 
 
+def test_viewpoint_store_discards_rebuilt_room_camera(tmp_path: Path) -> None:
+    """A rebuilt scene starts from its newly calibrated default viewpoint."""
+    store = ViewpointStore(tmp_path / "viewpoints-v1.json")
+    store.save("room-1", Viewpoint(position=Vector3(x=1, y=1, z=1)))
+    store.save("room-2", Viewpoint(position=Vector3(x=2, y=2, z=2)))
+
+    store.delete("room-1")
+
+    assert store.load("room-1") is None
+    assert store.load("room-2") is not None
+
+
 def test_v1_viewpoint_keeps_original_subject_framing_and_depth() -> None:
     """Preserve the original full-frame subject behavior while adding DOF."""
     payload = Viewpoint().model_dump(mode="json")

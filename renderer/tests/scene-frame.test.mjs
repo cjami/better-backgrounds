@@ -158,3 +158,35 @@ test('cached viewpoint refresh captures a sharp reference before the DOF backgro
     ['request', 2, 'background', 9],
   ]);
 });
+
+test('held flight keys move the camera and orbit target through the scene', () => {
+  const cameraCalls = [];
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.viewpoint = {
+    position: { x: 0, y: 1, z: 0 },
+    orbit_target: { x: 0, y: 1, z: -1 },
+    horizon: 0,
+    safe_camera_region: {
+      minimum: { x: -10, y: -10, z: -10 },
+      maximum: { x: 10, y: 10, z: 10 },
+    },
+  };
+  renderer.flightKeys = new Set(['w']);
+  renderer.flightDirty = false;
+  renderer.warning = { hidden: true };
+  renderer.camera = {
+    forward: { x: 0, y: 0, z: -1 },
+    right: { x: 1, y: 0, z: 0 },
+    setPosition: (...values) => cameraCalls.push(['position', ...values]),
+    lookAt: (...values) => cameraCalls.push(['target', ...values]),
+    rotateLocal: () => {},
+  };
+  renderer.requestSceneFrame = () => cameraCalls.push(['render']);
+
+  renderer.updateFlight(0.1);
+
+  assert.ok(renderer.viewpoint.position.z < 0);
+  assert.equal(renderer.viewpoint.orbit_target.z, renderer.viewpoint.position.z - 1);
+  assert.equal(renderer.flightDirty, true);
+  assert.equal(cameraCalls.at(-1)[0], 'render');
+});

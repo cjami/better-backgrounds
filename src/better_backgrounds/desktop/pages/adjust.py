@@ -191,6 +191,13 @@ class AdjustPage(QWidget):
         self._mirrored.setChecked(mirrored)
         self._mirrored.blockSignals(False)  # noqa: FBT003
 
+    def discard_viewpoint(self, room_id: str) -> None:
+        """Forget an in-memory camera draft when scene framing is rebuilt."""
+        self._drafts.pop(room_id, None)
+        if self._room_id == room_id:
+            self._room_id = ""
+            self._loaded_scene_id = ""
+
     def set_room(
         self,
         room: str,

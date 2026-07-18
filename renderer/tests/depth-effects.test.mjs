@@ -6,14 +6,27 @@ import {
   buildDepthProxyGeometry,
   buildViewDepthProxyGeometry,
   collectDepthProxyCenters,
+  configureGsplatStreaming,
   depthOfFieldForStrength,
   harmonizationViewpointKey,
+  isStreamedSceneUrl,
 } from '../src/main.mjs';
 
 const viewpoint = {
   depth_of_field: { blur_strength: 0.5 },
   field_of_view: 42,
 };
+
+test('streamed scenes refresh LOD detail after small camera turns and movements', () => {
+  const scene = { gsplat: {} };
+
+  configureGsplatStreaming(scene);
+
+  assert.equal(scene.gsplat.lodUpdateAngle, 2);
+  assert.equal(scene.gsplat.lodUpdateDistance, 0.1);
+  assert.equal(isStreamedSceneUrl('scene://room/lod-meta.json'), true);
+  assert.equal(isStreamedSceneUrl('scene://room/scene.ply'), false);
+});
 
 test('normal depth of field stays locked to subject depth', () => {
   const renderer = Object.create(SceneRenderer.prototype);
@@ -38,7 +51,7 @@ test('normal depth of field stays locked to subject depth', () => {
   assert.equal(renderer.cameraFrame.dof.highQuality, true);
   assert.equal(renderer.cameraFrame.dof.blurRings, 4);
   assert.equal(renderer.cameraFrame.dof.blurRingPoints, 5);
-  assert.equal(renderer.cameraFrame.rendering.sharpness, 0.24);
+  assert.equal(renderer.cameraFrame.rendering.sharpness, 0);
   assert.equal(renderer.cameraFrame.updateCalled, true);
 });
 
@@ -193,9 +206,9 @@ test('zero background blur keeps a stable depth pipeline with a zero radius', ()
 
   renderer.configureNormalFrame();
 
-  assert.equal(renderer.cameraFrame.dof.enabled, true);
+  assert.equal(renderer.cameraFrame.dof.enabled, false);
   assert.equal(renderer.cameraFrame.dof.blurRadius, 0);
-  assert.equal(renderer.cameraFrame.rendering.sharpness, 0.24);
+  assert.equal(renderer.cameraFrame.rendering.sharpness, 0);
 });
 
 test('interactive renderer remains live when requesting a scene frame', () => {

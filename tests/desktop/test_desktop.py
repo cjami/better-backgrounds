@@ -181,6 +181,24 @@ def test_adjust_reuses_scene_and_keeps_its_room_draft() -> None:
     page.close()
 
 
+def test_adjust_reloads_a_reimported_scene_from_its_new_default() -> None:
+    """Discard stale camera and renderer state when a stable scene ID is rebuilt."""
+    application()
+    renderer = TrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    sliders = {slider.accessibleName(): slider for slider in page.findChildren(QSlider)}
+
+    page.set_room(scene.asset_id, scene, installed=True)
+    sliders["Field of view"].setValue(60)
+    page.discard_viewpoint(scene.asset_id)
+    page.set_room(scene.asset_id, scene, installed=True)
+
+    assert len(renderer.scenes) == 2
+    assert renderer.scenes[-1][1] == scene.default_viewpoint
+    page.close()
+
+
 def test_adjust_keeps_asset_normalization_when_restoring_a_saved_camera() -> None:
     """Do not let an older room preference undo the scene's import transform."""
     application()

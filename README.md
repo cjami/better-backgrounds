@@ -87,8 +87,10 @@ cache. Both the official
 `.zip` packaging and `.ssog`-suffixed ZIPs are accepted. Unsafe archive paths,
 external resources, malformed trees, missing images, inconsistent chunk ranges,
 and scenes over the runtime Gaussian limit are rejected. Generic PLY splats use
-automatic COLMAP/Brush orientation; Streamed SOG uses its native PlayCanvas
-coordinate frame and tree bounds. The selected source remains untouched.
+automatic COLMAP/Brush orientation; Streamed SOG is normalized into the same
+upright application frame. Sampled splat bounds choose the entry camera while
+the complete validated chunk bounds remain available for navigation, ignoring
+unreliable coarse tree bounds. The selected source remains untouched.
 
 The worker stages are validation, model preparation, model loading, inference,
 PLY validation, publication, and preview generation. It runs the exact pinned
@@ -168,7 +170,14 @@ Depth-of-field blur is available for every loaded spatial room and defaults to
 0%. SHARP scenes use their embedded raster camera metadata; other PLY and SOG
 scenes use a bounded view-dependent proxy generated from splat centers. SSOG
 proxies refresh from the LOD chunks currently resident in memory as streaming
-settles.
+settles. At 0%, the depth proxy remains ready while the visual post-process is
+bypassed.
+
+In Adjust, drag to look around a streamed environment or orbit a PLY scene. The
+wheel moves through streamed rooms or zooms around PLY scenes. Hold
+`W`/`A`/`S`/`D` to fly; `Q` and `E` move down and up, and holding Shift
+accelerates movement. Re-importing a room resets stale saved framing so the new
+calibrated entry viewpoint is used immediately.
 
 The Table Tennis Room sample is downloaded only when requested in Show, checked
 against its manifest, and attributed to Ethan (`ethan3111`) under CC BY 4.0.

@@ -38,6 +38,9 @@ MAX_SH_PALETTE = 65_536
 MAX_EXP_INPUT = 709.0
 MAX_IMAGE_PIXELS = 16_000_000
 MAX_STREAMED_GAUSSIANS = 100_000_000
+MAX_POSITION_SAMPLES_PER_CHUNK = 4_096
+ROBUST_BOUND_QUANTILE = 0.001
+MIN_ROBUST_EXTENT = 1e-6
 SOG_COMPONENT_FILES = {"means": 2, "scales": 1, "quats": 1, "sh0": 1}
 
 
@@ -59,6 +62,8 @@ class StreamedSogInspection:
     file_size: int
     bounds_minimum: tuple[float, float, float]
     bounds_maximum: tuple[float, float, float]
+    navigation_bounds_minimum: tuple[float, float, float]
+    navigation_bounds_maximum: tuple[float, float, float]
     resources: tuple[StreamedSogResource, ...]
 
 
@@ -75,6 +80,7 @@ class ExtractedSogResource:
 class _TreeValidation:
     counts: list[int]
     file_ranges: dict[int, list[tuple[int, int]]]
+    level_files: dict[int, set[int]]
     nodes: int = 0
 
 
@@ -261,6 +267,7 @@ def _validate_tree(  # noqa: C901
             raise ValueError(msg)
         validation.counts[level] += count
         validation.file_ranges.setdefault(file_index, []).append((offset, offset + count))
+        validation.level_files.setdefault(level, set()).add(file_index)
 
 
 def _component_files(meta: dict[str, Any], component: str, expected: int) -> list[str]:
@@ -324,13 +331,90 @@ def _verify_image(
     return size
 
 
+def _sample_positions(
+    archive: ZipFile,
+    members: dict[str, ZipInfo],
+    meta_path: str,
+    means: dict[str, Any],
+    count: int,
+) -> tuple[tuple[float, float, float], ...]:
+    files = _component_files({"means": means}, "means", 2)
+    images: list[Image.Image] = []
+    try:
+        for name in files:
+            path = _resolve_resource(meta_path, name)
+            with archive.open(members[path]) as source, Image.open(source) as image:
+                images.append(image.convert("RGBA"))
+        low, high = images
+        width = low.width
+        stride = max(1, math.ceil(count / MAX_POSITION_SAMPLES_PER_CHUNK))
+        indices = list(range(0, count, stride))
+        if indices[-1] != count - 1:
+            indices.append(count - 1)
+        minimum = _finite_vector(means.get("mins"), "SOG position minimum")
+        maximum = _finite_vector(means.get("maxs"), "SOG position maximum")
+
+        def decode(
+            axis: int,
+            low_value: tuple[int, int, int, int],
+            high_value: tuple[int, int, int, int],
+        ) -> float:
+            normalized = ((high_value[axis] << 8) + low_value[axis]) / 65_535
+            return minimum[axis] + (maximum[axis] - minimum[axis]) * normalized
+
+        samples: list[tuple[float, float, float]] = []
+        for index in indices:
+            coordinate = index % width, index // width
+            low_value = cast("tuple[int, int, int, int]", low.getpixel(coordinate))
+            high_value = cast("tuple[int, int, int, int]", high.getpixel(coordinate))
+            samples.append(
+                (
+                    decode(0, low_value, high_value),
+                    decode(1, low_value, high_value),
+                    decode(2, low_value, high_value),
+                ),
+            )
+        return tuple(samples)
+    finally:
+        for image in images:
+            image.close()
+
+
+def _robust_sample_bounds(
+    samples: list[tuple[float, float, float]],
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    if not samples:
+        return None
+    minimum: list[float] = []
+    maximum: list[float] = []
+    for axis in range(VECTOR_DIMENSIONS):
+        values = sorted(sample[axis] for sample in samples)
+        lower = math.floor((len(values) - 1) * ROBUST_BOUND_QUANTILE)
+        upper = math.ceil((len(values) - 1) * (1 - ROBUST_BOUND_QUANTILE))
+        minimum.append(values[lower])
+        maximum.append(values[upper])
+    if any(high - low <= MIN_ROBUST_EXTENT for low, high in zip(minimum, maximum, strict=True)):
+        return None
+    return (
+        cast("tuple[float, float, float]", tuple(minimum)),
+        cast("tuple[float, float, float]", tuple(maximum)),
+    )
+
+
 def _validate_sog(  # noqa: C901, PLR0912, PLR0915
     archive: ZipFile,
     members: dict[str, ZipInfo],
     meta_path: str,
     *,
     validate_payloads: bool,
-) -> tuple[int, tuple[str, ...]]:
+    sample_positions: bool = False,
+) -> tuple[
+    int,
+    tuple[str, ...],
+    tuple[float, float, float],
+    tuple[float, float, float],
+    tuple[tuple[float, float, float], ...],
+]:
     info = members.get(meta_path)
     if info is None:
         msg = f"Streamed SOG is missing chunk metadata {meta_path!r}"
@@ -409,7 +493,10 @@ def _validate_sog(  # noqa: C901, PLR0912, PLR0915
             if size[0] != 64 * coefficients or sh_palette_count > 64 * size[1]:
                 msg = "SOG spherical-harmonic palette has invalid dimensions"
                 raise ValueError(msg)
-    return count, (meta_path, *resolved)
+    samples = (
+        _sample_positions(archive, members, meta_path, means, count) if sample_positions else ()
+    )
+    return count, (meta_path, *resolved), minimum, maximum, samples
 
 
 def _root_relative(archive_name: str, root: PurePosixPath) -> str:
@@ -482,6 +569,7 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
             validation = _TreeValidation(
                 counts=[0] * lod_levels,
                 file_ranges={},
+                level_files={},
             )
             _validate_tree(
                 manifest.get("tree"),
@@ -507,12 +595,22 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
 
             resource_paths: list[str] = [manifest_name]
             visible_count = counts[0]
+            full_detail_minimum = [math.inf] * VECTOR_DIMENSIONS
+            full_detail_maximum = [-math.inf] * VECTOR_DIMENSIONS
+            full_detail_samples: list[tuple[float, float, float]] = []
             for index, meta_path in enumerate(chunk_archive_paths):
-                chunk_count, chunk_resources = _validate_sog(
+                (
+                    chunk_count,
+                    chunk_resources,
+                    chunk_minimum,
+                    chunk_maximum,
+                    chunk_samples,
+                ) = _validate_sog(
                     archive,
                     members,
                     meta_path,
                     validate_payloads=validate_payloads,
+                    sample_positions=index in validation.level_files[0],
                 )
                 ranges = sorted(validation.file_ranges[index])
                 cursor = 0
@@ -524,6 +622,17 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
                 if cursor != chunk_count:
                     msg = "Streamed SOG chunk ranges do not cover their SOG data"
                     raise ValueError(msg)
+                if index in validation.level_files[0]:
+                    full_detail_samples.extend(chunk_samples)
+                    for axis in range(VECTOR_DIMENSIONS):
+                        full_detail_minimum[axis] = min(
+                            full_detail_minimum[axis],
+                            chunk_minimum[axis],
+                        )
+                        full_detail_maximum[axis] = max(
+                            full_detail_maximum[axis],
+                            chunk_maximum[axis],
+                        )
                 resource_paths.extend(chunk_resources)
 
             environment = manifest.get("environment")
@@ -532,7 +641,13 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
                 if PurePosixPath(environment_path).name != "meta.json":
                     msg = "Streamed SOG environment must name a SOG meta.json file"
                     raise ValueError(msg)
-                environment_count, environment_resources = _validate_sog(
+                (
+                    environment_count,
+                    environment_resources,
+                    _minimum,
+                    _maximum,
+                    _samples,
+                ) = _validate_sog(
                     archive,
                     members,
                     (root / PurePosixPath(environment_path)).as_posix(),
@@ -552,7 +667,19 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
                 )
                 for name in unique_resources
             )
-            minimum, maximum = _bounds(manifest["tree"].get("bound"), "Streamed SOG scene")
+            navigation_minimum = cast(
+                "tuple[float, float, float]",
+                tuple(full_detail_minimum),
+            )
+            navigation_maximum = cast(
+                "tuple[float, float, float]",
+                tuple(full_detail_maximum),
+            )
+            robust_bounds = _robust_sample_bounds(full_detail_samples)
+            if robust_bounds is not None:
+                minimum, maximum = robust_bounds
+            else:
+                minimum, maximum = navigation_minimum, navigation_maximum
     except BadZipFile as error:
         msg = "The selected file is not a valid Streamed SOG ZIP archive"
         raise ValueError(msg) from error
@@ -563,6 +690,8 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
         file_size=path.stat().st_size,
         bounds_minimum=minimum,
         bounds_maximum=maximum,
+        navigation_bounds_minimum=navigation_minimum,
+        navigation_bounds_maximum=navigation_maximum,
         resources=managed_resources,
     )
 

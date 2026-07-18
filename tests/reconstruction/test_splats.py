@@ -130,14 +130,22 @@ def _webp(width: int = 2, height: int = 2) -> bytes:
     return output.getvalue()
 
 
-def _sog_metadata(count: int) -> dict[str, object]:
+def _webp_pixels(pixels: list[tuple[int, int, int, int]]) -> bytes:
+    output = BytesIO()
+    image = Image.new("RGBA", (2, 2))
+    image.putdata(pixels)
+    image.save(output, format="WEBP", lossless=True)
+    return output.getvalue()
+
+
+def _sog_metadata(count: int, *, position_limit: float = 1.0) -> dict[str, object]:
     codebook = [0.0] * 256
     return {
         "version": 2,
         "count": count,
         "means": {
-            "mins": [-1.0, -1.0, -1.0],
-            "maxs": [1.0, 1.0, 1.0],
+            "mins": [-position_limit, -position_limit, -position_limit],
+            "maxs": [position_limit, position_limit, position_limit],
             "files": ["means_l.webp", "means_u.webp"],
         },
         "scales": {"codebook": codebook, "files": ["scales.webp"]},
@@ -146,7 +154,7 @@ def _sog_metadata(count: int) -> dict[str, object]:
     }
 
 
-def write_streamed_sog(  # noqa: C901, PLR0913
+def write_streamed_sog(  # noqa: C901, PLR0912, PLR0913
     path: Path,
     *,
     prefix: str = "",
@@ -156,6 +164,7 @@ def write_streamed_sog(  # noqa: C901, PLR0913
     include_environment: bool = False,
     oversized: bool = False,
     manifest_version: int | None = 1,
+    loose_position_bounds: bool = False,
 ) -> None:
     """Write a small packaged two-level Streamed SOG fixture."""
     root = f"{prefix.rstrip('/')}/" if prefix else ""
@@ -189,10 +198,25 @@ def write_streamed_sog(  # noqa: C901, PLR0913
         f"{root}lod-meta.json": json.dumps(manifest).encode(),
     }
     image = _webp()
+    low_means = _webp_pixels([(0, 0, 0, 255)] * 4)
+    high_means = _webp_pixels(
+        [
+            (120, 121, 122, 255),
+            (124, 125, 126, 255),
+            (132, 133, 134, 255),
+            (136, 137, 138, 255),
+        ],
+    )
     for directory, count in (("0_0", 4), ("1_0", 2)):
-        members[f"{root}{directory}/meta.json"] = json.dumps(_sog_metadata(count)).encode()
+        metadata = _sog_metadata(count, position_limit=75.0 if loose_position_bounds else 1.0)
+        members[f"{root}{directory}/meta.json"] = json.dumps(metadata).encode()
         for name in ("means_l.webp", "means_u.webp", "scales.webp", "quats.webp", "sh0.webp"):
-            members[f"{root}{directory}/{name}"] = image
+            payload = image
+            if loose_position_bounds and name == "means_l.webp":
+                payload = low_means
+            elif loose_position_bounds and name == "means_u.webp":
+                payload = high_means
+            members[f"{root}{directory}/{name}"] = payload
     if include_environment:
         members[f"{root}env/meta.json"] = json.dumps(_sog_metadata(1)).encode()
         for name in ("means_l.webp", "means_u.webp", "scales.webp", "quats.webp", "sh0.webp"):
@@ -270,7 +294,8 @@ def test_inspector_accepts_packaged_streamed_sog_with_nested_root(tmp_path: Path
     assert diagnostics.total_gaussian_count == 7
     assert diagnostics.lod_levels == 2
     assert diagnostics.resource_count == 19
-    assert diagnostics.bounds_minimum == (-4.0, -2.0, -6.0)
+    assert diagnostics.bounds_minimum == (-1.0, -1.0, -1.0)
+    assert diagnostics.bounds_maximum == (1.0, 1.0, 1.0)
 
 
 def test_inspector_accepts_pre_release_streamed_sog_metadata(tmp_path: Path) -> None:
@@ -283,6 +308,19 @@ def test_inspector_accepts_pre_release_streamed_sog_metadata(tmp_path: Path) -> 
     assert diagnostics.gaussian_count == 4
     assert diagnostics.total_gaussian_count == 6
     assert diagnostics.lod_levels == 2
+
+
+def test_inspector_uses_sampled_positions_instead_of_loose_chunk_bounds(tmp_path: Path) -> None:
+    """Keep framing stable when quantization metadata contains distant outliers."""
+    path = tmp_path / "loose-bounds.ssog"
+    write_streamed_sog(path, loose_position_bounds=True)
+
+    diagnostics = inspect_gaussian_scene(path)
+
+    assert max(abs(value) for value in diagnostics.bounds_minimum) < 10
+    assert max(abs(value) for value in diagnostics.bounds_maximum) < 10
+    assert diagnostics.navigation_bounds_minimum == (-75.0, -75.0, -75.0)
+    assert diagnostics.navigation_bounds_maximum == (75.0, 75.0, 75.0)
 
 
 def test_inspector_rejects_unknown_explicit_streamed_sog_version(tmp_path: Path) -> None:
@@ -381,7 +419,14 @@ def test_importer_adopts_streamed_sog_resources_without_touching_source(
     assert first.entrypoint == "lod-meta.json"
     assert first.preview is None
     assert first.default_viewpoint.depth_of_field.blur_strength == 0
-    assert first.default_viewpoint.scene_transform.orientation.w == 1
+    assert first.default_viewpoint.scene_transform.orientation.z == 1
+    assert first.default_viewpoint.scene_transform.scale == 1
+    assert first.default_viewpoint.position.x == pytest.approx(0.65)
+    assert first.default_viewpoint.position.y == pytest.approx(0.5)
+    assert first.default_viewpoint.position.z == pytest.approx(1.06)
+    assert first.default_viewpoint.field_of_view == 80
+    assert first.default_viewpoint.safe_camera_region.minimum.x == pytest.approx(-1.5)
+    assert first.default_viewpoint.safe_camera_region.maximum.z == pytest.approx(1.5)
     assert len(first.resources) == 19
     assert (scene_root / first.asset_id / "0_0" / "meta.json").is_file()
     assert (scene_root / first.asset_id / "env" / "meta.json").is_file()

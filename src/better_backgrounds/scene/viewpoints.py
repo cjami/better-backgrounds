@@ -36,6 +36,15 @@ class ViewpointStore:
         """Atomically replace one room's saved viewpoint."""
         document = self._read()
         document.rooms[room_id] = viewpoint
+        self._write(document)
+
+    def delete(self, room_id: str) -> None:
+        """Discard a saved viewpoint after its scene is rebuilt or re-imported."""
+        document = self._read()
+        if document.rooms.pop(room_id, None) is not None:
+            self._write(document)
+
+    def _write(self, document: ViewpointDocument) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
         try:

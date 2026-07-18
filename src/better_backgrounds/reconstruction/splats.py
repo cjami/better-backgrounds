@@ -41,6 +41,11 @@ PLY_SAMPLE_LIMIT = 200_000
 CANONICAL_HALF_EXTENT = 2.5
 DEFAULT_FIELD_OF_VIEW = 42.0
 DEFAULT_ASPECT_RATIO = 16 / 9
+STREAMED_FIELD_OF_VIEW = 80.0
+STREAMED_ENTRY_SIDE = 0.65
+STREAMED_ENTRY_DEPTH = 1.06
+STREAMED_LOOK_DISTANCE = 0.9
+STREAMED_NAVIGATION_PADDING = 0.25
 PLY_DECLARATION_PARTS = 3
 COMPRESSED_BASE_ELEMENT_COUNT = 2
 MIN_ROTATION_NORM = 1e-6
@@ -129,6 +134,8 @@ class SplatDiagnostics:
     lod_levels: int = 1
     resource_count: int = 1
     total_gaussian_count: int | None = None
+    navigation_bounds_minimum: tuple[float, float, float] | None = None
+    navigation_bounds_maximum: tuple[float, float, float] | None = None
 
     @property
     def encoding(self) -> str:
@@ -459,6 +466,8 @@ def _streamed_diagnostics(inspection: StreamedSogInspection) -> SplatDiagnostics
         lod_levels=inspection.lod_levels,
         resource_count=len(inspection.resources),
         total_gaussian_count=inspection.total_gaussian_count,
+        navigation_bounds_minimum=inspection.navigation_bounds_minimum,
+        navigation_bounds_maximum=inspection.navigation_bounds_maximum,
     )
 
 
@@ -541,6 +550,79 @@ def _generic_viewpoint(
                 x=position.x + padding,
                 y=position.y + padding,
                 z=position.z + padding,
+            ),
+        ),
+    )
+
+
+def _streamed_viewpoint(diagnostics: SplatDiagnostics) -> Viewpoint:
+    source_minimum = diagnostics.bounds_minimum
+    source_maximum = diagnostics.bounds_maximum
+    minimum = (-source_maximum[0], -source_maximum[1], source_minimum[2])
+    maximum = (-source_minimum[0], -source_minimum[1], source_maximum[2])
+    navigation_source_minimum = diagnostics.navigation_bounds_minimum or source_minimum
+    navigation_source_maximum = diagnostics.navigation_bounds_maximum or source_maximum
+    navigation_minimum = (
+        -navigation_source_maximum[0],
+        -navigation_source_maximum[1],
+        navigation_source_minimum[2],
+    )
+    navigation_maximum = (
+        -navigation_source_minimum[0],
+        -navigation_source_minimum[1],
+        navigation_source_maximum[2],
+    )
+    spans = tuple(high - low for low, high in zip(minimum, maximum, strict=True))
+    if any(not math.isfinite(span) or span <= MIN_SCENE_EXTENT for span in spans):
+        msg = "Streamed SOG scene does not contain a usable spatial extent"
+        raise ValueError(msg)
+    center = tuple((low + high) / 2 for low, high in zip(minimum, maximum, strict=True))
+    half_x, _half_y, half_z = (span / 2 for span in spans)
+    horizontal_extent = max(spans[0], spans[2])
+    ceiling_clearance = min(1.7, max(0.5, spans[1] * 0.065))
+    position = Vector3(
+        x=center[0] + half_x * STREAMED_ENTRY_SIDE,
+        y=maximum[1] - ceiling_clearance,
+        z=center[2] + half_z * STREAMED_ENTRY_DEPTH,
+    )
+    inward_x = center[0] - position.x
+    inward_z = center[2] - position.z
+    inward_length = math.hypot(inward_x, inward_z)
+    if inward_length <= MIN_SCENE_EXTENT:
+        inward_x, inward_z, inward_length = 0.0, -1.0, 1.0
+    look_distance = min(
+        1.5,
+        max(STREAMED_LOOK_DISTANCE, horizontal_extent * 0.08),
+    )
+    target = Vector3(
+        x=position.x + inward_x / inward_length * look_distance,
+        y=position.y,
+        z=position.z + inward_z / inward_length * look_distance,
+    )
+    navigation_spans = tuple(
+        high - low for low, high in zip(navigation_minimum, navigation_maximum, strict=True)
+    )
+    padding = tuple(max(0.5, span * STREAMED_NAVIGATION_PADDING) for span in navigation_spans)
+    diagonal = math.hypot(*navigation_spans)
+    return Viewpoint(
+        position=position,
+        orbit_target=target,
+        field_of_view=STREAMED_FIELD_OF_VIEW,
+        horizon=0.0,
+        near_clip=0.03,
+        far_clip=min(2_000.0, max(40.0, diagonal * 8.0)),
+        aspect_ratio=DEFAULT_ASPECT_RATIO,
+        scene_transform=SceneTransform(orientation=Quaternion(z=1.0, w=0.0)),
+        safe_camera_region=CameraBounds(
+            minimum=Vector3(
+                x=navigation_minimum[0] - padding[0],
+                y=navigation_minimum[1] - padding[1],
+                z=navigation_minimum[2] - padding[2],
+            ),
+            maximum=Vector3(
+                x=navigation_maximum[0] + padding[0],
+                y=navigation_maximum[1] + padding[1],
+                z=navigation_maximum[2] + padding[2],
             ),
         ),
     )
@@ -668,7 +750,7 @@ class SplatSceneImporter:
         return self._reference(
             selection,
             sha256_file(source),
-            _generic_viewpoint(diagnostics, colmap_coordinates=False),
+            _streamed_viewpoint(diagnostics),
             format_name="ssog",
             entrypoint="lod-meta.json",
             resources=tuple(
