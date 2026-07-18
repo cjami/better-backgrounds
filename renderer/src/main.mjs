@@ -22,10 +22,18 @@ const MIN_PERSPECTIVE_SCALE = 0.75;
 const MAX_PERSPECTIVE_SCALE = 1.25;
 const DEPTH_PROXY_COLUMNS = 384;
 const DEPTH_PROXY_SAMPLE_RANK = 3;
+const GENERIC_DEPTH_PROXY_SAMPLE_RANK = 2;
 const DEPTH_PROXY_MAX_RELATIVE_STEP = 0.2;
 const DEPTH_PROXY_MIN_STEP_METRES = 0.5;
 const DEPTH_PROXY_MAX_CENTERS = 1_000_000;
 const DEPTH_PROXY_REFRESH_DELAY_MS = 120;
+const DEPTH_PROXY_ALPHA_THRESHOLD = 1 / 255;
+const DEPTH_PROXY_MIN_FOOTPRINT_CELLS = 0.65;
+const DEPTH_PROXY_MAX_FOOTPRINT_CELLS = 6;
+const DEPTH_PROXY_HOLE_FILL_PASSES = 2;
+const DEPTH_PROXY_HOLE_FILL_NEIGHBORS = 5;
+const GENERIC_DEPTH_PROXY_NEAR_QUANTILE = 0.01;
+const GENERIC_MIN_FOCUS_RANGE = 0.001;
 
 const depthOfFieldForStrength = (strength, fieldOfView = REFERENCE_FIELD_OF_VIEW) => {
   const blurStrength = Math.min(1, Math.max(0, strength));
@@ -161,13 +169,16 @@ const buildDepthProxyGeometry = (gsplatData, requestedColumns = DEPTH_PROXY_COLU
 };
 
 const buildViewDepthProxyGeometry = (
-  centers,
+  samples,
   projectCenter,
   unprojectDepth,
   viewportWidth,
   viewportHeight,
   requestedColumns = DEPTH_PROXY_COLUMNS,
 ) => {
+  const centers = samples?.centers ?? samples;
+  const radii = samples?.radii ?? null;
+  const opacities = samples?.opacities ?? null;
   if (!centers || centers.length < 9 || viewportWidth < 2 || viewportHeight < 2) return null;
   const columns = Math.max(2, Math.min(viewportWidth, Math.trunc(requestedColumns)));
   const rows = Math.max(2, Math.min(
@@ -178,14 +189,31 @@ const buildViewDepthProxyGeometry = (
   const valid = new Uint8Array(columns * rows);
   const positions = new Float32Array(columns * rows * 3);
   const rankedDepths = Array.from(
-    { length: DEPTH_PROXY_SAMPLE_RANK },
+    { length: GENERIC_DEPTH_PROXY_SAMPLE_RANK },
     () => new Float32Array(columns * rows).fill(Number.POSITIVE_INFINITY),
   );
+  const insertDepth = (column, row, depth) => {
+    if (column < 0 || column >= columns || row < 0 || row >= rows) return;
+    const targetIndex = row * columns + column;
+    for (let rank = 0; rank < GENERIC_DEPTH_PROXY_SAMPLE_RANK; rank += 1) {
+      if (depth >= rankedDepths[rank][targetIndex]) continue;
+      for (let move = GENERIC_DEPTH_PROXY_SAMPLE_RANK - 1; move > rank; move -= 1) {
+        rankedDepths[move][targetIndex] = rankedDepths[move - 1][targetIndex];
+      }
+      rankedDepths[rank][targetIndex] = depth;
+      break;
+    }
+  };
   const centerCount = Math.floor(centers.length / 3);
   const stride = Math.max(1, Math.ceil(centerCount / DEPTH_PROXY_MAX_CENTERS));
   for (let centerIndex = 0; centerIndex < centerCount; centerIndex += stride) {
     const offset = centerIndex * 3;
-    const projected = projectCenter(centers[offset], centers[offset + 1], centers[offset + 2]);
+    const projected = projectCenter(
+      centers[offset],
+      centers[offset + 1],
+      centers[offset + 2],
+      radii?.[centerIndex] ?? 0,
+    );
     if (
       !projected
       || !Number.isFinite(projected.x)
@@ -193,24 +221,84 @@ const buildViewDepthProxyGeometry = (
       || !Number.isFinite(projected.depth)
       || projected.depth <= 0
     ) continue;
-    const column = Math.floor(projected.x * columns / viewportWidth);
-    const row = Math.floor(projected.y * rows / viewportHeight);
-    if (column < 0 || column >= columns || row < 0 || row >= rows) continue;
-    const targetIndex = row * columns + column;
-    for (let rank = 0; rank < DEPTH_PROXY_SAMPLE_RANK; rank += 1) {
-      if (projected.depth >= rankedDepths[rank][targetIndex]) continue;
-      for (let move = DEPTH_PROXY_SAMPLE_RANK - 1; move > rank; move -= 1) {
-        rankedDepths[move][targetIndex] = rankedDepths[move - 1][targetIndex];
-      }
-      rankedDepths[rank][targetIndex] = projected.depth;
-      break;
+    const centerColumn = projected.x * columns / viewportWidth;
+    const centerRow = projected.y * rows / viewportHeight;
+    const opacity = Math.min(1, Math.max(0, opacities?.[centerIndex] ?? 1));
+    const alphaScale = Math.max(
+      1,
+      opacity > DEPTH_PROXY_ALPHA_THRESHOLD
+        ? Math.sqrt(2 * Math.log(opacity / DEPTH_PROXY_ALPHA_THRESHOLD))
+        : 0,
+    );
+    const projectedRadius = Math.max(0, projected.radius ?? 0) * alphaScale;
+    const radiusColumns = projectedRadius > 0
+      ? Math.min(
+        DEPTH_PROXY_MAX_FOOTPRINT_CELLS,
+        Math.max(DEPTH_PROXY_MIN_FOOTPRINT_CELLS, projectedRadius * columns / viewportWidth),
+      )
+      : 0;
+    const radiusRows = projectedRadius > 0
+      ? Math.min(
+        DEPTH_PROXY_MAX_FOOTPRINT_CELLS,
+        Math.max(DEPTH_PROXY_MIN_FOOTPRINT_CELLS, projectedRadius * rows / viewportHeight),
+      )
+      : 0;
+    if (radiusColumns === 0 || radiusRows === 0) {
+      insertDepth(Math.floor(centerColumn), Math.floor(centerRow), projected.depth);
+      continue;
     }
+    const minimumColumn = Math.floor(centerColumn - radiusColumns);
+    const maximumColumn = Math.floor(centerColumn + radiusColumns);
+    const minimumRow = Math.floor(centerRow - radiusRows);
+    const maximumRow = Math.floor(centerRow + radiusRows);
+    for (let row = minimumRow; row <= maximumRow; row += 1) {
+      for (let column = minimumColumn; column <= maximumColumn; column += 1) {
+        const dx = (column + 0.5 - centerColumn) / radiusColumns;
+        const dy = (row + 0.5 - centerRow) / radiusRows;
+        if (dx * dx + dy * dy <= 1) insertDepth(column, row, projected.depth);
+      }
+    }
+  }
+  const surfaceDepths = new Float32Array(columns * rows).fill(Number.POSITIVE_INFINITY);
+  for (let index = 0; index < surfaceDepths.length; index += 1) {
+    const rankedDepth = rankedDepths[GENERIC_DEPTH_PROXY_SAMPLE_RANK - 1][index];
+    surfaceDepths[index] = Number.isFinite(rankedDepth) ? rankedDepth : rankedDepths[0][index];
+  }
+  for (let pass = 0; pass < DEPTH_PROXY_HOLE_FILL_PASSES; pass += 1) {
+    const filled = surfaceDepths.slice();
+    let changed = false;
+    for (let row = 1; row < rows - 1; row += 1) {
+      for (let column = 1; column < columns - 1; column += 1) {
+        const targetIndex = row * columns + column;
+        if (Number.isFinite(surfaceDepths[targetIndex])) continue;
+        const neighbors = [];
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) continue;
+            const depth = surfaceDepths[(row + dy) * columns + column + dx];
+            if (Number.isFinite(depth)) neighbors.push(depth);
+          }
+        }
+        if (neighbors.length < DEPTH_PROXY_HOLE_FILL_NEIGHBORS) continue;
+        neighbors.sort((left, right) => left - right);
+        const nearest = neighbors[0];
+        const farthest = neighbors[neighbors.length - 1];
+        const maximumStep = Math.max(
+          DEPTH_PROXY_MIN_STEP_METRES,
+          nearest * DEPTH_PROXY_MAX_RELATIVE_STEP,
+        );
+        if (farthest - nearest > maximumStep) continue;
+        filled[targetIndex] = neighbors[Math.floor(neighbors.length / 2)];
+        changed = true;
+      }
+    }
+    surfaceDepths.set(filled);
+    if (!changed) break;
   }
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
       const targetIndex = row * columns + column;
-      const rankedDepth = rankedDepths[DEPTH_PROXY_SAMPLE_RANK - 1][targetIndex];
-      const depth = Number.isFinite(rankedDepth) ? rankedDepth : rankedDepths[0][targetIndex];
+      const depth = surfaceDepths[targetIndex];
       if (!Number.isFinite(depth)) continue;
       const point = unprojectDepth(
         (column + 0.5) * viewportWidth / columns,
@@ -248,7 +336,13 @@ const buildViewDepthProxyGeometry = (
     }
   }
   if (!indices.length) return null;
-  return { columns, rows, positions, indices: new Uint32Array(indices) };
+  const finiteDepths = Array.from(surfaceDepths)
+    .filter((depth) => Number.isFinite(depth))
+    .sort((left, right) => left - right);
+  const nearDepth = finiteDepths[
+    Math.floor((finiteDepths.length - 1) * GENERIC_DEPTH_PROXY_NEAR_QUANTILE)
+  ];
+  return { columns, rows, positions, indices: new Uint32Array(indices), nearDepth };
 };
 
 const collectDepthProxyCenters = (
@@ -289,6 +383,158 @@ const collectDepthProxyCenters = (
   return outputCenter === sampled.length / 3
     ? sampled
     : sampled.slice(0, outputCenter * 3);
+};
+
+const sogDepthEvidenceCache = new WeakMap();
+
+const textureSourceBytes = (texture) => {
+  const source = texture?.getSource?.() ?? texture?._levels?.[0];
+  if (ArrayBuffer.isView(source)) {
+    return new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+  }
+  if (ArrayBuffer.isView(source?.data)) {
+    return new Uint8Array(source.data.buffer, source.data.byteOffset, source.data.byteLength);
+  }
+  if (
+    typeof OffscreenCanvas !== 'undefined'
+    && source
+    && Number.isFinite(texture.width)
+    && Number.isFinite(texture.height)
+  ) {
+    try {
+      const canvas = new OffscreenCanvas(texture.width, texture.height);
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(source, 0, 0);
+      return context.getImageData(0, 0, texture.width, texture.height).data;
+    } catch (_error) {
+      return null;
+    }
+  }
+  return null;
+};
+
+const sogDepthEvidence = (data) => {
+  if (!data?.meta?.scales || !data.scales) return null;
+  if (sogDepthEvidenceCache.has(data)) return sogDepthEvidenceCache.get(data);
+  const scales = textureSourceBytes(data.scales);
+  if (!scales) {
+    sogDepthEvidenceCache.set(data, null);
+    return null;
+  }
+  const evidence = {
+    scales,
+    colors: textureSourceBytes(data.sh0),
+    meta: data.meta,
+  };
+  sogDepthEvidenceCache.set(data, evidence);
+  return evidence;
+};
+
+const depthProxyRadiusSource = (resource) => {
+  const data = resource?.gsplatData;
+  const scaleX = data?.getProp?.('scale_0');
+  const scaleY = data?.getProp?.('scale_1');
+  const scaleZ = data?.getProp?.('scale_2');
+  const opacity = data?.getProp?.('opacity');
+  if (scaleX && scaleY && scaleZ) return { scaleX, scaleY, scaleZ, opacity };
+  const sog = sogDepthEvidence(data);
+  if (sog) return { sog };
+  const codebook = data?.meta?.scales?.codebook;
+  const finite = Array.isArray(codebook)
+    ? codebook.filter((value) => Number.isFinite(value)).sort((left, right) => left - right)
+    : [];
+  const logRadius = finite.length ? finite[Math.floor(finite.length * 0.75)] : null;
+  return { logRadius };
+};
+
+const collectDepthProxySamples = (
+  resource,
+  maximumCenters = DEPTH_PROXY_MAX_CENTERS,
+) => {
+  if (!resource || maximumCenters < 1) return null;
+  const resources = [];
+  if (resource.centers) resources.push(resource);
+  const octree = resource.octree;
+  if (octree) {
+    for (const loaded of octree.fileResources?.values?.() ?? []) {
+      if (loaded?.centers) resources.push(loaded);
+    }
+    if (octree.environmentResource?.centers) resources.push(octree.environmentResource);
+  }
+  const unique = [...new Set(resources)];
+  const descriptors = unique
+    .filter((item) => item.centers?.length >= 3)
+    .map((item) => ({ item, source: depthProxyRadiusSource(item) }));
+  if (!descriptors.length) return null;
+  const totalCenters = descriptors.reduce(
+    (total, descriptor) => total + Math.floor(descriptor.item.centers.length / 3),
+    0,
+  );
+  const sampleCount = Math.min(totalCenters, maximumCenters);
+  const centers = new Float32Array(sampleCount * 3);
+  const radii = new Float32Array(sampleCount);
+  const opacities = new Float32Array(sampleCount).fill(1);
+  let outputCenter = 0;
+  for (const descriptor of descriptors) {
+    const sourceCenters = descriptor.item.centers;
+    const centerCount = Math.floor(sourceCenters.length / 3);
+    const quota = Math.max(1, Math.floor(maximumCenters * centerCount / totalCenters));
+    const stride = Math.max(1, centerCount / quota);
+    for (let sample = 0; sample < quota && outputCenter < sampleCount; sample += 1) {
+      const sourceCenter = Math.min(centerCount - 1, Math.floor(sample * stride));
+      centers.set(
+        sourceCenters.subarray(sourceCenter * 3, sourceCenter * 3 + 3),
+        outputCenter * 3,
+      );
+      const source = descriptor.source;
+      if (source.scaleX) {
+        const logScales = [
+          source.scaleX[sourceCenter],
+          source.scaleY[sourceCenter],
+          source.scaleZ[sourceCenter],
+        ].sort((left, right) => right - left);
+        radii[outputCenter] = Math.exp((logScales[0] + logScales[1]) / 2);
+        const logit = source.opacity?.[sourceCenter];
+        if (Number.isFinite(logit)) opacities[outputCenter] = 1 / (1 + Math.exp(-logit));
+      } else if (source.sog) {
+        const byteOffset = sourceCenter * 4;
+        const scaleBytes = source.sog.scales;
+        const meta = source.sog.meta;
+        const logScales = meta.version === 2
+          ? [
+            meta.scales.codebook[scaleBytes[byteOffset]],
+            meta.scales.codebook[scaleBytes[byteOffset + 1]],
+            meta.scales.codebook[scaleBytes[byteOffset + 2]],
+          ]
+          : [0, 1, 2].map((axis) => (
+            meta.scales.mins[axis]
+            + (meta.scales.maxs[axis] - meta.scales.mins[axis])
+              * scaleBytes[byteOffset + axis] / 255
+          ));
+        logScales.sort((left, right) => right - left);
+        radii[outputCenter] = Math.exp((logScales[0] + logScales[1]) / 2);
+        const colorBytes = source.sog.colors;
+        if (colorBytes) {
+          if (meta.version === 2) {
+            opacities[outputCenter] = colorBytes[byteOffset + 3] / 255;
+          } else {
+            const logit = meta.sh0.mins[3]
+              + (meta.sh0.maxs[3] - meta.sh0.mins[3]) * colorBytes[byteOffset + 3] / 255;
+            opacities[outputCenter] = 1 / (1 + Math.exp(-logit));
+          }
+        }
+      } else if (Number.isFinite(source.logRadius)) {
+        radii[outputCenter] = Math.exp(source.logRadius);
+      }
+      outputCenter += 1;
+    }
+  }
+  if (outputCenter === sampleCount) return { centers, radii, opacities };
+  return {
+    centers: centers.slice(0, outputCenter * 3),
+    radii: radii.slice(0, outputCenter),
+    opacities: opacities.slice(0, outputCenter),
+  };
 };
 
 const bytesToBase64 = (bytes) => {
@@ -347,9 +593,11 @@ class SceneRenderer {
     this.depthProxyMesh = null;
     this.depthProxyMaterial = null;
     this.depthProxyUsesSceneTransform = false;
+    this.depthProxyNearDepth = null;
     this.gsplatData = null;
     this.depthProxyViewpointKey = '';
     this.depthProxyRefreshTimer = null;
+    this.depthProxyRefreshForce = false;
     this.sceneTransformKey = '';
     this.assetId = '';
     this.viewpoint = null;
@@ -497,11 +745,13 @@ class SceneRenderer {
     this.depthProxyMesh = null;
     this.depthProxyMaterial = null;
     this.depthProxyUsesSceneTransform = false;
+    this.depthProxyNearDepth = null;
     this.gsplatData = null;
     this.sceneResource = null;
     this.depthProxyViewpointKey = '';
     if (this.depthProxyRefreshTimer) clearTimeout(this.depthProxyRefreshTimer);
     this.depthProxyRefreshTimer = null;
+    this.depthProxyRefreshForce = false;
     this.sceneEntity?.destroy();
     this.sceneEntity = null;
     if (this.sceneAsset && this.app) {
@@ -523,7 +773,9 @@ class SceneRenderer {
       this.installDepthProxy(intrinsicGeometry, true);
       return;
     }
-    this.rebuildViewDepthProxy(true);
+    if ((this.viewpoint?.depth_of_field?.blur_strength ?? 0) > 0) {
+      this.rebuildViewDepthProxy(true);
+    }
   }
 
   installDepthProxy(geometry, usesSceneTransform) {
@@ -549,6 +801,7 @@ class SceneRenderer {
     this.depthProxyMesh = mesh;
     this.depthProxyMaterial = material;
     this.depthProxyUsesSceneTransform = usesSceneTransform;
+    this.depthProxyNearDepth = Number.isFinite(geometry.nearDepth) ? geometry.nearDepth : null;
     this.app.root.addChild(entity);
     if (usesSceneTransform) this.applySceneTransform(true);
     this.configureNormalFrame();
@@ -556,6 +809,20 @@ class SceneRenderer {
 
   rebuildViewDepthProxy(force = false) {
     if (!this.sceneResource || !this.sceneEntity || !this.camera || !this.app) return;
+    if ((this.viewpoint?.depth_of_field?.blur_strength ?? 0) <= 0) {
+      if (this.depthProxyEntity && !this.depthProxyUsesSceneTransform) {
+        this.depthProxyEntity.destroy();
+        this.depthProxyMesh?.destroy();
+        this.depthProxyMaterial?.destroy();
+        this.depthProxyEntity = null;
+        this.depthProxyMesh = null;
+        this.depthProxyMaterial = null;
+        this.depthProxyNearDepth = null;
+        this.depthProxyViewpointKey = '';
+        this.configureNormalFrame();
+      }
+      return;
+    }
     const octree = this.sceneResource.octree;
     const sourceKey = octree
       ? `${[...(octree.fileResources?.keys?.() ?? [])].sort((a, b) => a - b).join(',')}:${Boolean(octree.environmentResource)}`
@@ -563,8 +830,8 @@ class SceneRenderer {
     const key = `${harmonizationViewpointKey(this.viewpoint)}:${sourceKey}`;
     if (!force && key === this.depthProxyViewpointKey) return;
     this.depthProxyViewpointKey = key;
-    const centers = collectDepthProxyCenters(this.sceneResource);
-    if (!centers) return;
+    const samples = collectDepthProxySamples(this.sceneResource);
+    if (!samples) return;
     const worldTransform = this.sceneEntity.getWorldTransform();
     const cameraPosition = this.camera.getPosition();
     const cameraForward = this.camera.forward;
@@ -572,19 +839,29 @@ class SceneRenderer {
     const world = new pc.Vec3();
     const delta = new pc.Vec3();
     const screen = new pc.Vec3();
+    const radiusPoint = new pc.Vec3();
+    const radiusScreen = new pc.Vec3();
     const output = new pc.Vec3();
     const device = this.app.graphicsDevice;
     const width = device.clientRect.width;
     const height = device.clientRect.height;
     const geometry = buildViewDepthProxyGeometry(
-      centers,
-      (x, y, z) => {
+      samples,
+      (x, y, z, radius) => {
         local.set(x, y, z);
         worldTransform.transformPoint(local, world);
         delta.sub2(world, cameraPosition);
         if (delta.dot(cameraForward) <= 0) return null;
         this.camera.camera.worldToScreen(world, screen);
-        return { x: screen.x, y: screen.y, depth: delta.length() };
+        let screenRadius = 0;
+        if (Number.isFinite(radius) && radius > 0) {
+          radiusPoint.copy(this.camera.right).mulScalar(
+            radius * this.viewpoint.scene_transform.scale,
+          ).add(world);
+          this.camera.camera.worldToScreen(radiusPoint, radiusScreen);
+          screenRadius = Math.hypot(radiusScreen.x - screen.x, radiusScreen.y - screen.y);
+        }
+        return { x: screen.x, y: screen.y, depth: delta.length(), radius: screenRadius };
       },
       (x, y, depth) => this.camera.camera.screenToWorld(x, y, depth, output),
       width,
@@ -594,14 +871,18 @@ class SceneRenderer {
   }
 
   refreshViewDepthProxy(force = false) {
+    if (this.depthProxyUsesSceneTransform) return;
     if (this.cacheSceneFrames) {
       this.rebuildViewDepthProxy(force);
       return;
     }
-    if (this.depthProxyRefreshTimer) clearTimeout(this.depthProxyRefreshTimer);
+    this.depthProxyRefreshForce ||= force;
+    if (this.depthProxyRefreshTimer) return;
     this.depthProxyRefreshTimer = setTimeout(() => {
       this.depthProxyRefreshTimer = null;
-      this.rebuildViewDepthProxy(force);
+      const refreshForce = this.depthProxyRefreshForce;
+      this.depthProxyRefreshForce = false;
+      this.rebuildViewDepthProxy(refreshForce);
     }, DEPTH_PROXY_REFRESH_DELAY_MS);
   }
 
@@ -878,12 +1159,26 @@ class SceneRenderer {
     const blurStrength = Math.min(1, Math.max(0, requestedStrength));
     const effect = depthOfFieldForStrength(blurStrength, this.viewpoint.field_of_view);
     const enabled = Boolean(this.sceneEntity && this.depthProxyEntity);
+    const genericNearDepth = !this.depthProxyUsesSceneTransform
+      && Number.isFinite(this.depthProxyNearDepth)
+      && this.depthProxyNearDepth > 0
+      ? this.depthProxyNearDepth
+      : null;
+    const focusDistance = genericNearDepth === null
+      ? SUBJECT_FOCUS_DISTANCE
+      : Math.max(this.viewpoint.near_clip, this.camera.camera.nearClip);
+    const focusRange = genericNearDepth === null
+      ? effect.focusRange
+      : Math.max(
+        GENERIC_MIN_FOCUS_RANGE,
+        genericNearDepth * effect.focusRange / MAX_SUBJECT_FOCUS_RANGE,
+      );
     this.cameraFrame.debug = null;
     this.cameraFrame.dof.enabled = enabled && blurStrength > 0;
     this.cameraFrame.dof.nearBlur = true;
     this.cameraFrame.dof.highQuality = true;
-    this.cameraFrame.dof.focusDistance = SUBJECT_FOCUS_DISTANCE;
-    this.cameraFrame.dof.focusRange = effect.focusRange;
+    this.cameraFrame.dof.focusDistance = focusDistance;
+    this.cameraFrame.dof.focusRange = focusRange;
     this.cameraFrame.dof.blurRadius = effect.blurRadius;
     this.cameraFrame.dof.blurRings = 4;
     this.cameraFrame.dof.blurRingPoints = 5;
@@ -1051,6 +1346,7 @@ export {
   buildDepthProxyGeometry,
   buildViewDepthProxyGeometry,
   collectDepthProxyCenters,
+  collectDepthProxySamples,
   configureGsplatStreaming,
   bytesToBase64,
   depthOfFieldForStrength,

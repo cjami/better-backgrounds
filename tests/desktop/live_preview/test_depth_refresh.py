@@ -10,7 +10,7 @@ from better_backgrounds.desktop.live_preview.preview import (
     BACKGROUND_REFRESH_DEBOUNCE_MS,
     NativeLivePreview,
 )
-from better_backgrounds.scene import Viewpoint
+from better_backgrounds.scene import AssetResource, SceneReference, Viewpoint
 
 
 class SnapshotRenderer(QWidget):
@@ -23,6 +23,8 @@ class SnapshotRenderer(QWidget):
         """Create empty request logs and a non-uniform capture image."""
         super().__init__()
         self.viewpoints: list[Viewpoint] = []
+        self.scenes: list[tuple[SceneReference, Viewpoint]] = []
+        self.clears = 0
         self._image = QImage(8, 8, QImage.Format.Format_RGB888)
         self._image.fill(QColor("#202020"))
         self._image.setPixelColor(0, 0, QColor("#f0f0f0"))
@@ -35,6 +37,14 @@ class SnapshotRenderer(QWidget):
     def set_viewpoint(self, viewpoint: Viewpoint) -> None:
         """Record a debounced viewpoint request."""
         self.viewpoints.append(viewpoint)
+
+    def set_scene(self, scene: SceneReference, viewpoint: Viewpoint) -> None:
+        """Record restoration of the duplicate snapshot scene."""
+        self.scenes.append((scene, viewpoint))
+
+    def clear_scene(self) -> None:
+        """Record release of the duplicate snapshot scene."""
+        self.clears += 1
 
     def grab(self, /, rectangle: QRect = QRect()) -> QPixmap:  # noqa: ARG002, B008
         """Return deterministic fallback pixels without a WebEngine surface."""
@@ -68,6 +78,32 @@ def test_live_viewpoint_refresh_keeps_only_the_latest_debounced_request() -> Non
     preview._capture_background()  # noqa: SLF001
     assert preview._surface._background_revision == 1  # noqa: SLF001
     assert preview._surface._harmonization_revision == 0  # noqa: SLF001
+    preview.close()
+
+
+def test_adjust_resource_mode_retains_the_settled_snapshot_scene() -> None:
+    """Avoid reloading a partial streamed scene after returning from Adjust."""
+    application()
+    renderer = SnapshotRenderer()
+    preview = NativeLivePreview(background_factory=lambda: renderer)
+    scene = SceneReference(
+        asset_id="room-v1",
+        display_name="Room",
+        format="ply",
+        entrypoint="scene.ply",
+        resources=(AssetResource(path="scene.ply", size=1, sha256="0" * 64),),
+        license_name="User-provided asset",
+        attribution="Test room",
+    )
+    viewpoint = Viewpoint()
+    preview.set_scene(scene, viewpoint)
+
+    preview.set_resource_active(False)
+    preview.set_resource_active(True)
+
+    assert renderer.clears == 0
+    assert renderer.scenes == [(scene, viewpoint)]
+    assert renderer.viewpoints == [viewpoint]
     preview.close()
 
 

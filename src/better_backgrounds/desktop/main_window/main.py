@@ -37,6 +37,7 @@ SplatCommandFactory = Callable[[str, Path], Sequence[str]]
 RendererFactory = Callable[[], QWidget]
 
 COMPARE_TAB = 3
+ADJUST_TAB = 2
 DEFAULT_WIPE = 52
 
 
@@ -228,6 +229,7 @@ class MainWindow(QMainWindow):
         if 0 <= index < self._tabs.count():
             self._tabs.setCurrentIndex(index)
             self._header.set_active_tab(index)
+            self._live_controller.set_resource_active(index != ADJUST_TAB)
             mode = "compare" if index == COMPARE_TAB else "show"
             self._live_controller.set_presentation(mode, DEFAULT_WIPE)
 

@@ -94,6 +94,12 @@ class LivePreviewController(QObject):
         if callable(setter):
             setter(mode, wipe)
 
+    def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
+        """Suspend hidden live work while Adjust owns the graphics device."""
+        setter = getattr(self._live_preview, "set_resource_active", None)
+        if callable(setter):
+            setter(active)
+
     def shutdown(self) -> None:
         """Release the retained camera preview."""
         stopper = getattr(self._live_preview, "stop_camera", None)

@@ -360,7 +360,8 @@ def _sample_positions(
             high_value: tuple[int, int, int, int],
         ) -> float:
             normalized = ((high_value[axis] << 8) + low_value[axis]) / 65_535
-            return minimum[axis] + (maximum[axis] - minimum[axis]) * normalized
+            logarithmic = minimum[axis] + (maximum[axis] - minimum[axis]) * normalized
+            return math.copysign(math.expm1(abs(logarithmic)), logarithmic)
 
         samples: list[tuple[float, float, float]] = []
         for index in indices:
@@ -382,6 +383,8 @@ def _sample_positions(
 
 def _robust_sample_bounds(
     samples: list[tuple[float, float, float]],
+    *,
+    quantile: float = ROBUST_BOUND_QUANTILE,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
     if not samples:
         return None
@@ -389,8 +392,8 @@ def _robust_sample_bounds(
     maximum: list[float] = []
     for axis in range(VECTOR_DIMENSIONS):
         values = sorted(sample[axis] for sample in samples)
-        lower = math.floor((len(values) - 1) * ROBUST_BOUND_QUANTILE)
-        upper = math.ceil((len(values) - 1) * (1 - ROBUST_BOUND_QUANTILE))
+        lower = math.floor((len(values) - 1) * quantile)
+        upper = math.ceil((len(values) - 1) * (1 - quantile))
         minimum.append(values[lower])
         maximum.append(values[upper])
     if any(high - low <= MIN_ROBUST_EXTENT for low, high in zip(minimum, maximum, strict=True)):
@@ -428,13 +431,21 @@ def _validate_sog(  # noqa: C901, PLR0912, PLR0915
     if not isinstance(means, dict):
         msg = "SOG metadata is missing position bounds"
         raise ValueError(msg)  # noqa: TRY004
-    minimum = _finite_vector(means.get("mins"), "SOG position minimum")
-    maximum = _finite_vector(means.get("maxs"), "SOG position maximum")
-    if any(low > high for low, high in zip(minimum, maximum, strict=True)) or any(
-        abs(item) > MAX_LOG_POSITION for item in minimum + maximum
-    ):
+    logarithmic_minimum = _finite_vector(means.get("mins"), "SOG position minimum")
+    logarithmic_maximum = _finite_vector(means.get("maxs"), "SOG position maximum")
+    if any(
+        low > high for low, high in zip(logarithmic_minimum, logarithmic_maximum, strict=True)
+    ) or any(abs(item) > MAX_LOG_POSITION for item in logarithmic_minimum + logarithmic_maximum):
         msg = "SOG metadata contains unusable position bounds"
         raise ValueError(msg)
+    minimum = cast(
+        "tuple[float, float, float]",
+        tuple(math.copysign(math.expm1(abs(value)), value) for value in logarithmic_minimum),
+    )
+    maximum = cast(
+        "tuple[float, float, float]",
+        tuple(math.copysign(math.expm1(abs(value)), value) for value in logarithmic_maximum),
+    )
 
     resource_names: list[str] = []
     per_gaussian: list[str] = []
@@ -678,6 +689,7 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
             robust_bounds = _robust_sample_bounds(full_detail_samples)
             if robust_bounds is not None:
                 minimum, maximum = robust_bounds
+                navigation_minimum, navigation_maximum = robust_bounds
             else:
                 minimum, maximum = navigation_minimum, navigation_maximum
     except BadZipFile as error:

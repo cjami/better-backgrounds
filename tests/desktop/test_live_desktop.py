@@ -33,6 +33,7 @@ class TrackingLiveRenderer(ScenePreview):
         self.mirroring: list[bool] = []
         self.matting: list[str] = []
         self.harmonization: list[HarmonizationSettings] = []
+        self.resource_states: list[bool] = []
 
     def start_camera(self, label: str, *, mirrored: bool) -> None:
         """Record one explicit camera start."""
@@ -57,6 +58,10 @@ class TrackingLiveRenderer(ScenePreview):
     def set_harmonization(self, settings: HarmonizationSettings) -> None:
         """Record the room-scoped global appearance switch."""
         self.harmonization.append(settings)
+
+    def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
+        """Record whether hidden live resources should remain active."""
+        self.resource_states.append(active)
 
 
 def application() -> QApplication:
@@ -116,8 +121,8 @@ def create_window(tmp_path: Path, pipeline: TrackingLiveRenderer) -> MainWindow:
     )
 
 
-def test_preview_starts_before_virtual_output_and_survives_tab_changes(tmp_path: Path) -> None:
-    """Keep local preview capture independent from virtual-camera publication."""
+def test_adjust_suspends_live_resources_without_restarting_camera(tmp_path: Path) -> None:
+    """Yield live resources to Adjust and restore them on presentation tabs."""
     application()
     pipeline = TrackingLiveRenderer()
     window = create_window(tmp_path, pipeline)
@@ -127,6 +132,7 @@ def test_preview_starts_before_virtual_output_and_survives_tab_changes(tmp_path:
     window.virtual_camera_changed.connect(virtual_states.append)
 
     assert pipeline.starts == [("camera-a", True)]
+    assert pipeline.resource_states == [True]
     camera.click()
     window.select_tab(2)
     window.select_tab(3)
@@ -134,6 +140,7 @@ def test_preview_starts_before_virtual_output_and_survives_tab_changes(tmp_path:
 
     assert pipeline.starts == [("camera-a", True)]
     assert pipeline.stops == 0
+    assert pipeline.resource_states == [True, False, True, True]
     assert ("compare", 52) in pipeline.presentations
     camera.click()
     assert pipeline.stops == 0

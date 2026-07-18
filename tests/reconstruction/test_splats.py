@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from io import BytesIO
 from typing import TYPE_CHECKING
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -144,8 +145,8 @@ def _sog_metadata(count: int, *, position_limit: float = 1.0) -> dict[str, objec
         "version": 2,
         "count": count,
         "means": {
-            "mins": [-position_limit, -position_limit, -position_limit],
-            "maxs": [position_limit, position_limit, position_limit],
+            "mins": [-math.log1p(position_limit)] * 3,
+            "maxs": [math.log1p(position_limit)] * 3,
             "files": ["means_l.webp", "means_u.webp"],
         },
         "scales": {"codebook": codebook, "files": ["scales.webp"]},
@@ -319,8 +320,10 @@ def test_inspector_uses_sampled_positions_instead_of_loose_chunk_bounds(tmp_path
 
     assert max(abs(value) for value in diagnostics.bounds_minimum) < 10
     assert max(abs(value) for value in diagnostics.bounds_maximum) < 10
-    assert diagnostics.navigation_bounds_minimum == (-75.0, -75.0, -75.0)
-    assert diagnostics.navigation_bounds_maximum == (75.0, 75.0, 75.0)
+    assert diagnostics.navigation_bounds_minimum is not None
+    assert diagnostics.navigation_bounds_maximum is not None
+    assert max(abs(value) for value in diagnostics.navigation_bounds_minimum) < 10
+    assert max(abs(value) for value in diagnostics.navigation_bounds_maximum) < 10
 
 
 def test_inspector_rejects_unknown_explicit_streamed_sog_version(tmp_path: Path) -> None:

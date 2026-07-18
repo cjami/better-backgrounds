@@ -6,6 +6,7 @@ import {
   buildDepthProxyGeometry,
   buildViewDepthProxyGeometry,
   collectDepthProxyCenters,
+  collectDepthProxySamples,
   configureGsplatStreaming,
   depthOfFieldForStrength,
   harmonizationViewpointKey,
@@ -156,6 +157,86 @@ test('generic splat centers produce a view-dependent depth proxy', () => {
   assert.deepEqual(Array.from(geometry.indices), [0, 2, 1, 1, 2, 3]);
 });
 
+test('low-opacity Gaussian cores still cover their visible depth footprint', () => {
+  const samples = {
+    centers: new Float32Array([0, 0, 3, 0, 0, 3, 0, 0, 3]),
+    radii: new Float32Array([1, 1, 1]),
+    opacities: new Float32Array([0.05, 0.05, 0.05]),
+  };
+  const geometry = buildViewDepthProxyGeometry(
+    samples,
+    (_x, _y, depth, radius) => ({ x: 2.5, y: 2.5, depth, radius }),
+    (x, y, depth) => ({ x, y, z: depth }),
+    5,
+    5,
+    5,
+  );
+
+  assert.ok(geometry.indices.length > 0);
+  assert.equal(geometry.positions[(0 * 5 + 2) * 3 + 2], 3);
+});
+
+test('generic depth proxies close enclosed holes on one continuous surface', () => {
+  const centers = [];
+  for (let row = 0; row < 3; row += 1) {
+    for (let column = 0; column < 3; column += 1) {
+      if (row !== 1 || column !== 1) centers.push(column + 0.5, row + 0.5, 3);
+    }
+  }
+  const geometry = buildViewDepthProxyGeometry(
+    new Float32Array(centers),
+    (x, y, depth) => ({ x, y, depth }),
+    (x, y, depth) => ({ x, y, z: depth }),
+    3,
+    3,
+    3,
+  );
+
+  assert.equal(geometry.indices.length, 24);
+  assert.equal(geometry.positions[4 * 3 + 2], 3);
+  assert.equal(geometry.nearDepth, 3);
+});
+
+test('generic depth proxies leave holes across conflicting depth surfaces', () => {
+  const centers = [];
+  for (let row = 0; row < 3; row += 1) {
+    for (let column = 0; column < 3; column += 1) {
+      if (row === 1 && column === 1) continue;
+      centers.push(column + 0.5, row + 0.5, column === 0 ? 1 : 10);
+    }
+  }
+  const geometry = buildViewDepthProxyGeometry(
+    new Float32Array(centers),
+    (x, y, depth) => ({ x, y, depth }),
+    (x, y, depth) => ({ x, y, z: depth }),
+    3,
+    3,
+    3,
+  );
+
+  assert.equal(geometry.positions[4 * 3 + 2], 0);
+});
+
+test('generic PLY depth samples retain projected scale and opacity evidence', () => {
+  const properties = {
+    scale_0: new Float32Array([Math.log(2), Math.log(4)]),
+    scale_1: new Float32Array([Math.log(8), Math.log(1)]),
+    scale_2: new Float32Array([Math.log(4), Math.log(2)]),
+    opacity: new Float32Array([0, Math.log(3)]),
+  };
+  const resource = {
+    centers: new Float32Array([0, 0, 1, 1, 1, 2]),
+    gsplatData: { getProp: (name) => properties[name] },
+  };
+
+  const samples = collectDepthProxySamples(resource, 2);
+
+  assert.ok(Math.abs(samples.radii[0] - Math.sqrt(32)) < 1e-6);
+  assert.ok(Math.abs(samples.radii[1] - Math.sqrt(8)) < 1e-6);
+  assert.ok(Math.abs(samples.opacities[0] - 0.5) < 1e-6);
+  assert.ok(Math.abs(samples.opacities[1] - 0.75) < 1e-6);
+});
+
 test('streamed SOG depth sampling combines currently resident LOD chunks', () => {
   const first = { centers: new Float32Array([0, 0, 1, 1, 0, 1]) };
   const second = { centers: new Float32Array([0, 1, 2, 1, 1, 2]) };
@@ -176,6 +257,38 @@ test('streamed SOG depth sampling combines currently resident LOD chunks', () =>
     1, 1, 2,
     0, 2, 4,
   ]);
+});
+
+test('streamed SOG depth samples decode each splat scale and opacity texture value', () => {
+  const chunk = {
+    centers: new Float32Array([0, 0, 1]),
+    gsplatData: {
+      meta: {
+        version: 2,
+        scales: { codebook: [Math.log(1), Math.log(2), Math.log(4)] },
+      },
+      scales: { _levels: [new Uint8Array([0, 1, 2, 0])] },
+      sh0: { _levels: [new Uint8Array([0, 0, 0, 64])] },
+    },
+  };
+  const resource = { octree: { fileResources: new Map([[0, chunk]]) } };
+
+  const samples = collectDepthProxySamples(resource, 1);
+
+  assert.ok(Math.abs(samples.radii[0] - Math.sqrt(8)) < 1e-6);
+  assert.ok(Math.abs(samples.opacities[0] - 64 / 255) < 1e-6);
+});
+
+test('streamed SOG scale fallback is conservative when source pixels were released', () => {
+  const codebook = Array.from({ length: 8 }, (_, index) => Math.log(index + 1));
+  const chunk = {
+    centers: new Float32Array([0, 0, 1]),
+    gsplatData: { meta: { scales: { codebook } } },
+  };
+
+  const samples = collectDepthProxySamples(chunk, 1);
+
+  assert.ok(samples.radii[0] >= 6);
 });
 
 test('generic depth proxies do not bridge large depth discontinuities', () => {
@@ -211,6 +324,64 @@ test('zero background blur keeps a stable depth pipeline with a zero radius', ()
   assert.equal(renderer.cameraFrame.rendering.sharpness, 0);
 });
 
+test('full generic blur reaches maximum before the nearest room surface', () => {
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.sceneEntity = {};
+  renderer.depthProxyEntity = {};
+  renderer.depthProxyUsesSceneTransform = false;
+  renderer.depthProxyNearDepth = 2;
+  renderer.viewpoint = {
+    depth_of_field: { blur_strength: 1 },
+    field_of_view: 42,
+    near_clip: 0.03,
+  };
+  renderer.camera = { camera: { nearClip: 0.03 } };
+  renderer.cameraFrame = { debug: null, dof: {}, rendering: {}, update() {} };
+
+  renderer.configureNormalFrame();
+
+  const farFocusEdge = renderer.cameraFrame.dof.focusDistance
+    + renderer.cameraFrame.dof.focusRange / 2;
+  const maximumBlurDepth = farFocusEdge + renderer.cameraFrame.dof.focusRange;
+  assert.ok(maximumBlurDepth < renderer.depthProxyNearDepth);
+  assert.equal(renderer.cameraFrame.dof.blurRadius, 8);
+});
+
+test('SHARP depth keeps the metric subject focus calibration', () => {
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.sceneEntity = {};
+  renderer.depthProxyEntity = {};
+  renderer.depthProxyUsesSceneTransform = true;
+  renderer.depthProxyNearDepth = null;
+  renderer.viewpoint = {
+    depth_of_field: { blur_strength: 1 },
+    field_of_view: 42,
+    near_clip: 0.03,
+  };
+  renderer.camera = { camera: { nearClip: 0.03 } };
+  renderer.cameraFrame = { debug: null, dof: {}, rendering: {}, update() {} };
+
+  renderer.configureNormalFrame();
+
+  assert.equal(renderer.cameraFrame.dof.focusDistance, 1.5);
+  assert.equal(renderer.cameraFrame.dof.focusRange, 0.8);
+});
+
+test('generic depth proxy work is deferred until blur is requested', () => {
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.app = {};
+  renderer.sceneEntity = {};
+  renderer.viewpoint = { depth_of_field: { blur_strength: 0 } };
+  let rebuilds = 0;
+  renderer.rebuildViewDepthProxy = () => { rebuilds += 1; };
+
+  renderer.createDepthProxy({ gsplatData: {} });
+  renderer.viewpoint.depth_of_field.blur_strength = 0.2;
+  renderer.createDepthProxy({ gsplatData: {} });
+
+  assert.equal(rebuilds, 1);
+});
+
 test('interactive renderer remains live when requesting a scene frame', () => {
   const renderer = Object.create(SceneRenderer.prototype);
   renderer.cacheSceneFrames = false;
@@ -241,4 +412,20 @@ test('interactive depth-proxy refreshes are debounced while cached snapshots reb
   cached.rebuildViewDepthProxy = (force) => cachedCalls.push(force);
   cached.refreshViewDepthProxy(true);
   assert.deepEqual(cachedCalls, [true]);
+});
+
+test('streamed frame-ready events cannot starve an interactive depth refresh', async () => {
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.cacheSceneFrames = false;
+  renderer.depthProxyRefreshTimer = null;
+  renderer.depthProxyRefreshForce = false;
+  let rebuilds = 0;
+  renderer.rebuildViewDepthProxy = () => { rebuilds += 1; };
+
+  renderer.refreshViewDepthProxy();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  renderer.refreshViewDepthProxy();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  assert.equal(rebuilds, 1);
 });

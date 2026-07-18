@@ -144,6 +144,11 @@ class NativeLivePreview(QWidget):
         self._pending_viewpoint: Viewpoint | None = None
         self._background_refresh_started_at: float | None = None
         self._background_refresh_ms = 0.0
+        self._resource_active = True
+        self._camera_device_id: str | None = None
+        self._scene: SceneReference | None = None
+        self._scene_viewpoint: Viewpoint | None = None
+        self._rendered_scene_asset_id = ""
         self._capture_rate = SlidingFrameRate()
         self._display_rate = SlidingFrameRate()
 
@@ -165,14 +170,16 @@ class NativeLivePreview(QWidget):
         """Open the selected Qt camera and begin one-shot target selection."""
         self.stop_camera()
         self._mirrored = mirrored
+        self._camera_device_id = device_id
         self._surface.set_mirroring(mirrored=mirrored)
         self._surface.reset_camera_harmonization()
         self._selector.reset()
         self._capture_rate.reset()
         self._display_rate.reset()
-        self._poll_timer.start()
+        if self._resource_active:
+            self._poll_timer.start()
         self._set_state("seeding", "Hold still while the person seed is captured…")
-        if not self._camera_capture.start(device_id):
+        if self._resource_active and not self._camera_capture.start(device_id):
             self._poll_timer.stop()
 
     def stop_camera(self) -> None:
@@ -180,6 +187,7 @@ class NativeLivePreview(QWidget):
         self._poll_timer.stop()
         self._presentation_timer.stop()
         self._camera_capture.stop()
+        self._camera_device_id = None
         if self._engine is not None:
             self._engine.close()
             self._engine = None
@@ -234,21 +242,27 @@ class NativeLivePreview(QWidget):
 
     def set_scene(self, scene: SceneReference, viewpoint: Viewpoint) -> None:
         """Load one room in the hidden canvas-only snapshot renderer."""
+        self._scene = scene
+        self._scene_viewpoint = viewpoint
         self._viewpoint_timer.stop()
         self._pending_viewpoint = None
         self._scene_asset_id = scene.asset_id
         self._latest_snapshot_revision = -1
         self._latest_harmonization_revision = -1
         setter = getattr(self._background_renderer, "set_scene", None)
-        if callable(setter):
+        if self._resource_active and callable(setter):
             self._background_refresh_started_at = time.perf_counter()
             setter(scene, viewpoint)
+            self._rendered_scene_asset_id = scene.asset_id
 
     def clear_scene(self) -> None:
         """Clear the room and return the native compositor to black."""
         self._viewpoint_timer.stop()
         self._pending_viewpoint = None
         self._scene_asset_id = ""
+        self._scene = None
+        self._scene_viewpoint = None
+        self._rendered_scene_asset_id = ""
         self._latest_snapshot_revision = -1
         self._latest_harmonization_revision = -1
         self._background_refresh_started_at = None
@@ -260,6 +274,9 @@ class NativeLivePreview(QWidget):
 
     def set_viewpoint(self, viewpoint: Viewpoint) -> None:
         """Debounce expensive depth-of-field room snapshots."""
+        self._scene_viewpoint = viewpoint
+        if not self._resource_active:
+            return
         self._pending_viewpoint = viewpoint
         self._viewpoint_timer.start(BACKGROUND_REFRESH_DEBOUNCE_MS)
 
@@ -273,6 +290,36 @@ class NativeLivePreview(QWidget):
         self._background_refresh_started_at = time.perf_counter()
         setter(viewpoint)
         self._schedule_background_capture()
+
+    def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
+        """Yield live capture and inference while Adjust owns interaction."""
+        if active == self._resource_active:
+            return
+        self._resource_active = active
+        if not active:
+            self._poll_timer.stop()
+            self._presentation_timer.stop()
+            self._camera_capture.stop()
+            self._background_timer.stop()
+            self._viewpoint_timer.stop()
+            return
+        if self._camera_device_id is not None:
+            self._poll_timer.start()
+            if not self._camera_capture.start(self._camera_device_id):
+                self._poll_timer.stop()
+        if self._scene is None or self._scene_viewpoint is None:
+            return
+        self._background_refresh_started_at = time.perf_counter()
+        if self._rendered_scene_asset_id == self._scene.asset_id:
+            setter = getattr(self._background_renderer, "set_viewpoint", None)
+            if callable(setter):
+                setter(self._scene_viewpoint)
+                self._schedule_background_capture()
+            return
+        setter = getattr(self._background_renderer, "set_scene", None)
+        if callable(setter):
+            setter(self._scene, self._scene_viewpoint)
+            self._rendered_scene_asset_id = self._scene.asset_id
 
     def set_scene_image(self, path: Path | None) -> None:
         """Use a verified preview image until a spatial snapshot is ready."""

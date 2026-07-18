@@ -610,7 +610,7 @@ def _streamed_viewpoint(diagnostics: SplatDiagnostics) -> Viewpoint:
         field_of_view=STREAMED_FIELD_OF_VIEW,
         horizon=0.0,
         near_clip=0.03,
-        far_clip=min(2_000.0, max(40.0, diagonal * 8.0)),
+        far_clip=min(1_000.0, max(40.0, diagonal * 8.0)),
         aspect_ratio=DEFAULT_ASPECT_RATIO,
         scene_transform=SceneTransform(orientation=Quaternion(z=1.0, w=0.0)),
         safe_camera_region=CameraBounds(
