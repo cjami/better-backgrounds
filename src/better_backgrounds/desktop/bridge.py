@@ -9,6 +9,7 @@ from better_backgrounds.scene import Viewpoint
 
 ViewpointMessage = Viewpoint
 MAX_CAMERA_STATUS_LENGTH = 300
+MAX_SNAPSHOT_BASE64_LENGTH = 16 * 1024 * 1024
 
 
 class SceneErrorMessage(BaseModel):
@@ -28,7 +29,8 @@ class RendererBridge(QObject):
     viewpoint_received = Signal(object)
     scene_progressed = Signal(str, int, int)
     scene_failed = Signal(object)
-    scene_requested = Signal(str, str, str)
+    snapshot_ready = Signal(str, int, str, str)
+    scene_requested = Signal(str, str, str, bool)
     viewpoint_requested = Signal(str)
     reset_requested = Signal()
     scene_cleared = Signal()
@@ -66,9 +68,40 @@ class RendererBridge(QObject):
         self.scene_failed.emit(error)
         return True
 
-    def request_scene(self, asset_id: str, url: str, viewpoint: Viewpoint) -> None:
+    @Slot(str, int, str, str, result=bool)
+    def report_snapshot_ready(
+        self,
+        asset_id: str,
+        revision: int,
+        kind: str,
+        payload: str,
+    ) -> bool:
+        """Publish a settled, revision-tagged renderer output."""
+        if (
+            not asset_id
+            or revision < 0
+            or kind not in {"background", "harmonization"}
+            or not 1 <= len(payload) <= MAX_SNAPSHOT_BASE64_LENGTH
+        ):
+            return False
+        self.snapshot_ready.emit(asset_id, revision, kind, payload)
+        return True
+
+    def request_scene(
+        self,
+        asset_id: str,
+        url: str,
+        viewpoint: Viewpoint,
+        *,
+        metric_depth_available: bool = False,
+    ) -> None:
         """Ask the renderer to load one managed asset and camera."""
-        self.scene_requested.emit(asset_id, url, viewpoint.model_dump_json())
+        self.scene_requested.emit(
+            asset_id,
+            url,
+            viewpoint.model_dump_json(),
+            metric_depth_available,
+        )
 
     def request_viewpoint(self, viewpoint: Viewpoint) -> None:
         """Ask the renderer to apply validated Python-owned controls."""

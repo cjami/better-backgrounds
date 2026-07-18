@@ -105,6 +105,7 @@ class LiveDiagnostics(BaseModel):
     processing_width: int = Field(gt=0, le=8_192)
     processing_height: int = Field(gt=0, le=8_192)
     device_type: Literal["cuda", "mps", "cpu"]
+    background_refresh_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
 
 
 class SlidingFrameRate:

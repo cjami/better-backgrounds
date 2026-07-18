@@ -31,10 +31,13 @@ class StubHarmonizer:
         background: np.ndarray,
         *,
         captured_at: float,
+        reference_background: np.ndarray | None = None,
     ) -> HarmonizationResult:
         """Produce deterministic changed pixels for comparison testing."""
         assert alpha.shape == source.shape[:2]
         assert background.shape == source.shape
+        if reference_background is not None:
+            assert reference_background.shape == source.shape
         assert captured_at >= 0
         return HarmonizationResult(
             image=np.clip(source.astype(np.uint16) + 10, 0, 255).astype(np.uint8),

@@ -120,6 +120,7 @@ class HarmonizerAppearanceHarmonizer:
         background: NDArray[np.uint8],
         *,
         captured_at: float,
+        reference_background: NDArray[np.uint8] | None = None,
     ) -> HarmonizationResult:
         """Predict, smooth, and apply global controls to one exact frame."""
         started = time.perf_counter()
@@ -131,7 +132,9 @@ class HarmonizerAppearanceHarmonizer:
                 self._ensure_model()
             composite = self._prepare_composite(source, alpha, background)
             if self._renderer is None:
-                self._collect_prediction_sample(composite, alpha, captured_at)
+                reference = background if reference_background is None else reference_background
+                prediction_composite = self._prepare_composite(source, alpha, reference)
+                self._collect_prediction_sample(prediction_composite, alpha, captured_at)
                 if len(self._prediction_samples) < SESSION_PREDICTION_SAMPLE_COUNT:
                     return self._fallback(started, ())
                 arguments = self._predict_arguments(self._prediction_samples)

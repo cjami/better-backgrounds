@@ -21,7 +21,7 @@
   <script nonce="{{NONCE}}" src="bbapp://renderer/renderer.js"></script>
   <script nonce="{{NONCE}}">
     new QWebChannel(qt.webChannelTransport, function (channel) {
-      BetterBackgroundsRenderer.start(channel.objects.rendererBridge);
+      BetterBackgroundsRenderer.start(channel.objects.rendererBridge, { cacheSceneFrames: true });
     });
   </script>
 </body>

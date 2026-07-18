@@ -113,6 +113,7 @@ class SecureRendererView(QWebEngineView):
     scene_progressed = Signal(int, int)
     scene_failed = Signal(str)
     viewpoint_changed = Signal(object)
+    snapshot_ready = Signal(str, int, str, str)
 
     def __init__(
         self,
@@ -174,6 +175,7 @@ class SecureRendererView(QWebEngineView):
             lambda error: self.scene_failed.emit(error.message),
         )
         self._bridge.viewpoint_received.connect(self.viewpoint_changed)
+        self._bridge.snapshot_ready.connect(self.snapshot_ready)
         self._channel = QWebChannel(self)
         self._channel.registerObject("rendererBridge", self._bridge)
         page.setWebChannel(self._channel)
@@ -232,6 +234,7 @@ class SecureRendererView(QWebEngineView):
                 self._scene.asset_id,
                 self._scene.managed_url.toString(),
                 self._viewpoint,
+                metric_depth_available=self._scene.supports_metric_depth,
             )
         elif self._scene_clear_pending:
             self._bridge.request_scene_clear()

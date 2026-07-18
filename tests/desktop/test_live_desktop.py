@@ -182,8 +182,8 @@ def test_adjust_persists_and_applies_foreground_only_mirroring(tmp_path: Path) -
     restored.close()
 
 
-def test_harmonization_is_off_by_default_and_independently_enabled(tmp_path: Path) -> None:
-    """Expose only the opt-in global Harmonizer stage."""
+def test_harmonization_is_on_by_default_and_can_be_disabled(tmp_path: Path) -> None:
+    """Start with global harmonization while retaining an explicit off switch."""
     application()
     pipeline = TrackingLiveRenderer()
     window = create_window(tmp_path, pipeline)
@@ -191,12 +191,13 @@ def test_harmonization_is_off_by_default_and_independently_enabled(tmp_path: Pat
 
     expected = {"Global harmonization"}
     assert expected <= controls.keys()
-    assert all(not controls[title].isChecked() for title in expected)
+    assert all(controls[title].isChecked() for title in expected)
     assert "Depth-dependent effects" not in controls
-
-    controls["Global harmonization"].setChecked(True)
-
     assert pipeline.harmonization[-1] == HarmonizationSettings(global_harmonization=True)
+
+    controls["Global harmonization"].setChecked(False)
+
+    assert pipeline.harmonization[-1] == HarmonizationSettings(global_harmonization=False)
     pipeline.harmonization_status_changed.emit("Experimental appearance preview: 18 ms/frame")
     statuses = [
         label

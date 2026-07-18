@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import threading
 import time
 from collections.abc import Callable
@@ -9,7 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QStackedLayout, QWidget
 
 from better_backgrounds.desktop.camera.capture import QtCameraCapture
@@ -45,9 +47,11 @@ TARGET_MATTE_FPS = 30.0
 TARGET_FRAME_BUDGET_MS = 1_000.0 / TARGET_MATTE_FPS
 MATTE_INFERENCE_BUDGET_MS = TARGET_FRAME_BUDGET_MS
 PRESENTATION_INTERVAL_MS = 33
-BACKGROUND_CAPTURE_DELAY_MS = 120
+BACKGROUND_CAPTURE_DELAY_MS = 300
 BACKGROUND_CAPTURE_RETRY_MS = 50
 BACKGROUND_CAPTURE_RETRY_LIMIT = 20
+BACKGROUND_REFRESH_DEBOUNCE_MS = 150
+MAX_SNAPSHOT_PAYLOAD_LENGTH = 16 * 1024 * 1024
 
 
 class NativeLivePreview(QWidget):
@@ -100,9 +104,16 @@ class NativeLivePreview(QWidget):
         progress = getattr(self._background_renderer, "scene_progressed", None)
         if progress is not None:
             progress.connect(self._scene_progressed)
+        snapshot_ready = getattr(self._background_renderer, "snapshot_ready", None)
+        self._snapshot_handshake = snapshot_ready is not None
+        if snapshot_ready is not None:
+            snapshot_ready.connect(self._snapshot_ready)
         self._background_timer = QTimer(self)
         self._background_timer.setSingleShot(True)
         self._background_timer.timeout.connect(self._capture_background)
+        self._viewpoint_timer = QTimer(self)
+        self._viewpoint_timer.setSingleShot(True)
+        self._viewpoint_timer.timeout.connect(self._apply_pending_viewpoint)
         self._background_capture_attempts = 0
         self._poll_timer = self._create_timer(5, self._poll_engine)
         self._presentation_timer = self._create_timer(
@@ -127,6 +138,12 @@ class NativeLivePreview(QWidget):
         self._internal_size = 360
         self._harmonization_requested = False
         self._harmonizer_prepare_inflight = False
+        self._scene_asset_id = ""
+        self._latest_snapshot_revision = -1
+        self._latest_harmonization_revision = -1
+        self._pending_viewpoint: Viewpoint | None = None
+        self._background_refresh_started_at: float | None = None
+        self._background_refresh_ms = 0.0
         self._capture_rate = SlidingFrameRate()
         self._display_rate = SlidingFrameRate()
 
@@ -217,23 +234,45 @@ class NativeLivePreview(QWidget):
 
     def set_scene(self, scene: SceneReference, viewpoint: Viewpoint) -> None:
         """Load one room in the hidden canvas-only snapshot renderer."""
+        self._viewpoint_timer.stop()
+        self._pending_viewpoint = None
+        self._scene_asset_id = scene.asset_id
+        self._latest_snapshot_revision = -1
+        self._latest_harmonization_revision = -1
         setter = getattr(self._background_renderer, "set_scene", None)
         if callable(setter):
+            self._background_refresh_started_at = time.perf_counter()
             setter(scene, viewpoint)
 
     def clear_scene(self) -> None:
         """Clear the room and return the native compositor to black."""
+        self._viewpoint_timer.stop()
+        self._pending_viewpoint = None
+        self._scene_asset_id = ""
+        self._latest_snapshot_revision = -1
+        self._latest_harmonization_revision = -1
+        self._background_refresh_started_at = None
+        self._background_refresh_ms = 0.0
         clearer = getattr(self._background_renderer, "clear_scene", None)
         if callable(clearer):
             clearer()
         self._surface.clear_background()
 
     def set_viewpoint(self, viewpoint: Viewpoint) -> None:
-        """Refresh the immutable room snapshot after viewpoint changes."""
+        """Debounce expensive depth-of-field room snapshots."""
+        self._pending_viewpoint = viewpoint
+        self._viewpoint_timer.start(BACKGROUND_REFRESH_DEBOUNCE_MS)
+
+    @Slot()
+    def _apply_pending_viewpoint(self) -> None:
+        viewpoint = self._pending_viewpoint
+        self._pending_viewpoint = None
         setter = getattr(self._background_renderer, "set_viewpoint", None)
-        if callable(setter):
-            setter(viewpoint)
-            self._schedule_background_capture()
+        if viewpoint is None or not callable(setter):
+            return
+        self._background_refresh_started_at = time.perf_counter()
+        setter(viewpoint)
+        self._schedule_background_capture()
 
     def set_scene_image(self, path: Path | None) -> None:
         """Use a verified preview image until a spatial snapshot is ready."""
@@ -292,6 +331,51 @@ class NativeLivePreview(QWidget):
         if loaded == total:
             self._schedule_background_capture()
 
+    @Slot(str, int, str, str)
+    def _snapshot_ready(
+        self,
+        asset_id: str,
+        revision: int,
+        kind: str,
+        payload: str,
+    ) -> None:
+        """Publish validated framebuffer pixels directly to the live compositor."""
+        if (
+            asset_id != self._scene_asset_id
+            or kind not in {"background", "harmonization"}
+            or not 1 <= len(payload) <= MAX_SNAPSHOT_PAYLOAD_LENGTH
+        ):
+            return
+        latest_revision = (
+            self._latest_snapshot_revision
+            if kind == "background"
+            else self._latest_harmonization_revision
+        )
+        if revision < latest_revision:
+            return
+        try:
+            encoded = payload.encode("ascii")
+            pixels = base64.b64decode(encoded, validate=True)
+        except UnicodeEncodeError, binascii.Error, ValueError:
+            return
+        image = QImage.fromData(pixels)
+        if image.isNull():
+            return
+        if kind == "harmonization":
+            if self._surface.set_harmonization_reference(image):
+                self._latest_harmonization_revision = revision
+            return
+        if self._surface.set_background(image, update_harmonization_reference=False):
+            self._background_timer.stop()
+            self._latest_snapshot_revision = revision
+            self._record_background_refresh()
+
+    def _record_background_refresh(self) -> None:
+        started_at = self._background_refresh_started_at
+        if started_at is not None:
+            self._background_refresh_ms = (time.perf_counter() - started_at) * 1_000.0
+            self._background_refresh_started_at = None
+
     def _schedule_background_capture(self) -> None:
         self._background_capture_attempts = 0
         self._background_timer.start(BACKGROUND_CAPTURE_DELAY_MS)
@@ -299,8 +383,12 @@ class NativeLivePreview(QWidget):
     @Slot()
     def _capture_background(self) -> None:
         pixmap = self._background_renderer.grab()
-        if not pixmap.isNull() and self._surface.set_background(pixmap.toImage()):
+        if not pixmap.isNull() and self._surface.set_background(
+            pixmap.toImage(),
+            update_harmonization_reference=not self._snapshot_handshake,
+        ):
             self._background_capture_attempts = 0
+            self._record_background_refresh()
             return
         self._background_capture_attempts += 1
         if self._background_capture_attempts <= BACKGROUND_CAPTURE_RETRY_LIMIT:
@@ -448,6 +536,7 @@ class NativeLivePreview(QWidget):
                 ),
             ),
             device_type=self._active_device,
+            background_refresh_ms=self._background_refresh_ms,
         )
         self._surface.set_diagnostics(diagnostics)
         self.diagnostics_changed.emit(diagnostics)

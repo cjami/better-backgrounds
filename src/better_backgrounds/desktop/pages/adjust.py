@@ -48,11 +48,12 @@ class AdjustPage(QWidget):
         self._default_viewpoint = Viewpoint()
         self._drafts: dict[str, Viewpoint] = {}
         self._harmonization_drafts: dict[str, HarmonizationSettings] = {}
-        self._harmonization = HarmonizationSettings()
+        self._harmonization = HarmonizationSettings(global_harmonization=True)
         self._harmonization_controls: dict[str, QCheckBox] = {}
         self._sliders: dict[str, QSlider] = {}
         self._slider_labels: dict[str, QLabel] = {}
         self._loaded_scene_id = ""
+        self._metric_depth_available = False
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -133,11 +134,15 @@ class AdjustPage(QWidget):
         aspect_row.addWidget(self._aspect)
         controls.addLayout(aspect_row)
         controls.addSpacing(6)
-        controls.addWidget(_label("Subject", object_name="section"))
-        self._add_slider(controls, "Depth in scene", 5, 50, 24)
-        focus = self._add_slider(controls, "Virtual focus", 5, 50, 26)
-        focus.setEnabled(False)
-        focus.setToolTip("Unavailable because this scene has no reliable depth proxy")
+        controls.addWidget(_label("Depth of field", object_name="section"))
+        controls.addWidget(
+            _label(
+                "You stay in focus. Increase this to progressively soften room details by depth.",
+                object_name="muted",
+                word_wrap=True,
+            ),
+        )
+        self._blur_strength = self._add_slider(controls, "Depth-of-field blur", 0, 100, 0)
         controls.addSpacing(6)
         controls.addWidget(_label("Foreground", object_name="section"))
         self._mirrored = QCheckBox("Mirror my preview")
@@ -201,13 +206,18 @@ class AdjustPage(QWidget):
         self._room_id = room
         self.setAccessibleDescription(f"Adjust settings for {room}")
         self._default_viewpoint = scene.default_viewpoint if scene is not None else Viewpoint()
+        self._metric_depth_available = scene is not None and scene.supports_metric_depth
         self._viewpoint = self._drafts.get(room, viewpoint or self._default_viewpoint)
-        self._harmonization = self._harmonization_drafts.get(room, HarmonizationSettings())
+        self._harmonization = self._harmonization_drafts.get(
+            room,
+            HarmonizationSettings(global_harmonization=True),
+        )
         if scene is not None:
             self._viewpoint = self._viewpoint.model_copy(
                 update={"scene_transform": self._default_viewpoint.scene_transform},
             )
         self._sync_controls()
+        self._sync_depth_controls()
         self._sync_harmonization_controls()
         self.harmonization_changed.emit(self._harmonization)
 
@@ -319,10 +329,13 @@ class AdjustPage(QWidget):
             update: dict[str, object] = {"field_of_view": float(value)}
         elif title == "Horizon":
             update = {"horizon": value / 10}
-        elif title == "Depth in scene":
-            update = {"subject_depth": value / 10}
-        elif title == "Virtual focus":
-            update = {"focus_depth": value / 10}
+        elif title == "Depth-of-field blur":
+            depth_of_field = self._viewpoint.depth_of_field
+            update = {
+                "depth_of_field": depth_of_field.model_copy(
+                    update={"blur_strength": value / 100},
+                ),
+            }
         elif title == "Output crop":
             inset = value / 100
             update = {"crop": CropRegion(left=inset, top=inset, right=1 - inset, bottom=1 - inset)}
@@ -362,8 +375,9 @@ class AdjustPage(QWidget):
             "Field of view": round(self._viewpoint.field_of_view),
             "Horizon": round(self._viewpoint.horizon * 10),
             "Output crop": round(self._viewpoint.crop.left * 100),
-            "Depth in scene": round(self._viewpoint.subject_depth * 10),
-            "Virtual focus": round(self._viewpoint.focus_depth * 10),
+            "Depth-of-field blur": round(
+                self._viewpoint.depth_of_field.blur_strength * 100,
+            ),
         }
         for title, value in values.items():
             slider = self._sliders[title]
@@ -377,6 +391,16 @@ class AdjustPage(QWidget):
         self._aspect.blockSignals(True)  # noqa: FBT003
         self._aspect.setCurrentIndex(index)
         self._aspect.blockSignals(False)  # noqa: FBT003
+        self._sync_depth_controls()
+
+    def _sync_depth_controls(self) -> None:
+        tooltip = (
+            ""
+            if self._metric_depth_available
+            else "Available for locally generated metric SHARP scenes"
+        )
+        self._blur_strength.setEnabled(self._metric_depth_available)
+        self._blur_strength.setToolTip(tooltip)
 
     @staticmethod
     def _format_slider(title: str, value: int) -> str:
@@ -386,6 +410,4 @@ class AdjustPage(QWidget):
             return f"{value / 10:.1f}°"
         if title == "Output crop":
             return f"{value}%"
-        if title in {"Depth in scene", "Virtual focus"}:
-            return f"{value / 10:.1f} m"
         return f"{value}%"

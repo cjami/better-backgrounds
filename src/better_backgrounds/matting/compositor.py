@@ -34,6 +34,7 @@ class LiveHarmonizer(Protocol):
         background: NDArray[np.uint8],
         *,
         captured_at: float,
+        reference_background: NDArray[np.uint8] | None = None,
     ) -> HarmonizationResult:
         """Process one exact frame and matte pair."""
         ...
@@ -77,41 +78,31 @@ def compose_live_frame(
     revision: int,
     foreground: NDArray[np.uint8] | None = None,
     harmonizer: LiveHarmonizer | None = None,
+    harmonization_background: NDArray[np.uint8] | None = None,
     retain_standard: bool = True,
 ) -> LiveComposite:
     """Blend one matching source/matte pair against an immutable background."""
-    if (
-        packet.frame_id != matte.frame_id
-        or packet.captured_at != matte.captured_at
-        or packet.shared_slot != matte.alpha_slot
-    ):
-        msg = "source and matte must describe the same source frame"
-        raise ValueError(msg)
+    _validate_frame_identity(packet, matte)
     expected_source = (packet.height, packet.width, RGB_CHANNELS)
     expected_alpha = (packet.height, packet.width)
-    if source.dtype != np.uint8 or source.shape != expected_source:
-        msg = f"source must be {expected_source} uint8 RGB"
-        raise ValueError(msg)
-    if alpha.dtype != np.uint8 or alpha.shape != expected_alpha:
-        msg = f"alpha must be {expected_alpha} uint8"
-        raise ValueError(msg)
-    if foreground is not None and (
-        foreground.dtype != np.uint8 or foreground.shape != expected_source
-    ):
-        msg = f"foreground must be {expected_source} uint8 RGB"
-        raise ValueError(msg)
-    if (
-        background.dtype != np.uint8
-        or background.ndim != RGB_DIMENSIONS
-        or background.shape[2] != RGB_CHANNELS
-    ):
-        msg = "background must be uint8 RGB"
-        raise ValueError(msg)
+    _validate_frame_buffers(source, alpha, foreground, expected_source, expected_alpha)
+    _validate_background(background)
+    if harmonization_background is not None:
+        _validate_background(harmonization_background)
     if background.shape != expected_source:
         background = cast(
             "NDArray[np.uint8]",
             cv2.resize(
                 background,
+                (packet.width, packet.height),
+                interpolation=cv2.INTER_LINEAR,
+            ),
+        )
+    if harmonization_background is not None and harmonization_background.shape != expected_source:
+        harmonization_background = cast(
+            "NDArray[np.uint8]",
+            cv2.resize(
+                harmonization_background,
                 (packet.width, packet.height),
                 interpolation=cv2.INTER_LINEAR,
             ),
@@ -127,6 +118,7 @@ def compose_live_frame(
             alpha,
             background,
             captured_at=packet.captured_at,
+            reference_background=harmonization_background,
         )
         if result.image is not None:
             image = result.image
@@ -151,6 +143,46 @@ def compose_live_frame(
         harmonization_ms=harmonization_ms,
         harmonization_degraded=harmonization_degraded,
     )
+
+
+def _validate_frame_identity(packet: FramePacket, matte: MatteResult) -> None:
+    if (
+        packet.frame_id != matte.frame_id
+        or packet.captured_at != matte.captured_at
+        or packet.shared_slot != matte.alpha_slot
+    ):
+        msg = "source and matte must describe the same source frame"
+        raise ValueError(msg)
+
+
+def _validate_frame_buffers(
+    source: NDArray[np.uint8],
+    alpha: NDArray[np.uint8],
+    foreground: NDArray[np.uint8] | None,
+    expected_source: tuple[int, int, int],
+    expected_alpha: tuple[int, int],
+) -> None:
+    if source.dtype != np.uint8 or source.shape != expected_source:
+        msg = f"source must be {expected_source} uint8 RGB"
+        raise ValueError(msg)
+    if alpha.dtype != np.uint8 or alpha.shape != expected_alpha:
+        msg = f"alpha must be {expected_alpha} uint8"
+        raise ValueError(msg)
+    if foreground is not None and (
+        foreground.dtype != np.uint8 or foreground.shape != expected_source
+    ):
+        msg = f"foreground must be {expected_source} uint8 RGB"
+        raise ValueError(msg)
+
+
+def _validate_background(background: NDArray[np.uint8]) -> None:
+    if (
+        background.dtype != np.uint8
+        or background.ndim != RGB_DIMENSIONS
+        or background.shape[2] != RGB_CHANNELS
+    ):
+        msg = "background must be uint8 RGB"
+        raise ValueError(msg)
 
 
 def _standard_composite(

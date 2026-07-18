@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 class ViewpointDocument(StrictModel):
     """Version all persisted room viewpoints together."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[4] = 4
     rooms: dict[str, Viewpoint] = Field(default_factory=dict)
 
 
@@ -45,6 +46,9 @@ class ViewpointStore:
 
     def _read(self) -> ViewpointDocument:
         try:
-            return ViewpointDocument.model_validate_json(self.path.read_text(encoding="utf-8"))
-        except OSError, ValueError:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("schema_version") in {1, 2, 3}:
+                payload = {**payload, "schema_version": 4}
+            return ViewpointDocument.model_validate(payload)
+        except OSError, TypeError, ValueError:
             return ViewpointDocument()

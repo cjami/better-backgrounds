@@ -2,7 +2,160 @@ import * as pc from 'playcanvas';
 
 import { clampPosition, orbitPosition, positionsEqual, zoomPosition } from './viewpoint.mjs';
 
-const MAX_SCENE_CAPTURE_ATTEMPTS = 600;
+const MAX_SCENE_CAPTURE_ATTEMPTS = 12;
+const SUBJECT_FOCUS_DISTANCE = 1.5;
+const MIN_SUBJECT_FOCUS_RANGE = 0.8;
+const MAX_SUBJECT_FOCUS_RANGE = 8;
+const MAX_DOF_BLUR_RADIUS = 8;
+const REFERENCE_FIELD_OF_VIEW = 42;
+const MIN_PERSPECTIVE_SCALE = 0.75;
+const MAX_PERSPECTIVE_SCALE = 1.25;
+const DEPTH_PROXY_COLUMNS = 384;
+const DEPTH_PROXY_SAMPLE_RANK = 3;
+const DEPTH_PROXY_MAX_RELATIVE_STEP = 0.2;
+const DEPTH_PROXY_MIN_STEP_METRES = 0.5;
+
+const depthOfFieldForStrength = (strength, fieldOfView = REFERENCE_FIELD_OF_VIEW) => {
+  const blurStrength = Math.min(1, Math.max(0, strength));
+  const safeFieldOfView = Math.min(90, Math.max(24, fieldOfView));
+  const perspectiveScale = Math.min(
+    MAX_PERSPECTIVE_SCALE,
+    Math.max(
+      MIN_PERSPECTIVE_SCALE,
+      Math.tan(REFERENCE_FIELD_OF_VIEW * Math.PI / 360)
+        / Math.tan(safeFieldOfView * Math.PI / 360),
+    ),
+  );
+  const aperture = Math.min(1, blurStrength * perspectiveScale);
+  const focusFalloff = (1 - aperture) ** 3;
+  return {
+    blurRadius: aperture * MAX_DOF_BLUR_RADIUS,
+    focusRange: MIN_SUBJECT_FOCUS_RANGE
+      + (MAX_SUBJECT_FOCUS_RANGE - MIN_SUBJECT_FOCUS_RANGE) * focusFalloff,
+  };
+};
+
+const harmonizationViewpointKey = (viewpoint) => {
+  const reference = structuredClone(viewpoint);
+  delete reference.depth_of_field;
+  return JSON.stringify(reference);
+};
+
+const buildDepthProxyGeometry = (gsplatData, requestedColumns = DEPTH_PROXY_COLUMNS) => {
+  const x = gsplatData?.getProp?.('x');
+  const y = gsplatData?.getProp?.('y');
+  const z = gsplatData?.getProp?.('z');
+  const imageSize = gsplatData?.getProp?.('image_size', 'image_size');
+  const intrinsic = gsplatData?.getProp?.('intrinsic', 'intrinsic');
+  const sourceWidth = Math.trunc(imageSize?.[0] ?? 0);
+  const sourceHeight = Math.trunc(imageSize?.[1] ?? 0);
+  const focalX = intrinsic?.[0];
+  const focalY = intrinsic?.[4];
+  const principalX = intrinsic?.[2];
+  const principalY = intrinsic?.[5];
+  if (
+    sourceWidth < 2
+    || sourceHeight < 2
+    || !x
+    || !y
+    || !z
+    || y.length !== x.length
+    || z.length !== x.length
+    || !Number.isFinite(focalX)
+    || !Number.isFinite(focalY)
+    || focalX <= 0
+    || focalY <= 0
+    || !Number.isFinite(principalX)
+    || !Number.isFinite(principalY)
+  ) return null;
+
+  const columns = Math.max(2, Math.min(sourceWidth, Math.trunc(requestedColumns)));
+  const rows = Math.max(2, Math.min(
+    sourceHeight,
+    Math.round((sourceHeight / sourceWidth) * columns),
+  ));
+  const positions = new Float32Array(columns * rows * 3);
+  const valid = new Uint8Array(columns * rows);
+  const depths = new Float32Array(columns * rows);
+  const rankedDepths = Array.from(
+    { length: DEPTH_PROXY_SAMPLE_RANK },
+    () => new Float32Array(columns * rows).fill(Number.POSITIVE_INFINITY),
+  );
+
+  for (let sourceIndex = 0; sourceIndex < z.length; sourceIndex += 1) {
+    const depth = z[sourceIndex];
+    if (
+      !Number.isFinite(x[sourceIndex])
+      || !Number.isFinite(y[sourceIndex])
+      || !Number.isFinite(depth)
+      || depth <= 0
+    ) continue;
+    const pixelX = focalX * x[sourceIndex] / depth + principalX;
+    const pixelY = focalY * y[sourceIndex] / depth + principalY;
+    const column = Math.floor(pixelX * columns / sourceWidth);
+    const row = Math.floor(pixelY * rows / sourceHeight);
+    if (column < 0 || column >= columns || row < 0 || row >= rows) continue;
+    const targetIndex = row * columns + column;
+    for (let rank = 0; rank < DEPTH_PROXY_SAMPLE_RANK; rank += 1) {
+      if (depth >= rankedDepths[rank][targetIndex]) continue;
+      for (let move = DEPTH_PROXY_SAMPLE_RANK - 1; move > rank; move -= 1) {
+        rankedDepths[move][targetIndex] = rankedDepths[move - 1][targetIndex];
+      }
+      rankedDepths[rank][targetIndex] = depth;
+      break;
+    }
+  }
+
+  for (let row = 0; row < rows; row += 1) {
+    const pixelY = (row + 0.5) * sourceHeight / rows;
+    for (let column = 0; column < columns; column += 1) {
+      const targetIndex = row * columns + column;
+      const rankedDepth = rankedDepths[DEPTH_PROXY_SAMPLE_RANK - 1][targetIndex];
+      const depth = Number.isFinite(rankedDepth) ? rankedDepth : rankedDepths[0][targetIndex];
+      if (!Number.isFinite(depth)) continue;
+      const pixelX = (column + 0.5) * sourceWidth / columns;
+      const positionOffset = targetIndex * 3;
+      positions[positionOffset] = (pixelX - principalX) * depth / focalX;
+      positions[positionOffset + 1] = (pixelY - principalY) * depth / focalY;
+      positions[positionOffset + 2] = depth;
+      depths[targetIndex] = depth;
+      valid[targetIndex] = 1;
+    }
+  }
+
+  const indices = [];
+  const addTriangle = (first, second, third) => {
+    if (!valid[first] || !valid[second] || !valid[third]) return;
+    const nearest = Math.min(depths[first], depths[second], depths[third]);
+    const farthest = Math.max(depths[first], depths[second], depths[third]);
+    const maximumStep = Math.max(
+      DEPTH_PROXY_MIN_STEP_METRES,
+      nearest * DEPTH_PROXY_MAX_RELATIVE_STEP,
+    );
+    if (farthest - nearest <= maximumStep) indices.push(first, second, third);
+  };
+  for (let row = 0; row < rows - 1; row += 1) {
+    for (let column = 0; column < columns - 1; column += 1) {
+      const topLeft = row * columns + column;
+      const topRight = topLeft + 1;
+      const bottomLeft = topLeft + columns;
+      const bottomRight = bottomLeft + 1;
+      addTriangle(topLeft, bottomLeft, topRight);
+      addTriangle(topRight, bottomLeft, bottomRight);
+    }
+  }
+  if (!indices.length) return null;
+  return { columns, rows, positions, indices: new Uint32Array(indices) };
+};
+
+const bytesToBase64 = (bytes) => {
+  let binary = '';
+  const chunkSize = 32_768;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+};
 
 const flipPixelRows = (pixels, width, height) => {
   const rowLength = width * 4;
@@ -36,8 +189,12 @@ class SceneRenderer {
     this.cacheSceneFrames = cacheSceneFrames;
     this.app = null;
     this.camera = null;
+    this.cameraFrame = null;
     this.sceneEntity = null;
     this.sceneAsset = null;
+    this.depthProxyEntity = null;
+    this.depthProxyMesh = null;
+    this.depthProxyMaterial = null;
     this.sceneTransformKey = '';
     this.assetId = '';
     this.viewpoint = null;
@@ -49,6 +206,13 @@ class SceneRenderer {
     this.sceneSnapshotContext = null;
     this.scenePixels = null;
     this.sceneCaptureAttempts = 0;
+    this.sceneSettled = false;
+    this.metricDepthAvailable = false;
+    this.snapshotRevision = 0;
+    this.pendingSnapshotKind = null;
+    this.pendingSnapshotRevision = 0;
+    this.snapshotQueue = [];
+    this.harmonizationViewpointKey = '';
     this.warning = document.getElementById('safe-warning');
     this.status = document.getElementById('status');
     this.subjectGuide = document.getElementById('subject-guide');
@@ -83,7 +247,10 @@ class SceneRenderer {
         clearColor: new pc.Color(0.035, 0.037, 0.043),
       });
       this.app.root.addChild(this.camera);
+      this.cameraFrame = new pc.CameraFrame(this.app, this.camera.camera);
+      this.cameraFrame.update();
       this.app.start();
+      this.app.autoRender = !this.cacheSceneFrames;
       this.requestSceneFrame();
       if (this.status) {
         this.status.textContent = device.deviceType === pc.DEVICETYPE_WEBGPU ? 'WEBGPU' : 'WEBGL 2';
@@ -94,6 +261,11 @@ class SceneRenderer {
         this.requestSceneFrame();
       });
       this.connectBridge();
+      this.app.systems.gsplat.on('frame:ready', (_camera, _layer, ready, loadingCount) => {
+        this.sceneSettled = ready && loadingCount === 0;
+        if (this.sceneSettled && this.pendingSnapshotKind) this.requestSceneFrame(1);
+      });
+      this.app.systems.gsplat.on('frame:request', () => this.requestSceneFrame(1));
     } catch (error) {
       if (this.status) this.status.textContent = 'GPU UNAVAILABLE';
       this.bridge.report_scene_error('renderer', 'gpu_unavailable', this.safeMessage(error));
@@ -101,8 +273,8 @@ class SceneRenderer {
   }
 
   connectBridge() {
-    this.bridge.scene_requested.connect((assetId, url, payload) => {
-      this.loadScene(assetId, url, payload);
+    this.bridge.scene_requested.connect((assetId, url, payload, metricDepthAvailable) => {
+      this.loadScene(assetId, url, payload, metricDepthAvailable);
     });
     this.bridge.viewpoint_requested.connect((payload) => this.applyViewpoint(payload));
     this.bridge.reset_requested.connect(() => {
@@ -116,11 +288,13 @@ class SceneRenderer {
     });
   }
 
-  loadScene(assetId, url, payload) {
+  loadScene(assetId, url, payload, metricDepthAvailable = false) {
     if (!this.app || !this.camera) return;
     this.assetId = assetId;
-    this.applyViewpoint(payload, true);
+    this.metricDepthAvailable = metricDepthAvailable;
+    this.sceneSettled = false;
     this.removeScene();
+    this.applyViewpoint(payload, true);
     this.setLoading(true, 'Loading spatial scene…');
     this.bridge.report_scene_progress(assetId, 0, 100);
 
@@ -132,10 +306,13 @@ class SceneRenderer {
       const entity = new pc.Entity(assetId);
       entity.addComponent('gsplat', { asset: loadedAsset, unified: true });
       this.sceneEntity = entity;
+      this.createDepthProxy(loadedAsset.resource?.gsplatData);
       this.sceneCaptureAttempts = 0;
       this.applySceneTransform();
       this.app.root.addChild(entity);
-      this.requestSceneFrame();
+      this.configureNormalFrame();
+      if (this.cacheSceneFrames) this.queueSnapshotRefresh(true);
+      else this.requestSceneFrame();
       this.bridge.report_scene_progress(assetId, 100, 100);
       this.setLoading(false, 'Scene ready');
     });
@@ -148,6 +325,12 @@ class SceneRenderer {
   }
 
   removeScene() {
+    this.depthProxyEntity?.destroy();
+    this.depthProxyMesh?.destroy();
+    this.depthProxyMaterial?.destroy();
+    this.depthProxyEntity = null;
+    this.depthProxyMesh = null;
+    this.depthProxyMaterial = null;
     this.sceneEntity?.destroy();
     this.sceneEntity = null;
     if (this.sceneAsset && this.app) {
@@ -156,6 +339,34 @@ class SceneRenderer {
     }
     this.sceneAsset = null;
     this.sceneTransformKey = '';
+    this.sceneSettled = false;
+    this.snapshotQueue.length = 0;
+    this.harmonizationViewpointKey = '';
+  }
+
+  createDepthProxy(gsplatData) {
+    if (!this.metricDepthAvailable || !this.app) return;
+    const geometry = buildDepthProxyGeometry(gsplatData);
+    if (!geometry) return;
+
+    const mesh = new pc.Mesh(this.app.graphicsDevice);
+    mesh.setPositions(geometry.positions);
+    mesh.setIndices(geometry.indices);
+    mesh.update(pc.PRIMITIVE_TRIANGLES);
+
+    const material = new pc.StandardMaterial();
+    material.cull = pc.CULLFACE_NONE;
+    material.depthWrite = true;
+    material.update();
+
+    const entity = new pc.Entity('sharp-depth-proxy');
+    const meshInstance = new pc.MeshInstance(mesh, material, entity);
+    meshInstance.shaderPassMask &= ~(1 << pc.SHADER_FORWARD);
+    entity.addComponent('render', { meshInstances: [meshInstance] });
+    this.depthProxyEntity = entity;
+    this.depthProxyMesh = mesh;
+    this.depthProxyMaterial = material;
+    this.app.root.addChild(entity);
   }
 
   applyViewpoint(payload, rememberAsReset = false) {
@@ -186,7 +397,16 @@ class SceneRenderer {
       );
       this.applySceneTransform();
       this.updateSubjectGuide();
-      this.requestSceneFrame();
+      this.snapshotRevision += 1;
+      const nextReferenceKey = harmonizationViewpointKey(current);
+      const referenceChanged = nextReferenceKey !== this.harmonizationViewpointKey;
+      this.harmonizationViewpointKey = nextReferenceKey;
+      if (this.cacheSceneFrames && this.sceneEntity) {
+        this.queueSnapshotRefresh(referenceChanged);
+      } else {
+        this.configureNormalFrame();
+        this.requestSceneFrame();
+      }
     } catch (error) {
       this.bridge.report_scene_error(this.assetId || 'renderer', 'viewpoint_invalid', this.safeMessage(error));
     }
@@ -307,6 +527,41 @@ class SceneRenderer {
     });
   }
 
+  configureNormalFrame(blurStrengthOverride = null) {
+    if (!this.cameraFrame || !this.viewpoint) return;
+    const settings = this.viewpoint.depth_of_field;
+    const requestedStrength = blurStrengthOverride ?? settings.blur_strength;
+    const blurStrength = Math.min(1, Math.max(0, requestedStrength));
+    const effect = depthOfFieldForStrength(blurStrength, this.viewpoint.field_of_view);
+    const enabled = this.metricDepthAvailable;
+    this.cameraFrame.debug = null;
+    this.cameraFrame.dof.enabled = enabled;
+    this.cameraFrame.dof.nearBlur = true;
+    this.cameraFrame.dof.highQuality = true;
+    this.cameraFrame.dof.focusDistance = SUBJECT_FOCUS_DISTANCE;
+    this.cameraFrame.dof.focusRange = effect.focusRange;
+    this.cameraFrame.dof.blurRadius = effect.blurRadius;
+    this.cameraFrame.dof.blurRings = 4;
+    this.cameraFrame.dof.blurRingPoints = 5;
+    this.cameraFrame.rendering.sharpness = enabled ? 0.24 : 0;
+    this.cameraFrame.update();
+  }
+
+  queueSnapshotRefresh(referenceChanged) {
+    this.snapshotQueue.length = 0;
+    const revision = this.snapshotRevision;
+    if (referenceChanged) this.snapshotQueue.push({ kind: 'harmonization', revision });
+    this.snapshotQueue.push({ kind: 'background', revision });
+    this.startNextSnapshot();
+  }
+
+  startNextSnapshot() {
+    if (this.pendingSnapshotKind || this.sceneFramePending || !this.snapshotQueue?.length) return;
+    const next = this.snapshotQueue.shift();
+    this.configureNormalFrame(next.kind === 'harmonization' ? 0 : null);
+    this.requestSceneFrame(2, next.kind, next.revision);
+  }
+
   applySceneTransform() {
     if (!this.sceneEntity || !this.viewpoint) return;
     const transform = this.viewpoint.scene_transform;
@@ -314,18 +569,21 @@ class SceneRenderer {
     if (key === this.sceneTransformKey) return;
     const translation = transform.translation;
     const orientation = transform.orientation;
-    this.sceneEntity.setLocalPosition(translation.x, translation.y, translation.z);
-    this.sceneEntity.setLocalRotation(
-      orientation.x,
-      orientation.y,
-      orientation.z,
-      orientation.w,
-    );
-    this.sceneEntity.setLocalScale(transform.scale, transform.scale, transform.scale);
+    for (const entity of [this.sceneEntity, this.depthProxyEntity]) {
+      if (!entity) continue;
+      entity.setLocalPosition(translation.x, translation.y, translation.z);
+      entity.setLocalRotation(
+        orientation.x,
+        orientation.y,
+        orientation.z,
+        orientation.w,
+      );
+      entity.setLocalScale(transform.scale, transform.scale, transform.scale);
+    }
     this.sceneTransformKey = key;
   }
 
-  requestSceneFrame(frameCount = 2) {
+  requestSceneFrame(frameCount = 2, snapshotKind = null, revision = this.snapshotRevision) {
     if (!this.app) return;
     if (!this.cacheSceneFrames) {
       this.app.autoRender = true;
@@ -333,6 +591,10 @@ class SceneRenderer {
       return;
     }
     this.app.autoRender = true;
+    if (snapshotKind) {
+      this.pendingSnapshotKind = snapshotKind;
+      this.pendingSnapshotRevision = revision;
+    }
     this.sceneFramesRemaining = Math.max(this.sceneFramesRemaining, frameCount);
     if (this.sceneFramePending) return;
     this.renderSceneFrame();
@@ -344,19 +606,24 @@ class SceneRenderer {
       try {
         this.sceneFramesRemaining -= 1;
         if (this.sceneFramesRemaining === 0) {
-          const capture = this.captureSceneFrame();
-          if (
-            this.sceneEntity &&
-            !capture.hasContent &&
-            this.sceneCaptureAttempts < MAX_SCENE_CAPTURE_ATTEMPTS
-          ) {
-            capture.frame.close();
-            this.sceneCaptureAttempts += 1;
-            this.sceneFramesRemaining = 1;
-          } else {
-            this.sceneCaptureAttempts = 0;
-            this.app.autoRender = false;
-            window.dispatchEvent(new CustomEvent('bb-scene-frame', { detail: capture.frame }));
+          if (this.cacheSceneFrames && this.pendingSnapshotKind) {
+            const capture = this.captureSceneFrame();
+            if (
+              this.sceneEntity &&
+              (!capture.hasContent || !this.sceneSettled) &&
+              this.sceneCaptureAttempts < MAX_SCENE_CAPTURE_ATTEMPTS
+            ) {
+              this.sceneCaptureAttempts += 1;
+              this.sceneFramesRemaining = 1;
+            } else {
+              this.sceneCaptureAttempts = 0;
+              const kind = this.pendingSnapshotKind;
+              const revision = this.pendingSnapshotRevision;
+              const assetId = this.assetId;
+              this.pendingSnapshotKind = null;
+              void Promise.resolve(this.publishSceneSnapshot(assetId, revision, kind))
+                .finally(() => this.startNextSnapshot());
+            }
           }
         }
       } catch (error) {
@@ -367,7 +634,11 @@ class SceneRenderer {
         );
       } finally {
         this.sceneFramePending = false;
-        if (this.sceneFramesRemaining > 0) this.renderSceneFrame();
+        if (this.sceneFramesRemaining > 0) {
+          this.renderSceneFrame();
+        } else if (this.cacheSceneFrames) {
+          this.app.autoRender = false;
+        }
       }
     });
     this.app.renderNextFrame = true;
@@ -392,9 +663,22 @@ class SceneRenderer {
       0,
     );
     return {
-      frame: this.sceneSnapshot.transferToImageBitmap(),
       hasContent: hasPixelVariation(this.scenePixels),
     };
+  }
+
+  async publishSceneSnapshot(assetId, revision, kind) {
+    try {
+      const blob = await this.sceneSnapshot.convertToBlob({ type: 'image/png' });
+      const payload = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
+      this.bridge.report_snapshot_ready(assetId, revision, kind, payload);
+    } catch (error) {
+      this.bridge.report_scene_error(
+        assetId || 'renderer',
+        'scene_frame_encode_failed',
+        this.safeMessage(error),
+      );
+    }
   }
 
   setLoading(loading, message) {
@@ -410,10 +694,19 @@ class SceneRenderer {
   }
 }
 
-const start = async (bridge) => {
-  const renderer = new SceneRenderer(bridge);
+const start = async (bridge, options = {}) => {
+  const renderer = new SceneRenderer(bridge, options);
   await renderer.initialize();
   bridge.renderer_ready();
 };
 
-export { SceneRenderer, flipPixelRows, hasPixelVariation, start };
+export {
+  SceneRenderer,
+  buildDepthProxyGeometry,
+  bytesToBase64,
+  depthOfFieldForStrength,
+  harmonizationViewpointKey,
+  flipPixelRows,
+  hasPixelVariation,
+  start,
+};

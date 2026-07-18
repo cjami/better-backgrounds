@@ -79,6 +79,9 @@ class NativeCompositeSurface(QWidget):
         self._background: NDArray[np.uint8] | None = None
         self._resized_backgrounds: dict[tuple[int, int], NDArray[np.uint8]] = {}
         self._background_revision = 0
+        self._harmonization_background: NDArray[np.uint8] | None = None
+        self._resized_harmonization_backgrounds: dict[tuple[int, int], NDArray[np.uint8]] = {}
+        self._harmonization_revision = 0
         self._raw_source: NDArray[np.uint8] | None = None
         self._packet = None
         self._matte = None
@@ -122,7 +125,12 @@ class NativeCompositeSurface(QWidget):
             return None
         return self._standard_composite_image, self._composite_image
 
-    def set_background(self, image: QImage) -> bool:
+    def set_background(
+        self,
+        image: QImage,
+        *,
+        update_harmonization_reference: bool = True,
+    ) -> bool:
         """Atomically replace the immutable room snapshot."""
         if image.isNull():
             return False
@@ -132,7 +140,19 @@ class NativeCompositeSurface(QWidget):
         self._background = background
         self._resized_backgrounds.clear()
         self._background_revision += 1
-        self._harmonizer.set_room(background, revision=self._background_revision)
+        if update_harmonization_reference:
+            self._set_harmonization_background(background)
+        self._recompose()
+        return True
+
+    def set_harmonization_reference(self, image: QImage) -> bool:
+        """Replace the sharp room evidence used only for subject appearance."""
+        if image.isNull():
+            return False
+        background = qimage_to_rgb(image)
+        if not background_has_content(background):
+            return False
+        self._set_harmonization_background(background)
         self._recompose()
         return True
 
@@ -141,6 +161,9 @@ class NativeCompositeSurface(QWidget):
         self._background = None
         self._resized_backgrounds.clear()
         self._background_revision += 1
+        self._harmonization_background = None
+        self._resized_harmonization_backgrounds.clear()
+        self._harmonization_revision += 1
         self._harmonizer.clear_room()
         self._recompose()
 
@@ -194,23 +217,24 @@ class NativeCompositeSurface(QWidget):
         source = np.flip(completed.source, axis=1).copy() if self._mirrored else completed.source
         alpha = np.flip(completed.alpha, axis=1).copy() if self._mirrored else completed.alpha
         background = self._background
+        harmonization_background = self._harmonization_background
         revision = self._background_revision
         if background is None:
             background = np.zeros_like(source)
-        elif background.shape != source.shape:
-            shape = source.shape[:2]
-            resized = self._resized_backgrounds.get(shape)
-            if resized is None:
-                resized = cast(
-                    "NDArray[np.uint8]",
-                    cv2.resize(
-                        background,
-                        (source.shape[1], source.shape[0]),
-                        interpolation=cv2.INTER_LINEAR,
-                    ),
-                )
-                self._resized_backgrounds[shape] = resized
-            background = resized
+        else:
+            background = self._resize_background(
+                background,
+                source,
+                self._resized_backgrounds,
+            )
+        if harmonization_background is None:
+            harmonization_background = background
+        else:
+            harmonization_background = self._resize_background(
+                harmonization_background,
+                source,
+                self._resized_harmonization_backgrounds,
+            )
         compare_mode = self._mode == "compare"
         foreground = decontaminate_foreground(source, alpha)
         composite = compose_live_frame(
@@ -222,6 +246,7 @@ class NativeCompositeSurface(QWidget):
             revision=revision,
             foreground=foreground,
             harmonizer=self._harmonizer,
+            harmonization_background=harmonization_background,
             retain_standard=compare_mode,
         )
         return PreparedComposite(completed, source, alpha, composite, compare_mode)
@@ -276,6 +301,8 @@ class NativeCompositeSurface(QWidget):
             f"{diagnostics.processing_width}x{diagnostics.processing_height} matte · "
             f"{diagnostics.device_type.upper()} · {diagnostics.dropped_frames} dropped"
         )
+        if diagnostics.background_refresh_ms > 0:
+            self._diagnostics += f" · {diagnostics.background_refresh_ms:.0f} ms background refresh"
         composite = self._last_composite
         if composite is not None and composite.harmonized:
             self._diagnostics += f" · {composite.harmonization_ms:.1f} ms appearance"
@@ -351,6 +378,34 @@ class NativeCompositeSurface(QWidget):
             self._alpha,
         )
         return self.present_matte(self.prepare_matte(completed))
+
+    def _set_harmonization_background(self, background: NDArray[np.uint8]) -> None:
+        self._harmonization_background = background
+        self._resized_harmonization_backgrounds.clear()
+        self._harmonization_revision += 1
+        self._harmonizer.set_room(background, revision=self._harmonization_revision)
+
+    @staticmethod
+    def _resize_background(
+        background: NDArray[np.uint8],
+        source: NDArray[np.uint8],
+        cache: dict[tuple[int, int], NDArray[np.uint8]],
+    ) -> NDArray[np.uint8]:
+        if background.shape == source.shape:
+            return background
+        shape = source.shape[:2]
+        resized = cache.get(shape)
+        if resized is None:
+            resized = cast(
+                "NDArray[np.uint8]",
+                cv2.resize(
+                    background,
+                    (source.shape[1], source.shape[0]),
+                    interpolation=cv2.INTER_LINEAR,
+                ),
+            )
+            cache[shape] = resized
+        return resized
 
     def _draw_cover(self, painter: QPainter, image: QImage) -> None:
         scale = max(self.width() / image.width(), self.height() / image.height())

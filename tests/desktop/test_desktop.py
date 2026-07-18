@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING, cast
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QPushButton,
+    QSlider,
     QStackedLayout,
     QStackedWidget,
 )
@@ -27,6 +29,7 @@ from better_backgrounds.desktop.webview import navigation_is_allowed
 from better_backgrounds.jobs.build_session import IdleBuild
 from better_backgrounds.scene import (
     Quaternion,
+    SceneProvenance,
     SceneReference,
     SceneTransform,
     Viewpoint,
@@ -199,6 +202,47 @@ def test_adjust_keeps_asset_normalization_when_restoring_a_saved_camera() -> Non
     page.close()
 
 
+def test_adjust_enables_depth_of_field_only_for_local_sharp_scenes() -> None:
+    """Gate subject-locked focus controls on metric SHARP provenance."""
+    application()
+    renderer = TrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    sample = load_sample_manifest().scenes[0]
+    sliders = {slider.accessibleName(): slider for slider in page.findChildren(QSlider)}
+    checkboxes = {checkbox.text(): checkbox for checkbox in page.findChildren(QCheckBox)}
+
+    page.set_room(sample.asset_id, sample, installed=True)
+
+    assert not sliders["Depth-of-field blur"].isEnabled()
+    assert "Depth of field" not in checkboxes
+    assert "Depth in scene" not in sliders
+    assert "Focus band" not in sliders
+    assert "Depth-aware occlusion" not in checkboxes
+    assert "Subject size" not in sliders
+
+    sharp_scene = sample.model_copy(
+        update={
+            "format": "ply",
+            "provenance": SceneProvenance(
+                source_kind="camera",
+                source_sha256="1" * 64,
+                source_size=(1280, 720),
+                builder_revision="2" * 40,
+                checkpoint_sha256="3" * 64,
+                device="mps",
+                inference_ms=900,
+                license_name="Apple SHARP Research License",
+            ),
+        },
+    )
+    page.set_room("local-sharp", sharp_scene, installed=True)
+
+    assert sliders["Depth-of-field blur"].isEnabled()
+    sliders["Depth-of-field blur"].setValue(70)
+    assert renderer.viewpoints[-1].depth_of_field.blur_strength == 0.7
+    page.close()
+
+
 def test_show_tab_has_a_clear_camera_toggle() -> None:
     """Expose explicit start and stop actions for local webcam capture."""
     camera_source = InputCameraSource(
@@ -319,6 +363,12 @@ def test_renderer_bridge_rejects_invalid_scene_status() -> None:
     assert not bridge.report_scene_progress("sample-room", 101, 100)
     assert bridge.report_scene_error("sample-room", "gpu_unavailable", "No GPU renderer")
     assert not bridge.report_scene_error("sample-room", "bad code!", "No GPU renderer")
+    assert bridge.report_snapshot_ready("sample-room", 3, "background", "cG5n")
+    assert bridge.report_snapshot_ready("sample-room", 3, "harmonization", "cG5n")
+    assert not bridge.report_snapshot_ready("sample-room", 3, "occlusion", "cG5n")
+    assert not bridge.report_snapshot_ready("sample-room", -1, "background", "cG5n")
+    assert not bridge.report_snapshot_ready("sample-room", 3, "depth", "cG5n")
+    assert not bridge.report_snapshot_ready("sample-room", 3, "background", "")
 
 
 def test_live_bridge_validates_camera_state_and_diagnostics() -> None:

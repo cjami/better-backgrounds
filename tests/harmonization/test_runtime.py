@@ -98,6 +98,14 @@ def test_global_arguments_are_aggregated_once_and_transitioned_each_frame(
     third = harmonizer.apply(source, alpha, background, captured_at=200.0)
     fourth = harmonizer.apply(source, alpha, background, captured_at=1_000.0)
     fifth = harmonizer.apply(source, alpha, background, captured_at=5_000.0)
+    dof_background = np.full_like(background, 90)
+    stable_subject = harmonizer.apply(
+        source,
+        alpha,
+        dof_background,
+        captured_at=1_000.0,
+        reference_background=background,
+    )
 
     assert not first.applied
     assert not second.applied
@@ -110,6 +118,9 @@ def test_global_arguments_are_aggregated_once_and_transitioned_each_frame(
     assert third.image is not None
     assert fourth.image is not None
     assert fifth.image is not None
+    assert stable_subject.image is not None
     assert np.array_equal(third.image[:, :2], background[:, :2])
     assert np.all(fourth.image[:, 2:6] > third.image[:, 2:6])
     assert np.all(fifth.image[:, 2:6] >= fourth.image[:, 2:6])
+    assert np.array_equal(stable_subject.image[:, 2:6], fourth.image[:, 2:6])
+    assert np.array_equal(stable_subject.image[:, :2], dof_background[:, :2])

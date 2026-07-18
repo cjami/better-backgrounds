@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { SceneRenderer, flipPixelRows, hasPixelVariation } from '../src/main.mjs';
+import {
+  SceneRenderer,
+  bytesToBase64,
+  flipPixelRows,
+  hasPixelVariation,
+} from '../src/main.mjs';
 
 test('scene capture reads the WebGL framebuffer before publishing its bitmap', () => {
   const operations = [];
@@ -18,10 +23,6 @@ test('scene capture reads the WebGL framebuffer before publishing its bitmap', (
       return { putImageData: (image) => operations.push(['copy', [...image.data]]) };
     }
 
-    transferToImageBitmap() {
-      operations.push(['transfer']);
-      return { width: this.width, height: this.height };
-    }
   };
   globalThis.ImageData = class {
     constructor(data, width, height) {
@@ -50,18 +51,20 @@ test('scene capture reads the WebGL framebuffer before publishing its bitmap', (
     renderer.scenePixels = null;
 
     assert.deepEqual(renderer.captureSceneFrame(), {
-      frame: { width: 2, height: 2 },
       hasContent: true,
     });
     assert.deepEqual(operations, [
       ['read'],
       ['copy', [20, 30, 40, 255, 50, 60, 70, 255, 1, 2, 3, 255, 4, 5, 6, 255]],
-      ['transfer'],
     ]);
   } finally {
     globalThis.OffscreenCanvas = previousOffscreenCanvas;
     globalThis.ImageData = previousImageData;
   }
+});
+
+test('snapshot pixels are encoded for direct delivery to the native compositor', () => {
+  assert.equal(bytesToBase64(new Uint8Array([1, 2, 3, 254, 255])), 'AQID/v8=');
 });
 
 test('pixel helpers flip framebuffer rows and reject a uniform clear frame', () => {
@@ -81,7 +84,7 @@ test('pixel helpers flip framebuffer rows and reject a uniform clear frame', () 
   assert.equal(hasPixelVariation(pixels), true);
 });
 
-test('cached scene requests resume rendering until a valid frame can be captured', () => {
+test('cached scene requests render on demand until a valid frame can be captured', () => {
   const renderer = Object.create(SceneRenderer.prototype);
   renderer.cacheSceneFrames = true;
   renderer.sceneFramePending = false;
@@ -98,4 +101,60 @@ test('cached scene requests resume rendering until a valid frame can be captured
   assert.equal(renderer.app.renderNextFrame, true);
   assert.equal(renderer.sceneFramePending, true);
   assert.equal(renderer.sceneFramesRemaining, 2);
+});
+
+test('cached scene publishes after a bounded GSplat settling window', () => {
+  const published = [];
+  let postrender;
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.assetId = 'room-v1';
+  renderer.cacheSceneFrames = true;
+  renderer.pendingSnapshotKind = 'background';
+  renderer.pendingSnapshotRevision = 7;
+  renderer.sceneCaptureAttempts = 12;
+  renderer.sceneEntity = {};
+  renderer.sceneFramePending = false;
+  renderer.sceneFramesRemaining = 1;
+  renderer.sceneSettled = false;
+  renderer.captureSceneFrame = () => ({ hasContent: true });
+  renderer.publishSceneSnapshot = (...args) => published.push(args);
+  renderer.bridge = { report_scene_error: () => {} };
+  renderer.app = {
+    autoRender: true,
+    once: (_event, callback) => { postrender = callback; },
+    renderNextFrame: false,
+  };
+
+  renderer.renderSceneFrame();
+  postrender();
+
+  assert.deepEqual(published, [['room-v1', 7, 'background']]);
+  assert.equal(renderer.pendingSnapshotKind, null);
+  assert.equal(renderer.sceneFramePending, false);
+  assert.equal(renderer.app.autoRender, false);
+});
+
+test('cached viewpoint refresh captures a sharp reference before the DOF background', () => {
+  const calls = [];
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.snapshotRevision = 9;
+  renderer.snapshotQueue = [];
+  renderer.pendingSnapshotKind = null;
+  renderer.sceneFramePending = false;
+  renderer.configureNormalFrame = (strength) => calls.push(['configure', strength]);
+  renderer.requestSceneFrame = (frames, kind, revision) => {
+    calls.push(['request', frames, kind, revision]);
+    renderer.pendingSnapshotKind = kind;
+  };
+
+  renderer.queueSnapshotRefresh(true);
+  renderer.pendingSnapshotKind = null;
+  renderer.startNextSnapshot();
+
+  assert.deepEqual(calls, [
+    ['configure', 0],
+    ['request', 2, 'harmonization', 9],
+    ['configure', null],
+    ['request', 2, 'background', 9],
+  ]);
 });

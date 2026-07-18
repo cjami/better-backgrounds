@@ -81,6 +81,12 @@ class SubjectRegion(StrictModel):
         return self
 
 
+class DepthOfFieldSettings(StrictModel):
+    """Control subject-locked room blur with one normalized amount."""
+
+    blur_strength: float = Field(default=0.0, ge=0.0, le=1.0, allow_inf_nan=False)
+
+
 class CameraBounds(StrictModel):
     """Bound camera movement to poses supported by the captured scene."""
 
@@ -127,9 +133,9 @@ def sharp_scene_transform() -> SceneTransform:
 
 
 class Viewpoint(StrictModel):
-    """Persist every safe virtual-camera and subject-placement input."""
+    """Persist every safe virtual-camera and room-focus input."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[4] = 4
     position: Vector3 = Field(default_factory=lambda: Vector3(x=0.0, y=1.4, z=-2.1))
     orientation: Quaternion = Field(default_factory=Quaternion)
     orbit_target: Vector3 = Field(default_factory=lambda: Vector3(x=0.0, y=1.1, z=0.0))
@@ -140,11 +146,50 @@ class Viewpoint(StrictModel):
     aspect_ratio: float = Field(default=16 / 9, ge=0.5, le=4.0, allow_inf_nan=False)
     crop: CropRegion = Field(default_factory=CropRegion)
     subject_region: SubjectRegion = Field(default_factory=SubjectRegion)
+    depth_of_field: DepthOfFieldSettings = Field(default_factory=DepthOfFieldSettings)
     scene_transform: SceneTransform = Field(default_factory=SceneTransform)
     safe_camera_region: CameraBounds = Field(default_factory=CameraBounds)
     nearest_source_frame: str | None = Field(default=None, max_length=160)
-    subject_depth: float = Field(default=2.4, ge=0.5, le=5.0, allow_inf_nan=False)
-    focus_depth: float = Field(default=2.6, ge=0.5, le=5.0, allow_inf_nan=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_depth_settings(cls, value: object) -> object:
+        """Retain legacy framing while accepting the short-lived placement schema."""
+        if not isinstance(value, dict):
+            return value
+        schema_version = value.get("schema_version")
+        if (
+            schema_version not in {1, 2, 3}
+            and "subject_placement" not in value
+            and "focus_depth" not in value
+            and "subject_depth" not in value
+        ):
+            return value
+        payload = dict(value)
+        placement = payload.pop("subject_placement", None)
+        if isinstance(placement, dict):
+            height = float(placement.get("reference_height", 0.7))
+            anchor_x = float(placement.get("anchor_x", 0.5))
+            anchor_y = float(placement.get("anchor_y", 0.9))
+            width = min(1.0, height * 3 / 7)
+            payload["subject_region"] = {
+                "x": min(1.0 - width, max(0.0, anchor_x - width / 2)),
+                "y": min(1.0 - height, max(0.0, anchor_y - height)),
+                "width": width,
+                "height": height,
+            }
+        depth_of_field = payload.get("depth_of_field")
+        if isinstance(depth_of_field, dict):
+            strength = float(depth_of_field.get("blur_strength", 0.0))
+            enabled = bool(depth_of_field.get("enabled", strength > 0))
+            payload["depth_of_field"] = {
+                "blur_strength": strength if enabled else 0.0,
+            }
+        payload.pop("focus_depth", None)
+        payload.pop("subject_depth", None)
+        payload["schema_version"] = 4
+        payload.setdefault("depth_of_field", DepthOfFieldSettings().model_dump())
+        return payload
 
     @model_validator(mode="after")
     def valid_clipping_range(self) -> Self:
@@ -230,6 +275,15 @@ class SceneReference(StrictModel):
     preview: str | None = Field(default=None, max_length=200)
     default_viewpoint: Viewpoint = Field(default_factory=Viewpoint)
     provenance: SceneProvenance | None = None
+
+    @property
+    def supports_metric_depth(self) -> bool:
+        """Return whether this scene has SHARP's metric splat coordinates."""
+        return (
+            self.format == "ply"
+            and self.provenance is not None
+            and self.provenance.builder_name == "Apple SHARP"
+        )
 
     @model_validator(mode="after")
     def valid_entrypoint(self) -> Self:

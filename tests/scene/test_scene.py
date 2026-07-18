@@ -16,9 +16,11 @@ from better_backgrounds.scene import (
     AssetInstaller,
     AssetResource,
     CropRegion,
+    DepthOfFieldSettings,
     ManagedSceneResolver,
     Quaternion,
     SceneCatalogue,
+    SceneProvenance,
     SceneReference,
     SubjectRegion,
     Vector3,
@@ -277,8 +279,7 @@ def test_viewpoint_round_trips_through_application_data(tmp_path: Path) -> None:
         aspect_ratio=16 / 9,
         crop=CropRegion(left=0.05, top=0.02, right=0.95, bottom=0.98),
         subject_region=SubjectRegion(x=0.35, y=0.2, width=0.3, height=0.7),
-        subject_depth=2.4,
-        focus_depth=2.6,
+        depth_of_field=DepthOfFieldSettings(blur_strength=0.65),
     )
     store = ViewpointStore(tmp_path / "viewpoints-v1.json")
 
@@ -288,6 +289,89 @@ def test_viewpoint_round_trips_through_application_data(tmp_path: Path) -> None:
     assert restored is not None
     assert restored.model_dump() == viewpoint.model_dump()
     assert restored.camera_fingerprint == viewpoint.camera_fingerprint
+
+
+def test_v1_viewpoint_keeps_original_subject_framing_and_depth() -> None:
+    """Preserve the original full-frame subject behavior while adding DOF."""
+    payload = Viewpoint().model_dump(mode="json")
+    payload.pop("depth_of_field")
+    payload.update(
+        schema_version=1,
+        subject_region=SubjectRegion(x=0.2, y=0.1, width=0.4, height=0.6).model_dump(),
+        subject_depth=3.0,
+        focus_depth=2.6,
+    )
+
+    migrated = Viewpoint.model_validate(payload)
+
+    assert migrated.schema_version == 4
+    assert migrated.subject_region == SubjectRegion(x=0.2, y=0.1, width=0.4, height=0.6)
+    assert migrated.depth_of_field.blur_strength == 0.0
+
+
+def test_v2_placement_viewpoint_returns_to_original_subject_framing() -> None:
+    """Load settings saved by the withdrawn placement implementation safely."""
+    payload = Viewpoint().model_dump(mode="json")
+    payload.pop("subject_region")
+    payload.update(
+        schema_version=2,
+        subject_placement={
+            "anchor_x": 0.5,
+            "anchor_y": 0.9,
+            "reference_height": 0.7,
+            "scale": 1.5,
+            "reference_depth": 2.4,
+            "depth": 3.0,
+            "occlusion_enabled": True,
+        },
+    )
+
+    migrated = Viewpoint.model_validate(payload)
+
+    assert migrated.schema_version == 4
+    assert migrated.subject_region.x == pytest.approx(0.35)
+    assert migrated.subject_region.y == pytest.approx(0.2)
+    assert migrated.subject_region.width == pytest.approx(0.3)
+    assert migrated.subject_region.height == pytest.approx(0.7)
+    assert migrated.depth_of_field.blur_strength == 0.0
+
+
+def test_v3_depth_controls_collapse_to_one_background_blur_amount() -> None:
+    """Preserve enabled blur while discarding invisible calibration controls."""
+    payload = Viewpoint().model_dump(mode="json")
+    payload.update(
+        schema_version=3,
+        subject_depth=3.4,
+        depth_of_field={"enabled": True, "focus_range": 0.3, "blur_strength": 0.7},
+    )
+
+    migrated = Viewpoint.model_validate(payload)
+
+    assert migrated.schema_version == 4
+    assert migrated.depth_of_field == DepthOfFieldSettings(blur_strength=0.7)
+
+
+def test_sharp_provenance_exposes_metric_depth_capability() -> None:
+    """Gate depth effects on explicit local SHARP provenance."""
+    reference = scene_reference(resource("scene.ply", b"scene")).model_copy(
+        update={
+            "format": "ply",
+            "provenance": SceneProvenance(
+                source_kind="upload",
+                source_sha256="1" * 64,
+                source_size=(1280, 720),
+                builder_revision="2" * 40,
+                checkpoint_sha256="3" * 64,
+                device="cuda",
+                inference_ms=1200,
+                license_name="Apple SHARP Research License",
+            ),
+        },
+    )
+
+    assert reference.supports_metric_depth
+    assert not reference.model_copy(update={"format": "sog"}).supports_metric_depth
+    assert not reference.model_copy(update={"provenance": None}).supports_metric_depth
 
 
 @pytest.mark.parametrize(
