@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import platform
 import sys
 from importlib.resources import files
 from pathlib import Path
@@ -76,15 +77,21 @@ def packaged_checkpoint_path(*, verify: bool = True) -> Path:
         msg = "Bundled MatAnyone 2 checkpoint is missing"
         raise FileNotFoundError(msg)
     if verify:
-        hasher = hashlib.sha256()
-        with path.open("rb") as checkpoint:
-            while block := checkpoint.read(1024 * 1024):
-                hasher.update(block)
-        digest = hasher.hexdigest()
-        if path.stat().st_size != manifest.checkpoint.size or digest != manifest.checkpoint.sha256:
-            msg = "Bundled MatAnyone 2 checkpoint failed integrity verification"
-            raise ValueError(msg)
+        verify_checkpoint_path(path)
     return path
+
+
+def verify_checkpoint_path(path: Path) -> None:
+    """Verify a checkpoint in a background worker before Torch deserializes it."""
+    manifest = load_matanyone_asset_manifest()
+    hasher = hashlib.sha256()
+    with path.open("rb") as checkpoint:
+        while block := checkpoint.read(1024 * 1024):
+            hasher.update(block)
+    digest = hasher.hexdigest()
+    if path.stat().st_size != manifest.checkpoint.size or digest != manifest.checkpoint.sha256:
+        msg = "Bundled MatAnyone 2 checkpoint failed integrity verification"
+        raise ValueError(msg)
 
 
 def _vendor_root() -> Path:
@@ -172,6 +179,20 @@ class MatAnyoneRuntime:
             device_type=self.device,
             accelerated=self.device in {"cuda", "mps"},
         )
+
+    def calibration_device_identity(self) -> tuple[str, str, str]:
+        """Return stable local runtime fields used to invalidate calibration."""
+        torch = self._torch
+        if self.device == "cuda":
+            device_name = str(torch.cuda.get_device_name(torch.cuda.current_device()))
+            accelerator_version = str(torch.version.cuda or "unknown")
+        elif self.device == "mps":
+            device_name = f"Apple MPS ({platform.machine()})"
+            accelerator_version = platform.mac_ver()[0] or "unknown"
+        else:
+            device_name = platform.processor() or platform.machine() or "CPU"
+            accelerator_version = "cpu"
+        return device_name, str(torch.__version__), accelerator_version
 
     def reconfigure(self, config: MattingConfig) -> None:
         """Clear temporal memory while retaining the loaded network weights."""

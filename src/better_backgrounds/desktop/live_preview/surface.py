@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from better_backgrounds.harmonization import HarmonizationSettings
     from better_backgrounds.matting.contracts import LiveDiagnostics, ProcessedFrame
+    from better_backgrounds.matting.seed import PersonCandidate
 
 ALPHA_MIDPOINT = 128
 
@@ -81,12 +82,14 @@ class NativeCompositeSurface(QWidget):
     """Paint the current exact-frame composite and comparison wipe."""
 
     frame_painted = Signal(float)
+    candidate_selected = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create a GPU-independent presentation surface."""
         super().__init__(parent)
         self.setMinimumSize(480, 300)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Native MatAnyone 2 webcam composite")
         self._background: NDArray[np.uint8] | None = None
         self._output_geometry: OutputGeometry | None = None
@@ -103,6 +106,7 @@ class NativeCompositeSurface(QWidget):
         self._composite_image = QImage()
         self._standard_composite_image = QImage()
         self._seed_image = QImage()
+        self._candidate_masks: dict[int, NDArray[np.uint8]] = {}
         self._mask_image = QImage()
         self._mask_label = ""
         self._mode = "show"
@@ -237,6 +241,52 @@ class NativeCompositeSurface(QWidget):
         display = np.flip(source, axis=1) if self._mirrored else source
         self._source_image = rgb_to_qimage(display)
         self._seed_image = QImage()
+        self._candidate_masks.clear()
+        self.update()
+
+    def set_seed_candidates(
+        self,
+        source: NDArray[np.uint8],
+        candidates: tuple[PersonCandidate, ...],
+    ) -> None:
+        """Outline selectable person components and retain display-space hit masks."""
+        display_source = np.flip(source, axis=1).copy() if self._mirrored else source.copy()
+        preview = display_source.copy()
+        self._candidate_masks.clear()
+        colours = ((224, 163, 74), (88, 190, 214), (195, 112, 214), (104, 203, 126))
+        for index, candidate in enumerate(candidates):
+            candidate_id = candidate.candidate_id
+            mask = candidate.mask
+            display_mask = np.flip(mask, axis=1).copy() if self._mirrored else mask.copy()
+            self._candidate_masks[candidate_id] = display_mask
+            colour = colours[index % len(colours)]
+            selected = display_mask >= ALPHA_MIDPOINT
+            tint = np.asarray(colour, dtype=np.float32)
+            preview[selected] = np.rint(preview[selected] * 0.72 + tint * 0.28).astype(np.uint8)
+            contours, _hierarchy = cv2.findContours(
+                display_mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+            cv2.drawContours(preview, contours, -1, colour, 3)
+            points = cv2.findNonZero(display_mask)
+            if points is not None:
+                x, y, _width, _height = cv2.boundingRect(points)
+                cv2.putText(
+                    preview,
+                    str(candidate_id),
+                    (x + 8, max(28, y + 28)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.85,
+                    colour,
+                    2,
+                    cv2.LINE_AA,
+                )
+        self._raw_source = source.copy()
+        self._source_image = rgb_to_qimage(display_source)
+        self._seed_image = rgb_to_qimage(preview)
+        self._mask_image = QImage()
+        self._mask_label = ""
         self.update()
 
     def set_seed_preview(
@@ -254,6 +304,7 @@ class NativeCompositeSurface(QWidget):
         self._raw_source = source.copy()
         self._source_image = rgb_to_qimage(display_source)
         self._seed_image = rgb_to_qimage(preview)
+        self._candidate_masks = {1: display_mask}
         self._mask_image = gray_to_qimage(display_mask)
         self._mask_label = "PERSON FOUND"
         self.update()
@@ -484,8 +535,48 @@ class NativeCompositeSurface(QWidget):
         self._standard_composite_image = QImage()
         self._mask_image = QImage()
         self._mask_label = ""
+        self._candidate_masks.clear()
         self._last_composite = None
         self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802
+        """Map a click through cover-cropping to the outlined person mask."""
+        candidate_id = self._candidate_at(float(event.position().x()), float(event.position().y()))
+        if candidate_id is not None:
+            self.candidate_selected.emit(candidate_id)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: ANN001, N802
+        """Allow numbered candidate selection without a pointing device."""
+        text = event.text()
+        if text.isdigit() and int(text) in self._candidate_masks:
+            self.candidate_selected.emit(int(text))
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _candidate_at(self, widget_x: float, widget_y: float) -> int | None:
+        if not self._candidate_masks or self._seed_image.isNull():
+            return None
+        image_width = self._seed_image.width()
+        image_height = self._seed_image.height()
+        scale = max(self.width() / image_width, self.height() / image_height)
+        source_width = self.width() / scale
+        source_height = self.height() / scale
+        source_x = (image_width - source_width) / 2 + widget_x / scale
+        source_y = (image_height - source_height) / 2 + widget_y / scale
+        pixel_x = min(image_width - 1, max(0, round(source_x)))
+        pixel_y = min(image_height - 1, max(0, round(source_y)))
+        return next(
+            (
+                candidate_id
+                for candidate_id, mask in self._candidate_masks.items()
+                if mask[pixel_y, pixel_x] >= ALPHA_MIDPOINT
+            ),
+            None,
+        )
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: ARG002, N802
         """Draw one image path and an optional comparison clip."""

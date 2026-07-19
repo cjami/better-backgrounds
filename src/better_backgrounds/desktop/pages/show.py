@@ -42,6 +42,7 @@ class ShowPage(QWidget):
     seed_confirmed = Signal()
     seed_retry_requested = Signal()
     reseed_requested = Signal()
+    person_candidate_selected = Signal(int)
 
     def __init__(
         self,
@@ -154,6 +155,24 @@ class ShowPage(QWidget):
         seed_layout.addWidget(self._retry_seed)
         self._seed_controls.hide()
         sidebar_layout.addWidget(self._seed_controls)
+        self._candidate_controls = QWidget()
+        candidate_layout = QHBoxLayout(self._candidate_controls)
+        candidate_layout.setContentsMargins(0, 0, 0, 0)
+        candidate_layout.setSpacing(7)
+        self._candidate_buttons: list[QPushButton] = []
+        for candidate_id in range(1, 5):
+            button = QPushButton(f"Person {candidate_id}")
+            button.setObjectName("quietAction")
+            button.setAccessibleName(f"Select person {candidate_id}")
+            button.clicked.connect(
+                lambda _checked=False, selected=candidate_id: self.person_candidate_selected.emit(
+                    selected,
+                ),
+            )
+            candidate_layout.addWidget(button)
+            self._candidate_buttons.append(button)
+        self._candidate_controls.hide()
+        sidebar_layout.addWidget(self._candidate_controls)
         self._reselect_person = QPushButton("Re-select person")
         self._reselect_person.setObjectName("quietAction")
         self._reselect_person.clicked.connect(self.reseed_requested)
@@ -349,18 +368,22 @@ class ShowPage(QWidget):
         """Reflect the native preview and one-time target-selection lifecycle."""
         self._preview_active = state in {
             "starting",
+            "preparing",
             "seeding",
             "seed-error",
             "seed-ready",
+            "choose-person",
             "initializing",
             "live",
             "lost",
         }
         labels = {
             "starting": "●  PREVIEW STARTING",
+            "preparing": "●  PREPARING",
             "seeding": "●  FINDING PERSON",
             "seed-error": "●  SEED FAILED",
             "seed-ready": "●  CONFIRM PERSON",
+            "choose-person": "●  CHOOSE PERSON",
             "initializing": "●  MATTING STARTING",
             "live": "●  PREVIEW LIVE",
             "lost": "●  LOST",
@@ -371,13 +394,14 @@ class ShowPage(QWidget):
         self._preview_note.setText("" if state == "live" else message)
         self._seed_controls.setVisible(state in {"seed-ready", "seed-error"})
         self._confirm_seed.setVisible(state == "seed-ready")
+        self._candidate_controls.setVisible(state == "choose-person")
         self._reselect_person.setVisible(state in {"live", "lost"})
         self._reselect_person.setText(
             "Find person again" if state == "lost" else "Re-select person",
         )
         if state == "live":
             self._preview_hint.setText("MatAnyone 2 · local preview")
-        elif state in {"seeding", "seed-ready", "initializing"}:
+        elif state in {"preparing", "seeding", "seed-ready", "choose-person", "initializing"}:
             self._preview_hint.setText("One-time target selection · webcam frames stay local")
         elif state == "seed-error":
             self._preview_hint.setText("Move into a clearer position, then retry person selection")
@@ -387,6 +411,11 @@ class ShowPage(QWidget):
             self._preview_hint.setText("Check permission or device availability, then restart")
         else:
             self._preview_hint.setText("Frames remain on this device")
+
+    def set_person_candidates(self, count: int) -> None:
+        """Expose accessible alternatives to selecting an outlined person."""
+        for index, button in enumerate(self._candidate_buttons, start=1):
+            button.setVisible(index <= count)
 
     def _update_sample_panel(self, room: str) -> None:
         self._sample_panel.setVisible(bool(self._sample_room) and room == self._sample_room)

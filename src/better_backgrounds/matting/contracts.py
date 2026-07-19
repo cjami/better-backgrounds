@@ -245,6 +245,9 @@ class LiveDiagnostics(BaseModel):
     post_processing_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
     readback_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
     capture_to_paint_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
+    model_preparation_ms: float = Field(default=0.0, ge=0, le=600_000, allow_inf_nan=False)
+    seed_initialization_ms: float = Field(default=0.0, ge=0, le=600_000, allow_inf_nan=False)
+    first_matte_ms: float = Field(default=0.0, ge=0, le=600_000, allow_inf_nan=False)
     output_width: int = Field(default=1, gt=0, le=8_192)
     output_height: int = Field(default=1, gt=0, le=8_192)
 

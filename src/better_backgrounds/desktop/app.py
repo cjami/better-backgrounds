@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -11,7 +12,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from better_backgrounds.desktop.icon import application_icon
-from better_backgrounds.desktop.main_window import MainWindow, development_worker_command
+from better_backgrounds.desktop.startup import StartupCoordinator
 from better_backgrounds.desktop.theme import STYLESHEET
 from better_backgrounds.jobs.fake_worker import FakeOutcome, run_fake_job
 
@@ -30,6 +31,8 @@ def packaged_worker_command(job_id: str, outcome: str) -> list[str]:
             "--outcome",
             outcome,
         ]
+    from better_backgrounds.desktop.main_window import development_worker_command  # noqa: PLC0415
+
     return development_worker_command(job_id, outcome)
 
 
@@ -206,13 +209,37 @@ def main() -> int:
     application.setOrganizationName("Better Backgrounds")
     application.setWindowIcon(application_icon())
     application.setStyleSheet(STYLESHEET)
-    window = MainWindow(
+    startup = StartupCoordinator(application)
+    startup.show()
+    startup.advance("preferences", "Loading preferences and rooms")
+    from better_backgrounds.desktop.main_window import MainWindow  # noqa: PLC0415
+
+    startup.advance("matting", "Preparing background removal")
+    window_factory = partial(
+        MainWindow,
         command_factory=packaged_worker_command,
         sharp_command_factory=packaged_sharp_command,
         sharp_prepare_command_factory=packaged_sharp_prepare_command,
         splat_command_factory=packaged_splat_command,
     )
+    if "--smoke-test" in arguments:
+        from PySide6.QtWidgets import QWidget  # noqa: PLC0415
+
+        from better_backgrounds.desktop.camera import InputCameraSource  # noqa: PLC0415
+        from better_backgrounds.desktop.live_preview.preview import (  # noqa: PLC0415
+            NativeLivePreview,
+        )
+        from better_backgrounds.desktop.preview import ScenePreview  # noqa: PLC0415
+
+        window = window_factory(
+            renderer_factory=ScenePreview,
+            live_renderer_factory=lambda: NativeLivePreview(background_factory=QWidget),
+            camera_source=InputCameraSource(lambda: ()),
+        )
+    else:
+        window = window_factory()
     window.showMaximized()
+    startup.finish(window)
     if "--build-smoke-test" in arguments:
         window.room_ready.connect(window.close)
         window.room_ready.connect(application.quit)

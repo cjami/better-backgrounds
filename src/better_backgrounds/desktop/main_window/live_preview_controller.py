@@ -59,6 +59,7 @@ class LivePreviewController(QObject):
         show_page.seed_confirmed.connect(self._confirm_person_seed)
         show_page.seed_retry_requested.connect(self._retry_person_seed)
         show_page.reseed_requested.connect(self._reselect_person)
+        show_page.person_candidate_selected.connect(self._select_person_candidate)
         camera_source.cameras_changed.connect(self._refresh_input_cameras)
         camera_state = getattr(live_preview, "camera_state_changed", None)
         if camera_state is not None:
@@ -72,6 +73,12 @@ class LivePreviewController(QObject):
         status = getattr(live_preview, "harmonization_status_changed", None)
         if status is not None:
             status.connect(compare_page.set_harmonization_status)
+        candidates = getattr(live_preview, "person_candidates_changed", None)
+        if candidates is not None:
+            candidates.connect(show_page.set_person_candidates)
+        configure_data = getattr(live_preview, "configure_data_root", None)
+        if callable(configure_data):
+            configure_data(data_root)
 
     @property
     def selected_camera_id(self) -> str | None:
@@ -85,6 +92,9 @@ class LivePreviewController(QObject):
 
     def start(self) -> None:
         """Discover cameras and start the retained local preview."""
+        preparer = getattr(self._live_preview, "prepare_matting", None)
+        if callable(preparer):
+            preparer()
         self._refresh_input_cameras()
         self._start_preview()
 
@@ -128,7 +138,9 @@ class LivePreviewController(QObject):
             self.input_camera_changed.emit(selected or "")
             if self._preview_started:
                 if selected is None:
-                    stopper = getattr(self._live_preview, "stop_camera", None)
+                    stopper = getattr(self._live_preview, "stop_capture", None)
+                    if not callable(stopper):
+                        stopper = getattr(self._live_preview, "stop_camera", None)
                     if callable(stopper):
                         stopper()
                     self._show_page.set_camera_state(
@@ -166,7 +178,9 @@ class LivePreviewController(QObject):
 
     def _restart_preview(self) -> None:
         """Apply a device change without creating a second preview stream."""
-        stopper = getattr(self._live_preview, "stop_camera", None)
+        stopper = getattr(self._live_preview, "stop_capture", None)
+        if not callable(stopper):
+            stopper = getattr(self._live_preview, "stop_camera", None)
         starter = getattr(self._live_preview, "start_camera", None)
         if callable(stopper):
             stopper()
@@ -195,6 +209,12 @@ class LivePreviewController(QObject):
         reseed = getattr(self._live_preview, "reselect_person", None)
         if callable(reseed):
             reseed()
+
+    @Slot(int)
+    def _select_person_candidate(self, candidate_id: int) -> None:
+        selector = getattr(self._live_preview, "select_person_candidate", None)
+        if callable(selector):
+            selector(candidate_id)
 
     def _selected_camera_label(self) -> str:
         selected = next(

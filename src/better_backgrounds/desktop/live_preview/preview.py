@@ -37,11 +37,13 @@ from better_backgrounds.matting.contracts import (
 from better_backgrounds.matting.engine import (
     CompletedMatte,
     EngineFailure,
+    EnginePrepared,
+    EngineProgress,
     EngineReady,
     ProcessMattingEngine,
 )
 from better_backgrounds.matting.runtime import packaged_checkpoint_path
-from better_backgrounds.matting.seed import StableFrameSelector
+from better_backgrounds.matting.seed import PersonCandidate, StableFrameSelector
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,6 +66,7 @@ BACKGROUND_CAPTURE_DELAY_MS = 300
 BACKGROUND_CAPTURE_RETRY_MS = 50
 BACKGROUND_CAPTURE_RETRY_LIMIT = 20
 BACKGROUND_REFRESH_DEBOUNCE_MS = 150
+SEED_RETRY_INTERVAL_SECONDS = 0.75
 MAX_SNAPSHOT_PAYLOAD_LENGTH = 16 * 1024 * 1024
 ENGINE_EVENT_FIELD_COUNT = 2
 
@@ -75,6 +78,7 @@ class NativeLivePreview(QWidget):
     diagnostics_changed = Signal(object)
     comparison_frame = Signal(object)
     harmonization_status_changed = Signal(str)
+    person_candidates_changed = Signal(int)
     _engine_event = Signal(object)
 
     def __init__(
@@ -90,15 +94,17 @@ class NativeLivePreview(QWidget):
         _ = resolver
         if background_factory is None:
             background_factory = QWidget
-        checkpoint = packaged_checkpoint_path()
+        checkpoint = packaged_checkpoint_path(verify=False)
+        self._calibration_path: Path | None = None
 
         def create_engine() -> ProcessMattingEngine:
-            return ProcessMattingEngine(checkpoint)
+            return ProcessMattingEngine(checkpoint, self._calibration_path)
 
         self._engine_factory = engine_factory or create_engine
         self._background_renderer = background_factory()
         self._surface = NativeCompositeSurface()
         self._surface.frame_painted.connect(self._frame_painted)
+        self._surface.candidate_selected.connect(self.select_person_candidate)
         self._seed_coordinator = SeedCoordinator(self)
         self._seed_coordinator.generated.connect(self._accept_seed)
         self._seed_coordinator.failed.connect(self._reject_seed)
@@ -139,6 +145,8 @@ class NativeLivePreview(QWidget):
         self._latest_frame: NDArray[np.uint8] | None = None
         self._seed_frame: NDArray[np.uint8] | None = None
         self._seed_mask: NDArray[np.uint8] | None = None
+        self._person_candidates: tuple[PersonCandidate, ...] = ()
+        self._next_seed_attempt_at = 0.0
         self._state = "idle"
         self._mirrored = True
         self._mode = "show"
@@ -169,6 +177,36 @@ class NativeLivePreview(QWidget):
         self._capture_rate = SlidingFrameRate()
         self._display_rate = SlidingFrameRate()
         self._latest_diagnostics: LiveDiagnostics | None = None
+        self._model_preparation_ms = 0.0
+        self._seed_initialization_ms = 0.0
+        self._tracking_started_at: float | None = None
+        self._first_matte_ms = 0.0
+
+    def configure_data_root(self, data_root: Path) -> None:
+        """Set the application-owned calibration path before worker preparation."""
+        if self._engine is None:
+            self._calibration_path = data_root / "matting-calibration-v1.json"
+
+    def _matting_config(self) -> MattingConfig:
+        return MattingConfig(
+            internal_size=540,
+            warmup_iterations=10,
+            calibrate=True,
+            latency_budget_ms=MATTE_INFERENCE_BUDGET_MS,
+        )
+
+    def prepare_matting(self) -> None:
+        """Begin checkpoint verification and model loading without camera pixels."""
+        if self._engine is None:
+            self._engine = self._engine_factory()
+        preparer = getattr(self._engine, "prepare", None)
+        if callable(preparer):
+            try:
+                preparer(self._matting_config())
+            except (OSError, RuntimeError, ValueError) as error:
+                self._set_state("error", f"Background removal could not start: {str(error)[:200]}")
+                return
+            self._start_result_pump(self._engine)
 
     def _create_timer(
         self,
@@ -186,7 +224,9 @@ class NativeLivePreview(QWidget):
 
     def start_camera(self, device_id: str, *, mirrored: bool) -> None:
         """Open the selected Qt camera and begin one-shot target selection."""
-        self.stop_camera()
+        self._camera_capture.stop()
+        self._reset_tracking()
+        self.prepare_matting()
         self._mirrored = mirrored
         self._camera_device_id = device_id
         self._surface.set_mirroring(mirrored=mirrored)
@@ -196,9 +236,14 @@ class NativeLivePreview(QWidget):
         self._display_rate.reset()
         if self._resource_active:
             self._poll_timer.start()
-        self._set_state("seeding", "Hold still while the person seed is captured…")
+        self._set_state("seeding", "Finding you while background removal prepares…")
         if self._resource_active and not self._camera_capture.start(device_id):
             self._poll_timer.stop()
+
+    def stop_capture(self) -> None:
+        """Stop camera pixels and tracking while retaining prepared model weights."""
+        self._camera_capture.stop()
+        self._reset_tracking()
 
     def stop_camera(self) -> None:
         """Release camera, model worker, and all queued frame ownership."""
@@ -213,7 +258,9 @@ class NativeLivePreview(QWidget):
         self._latest_frame = None
         self._seed_frame = None
         self._seed_mask = None
-        self._seed_coordinator.reset()
+        self._person_candidates = ()
+        self.person_candidates_changed.emit(0)
+        self._seed_coordinator.reset(release_provider=True)
         self._composition.reset()
         self._capture_rate.reset()
         self._display_rate.reset()
@@ -226,43 +273,51 @@ class NativeLivePreview(QWidget):
         """Initialize MatAnyone 2 from the user-confirmed first-frame target."""
         if self._state != "seed-ready" or self._seed_frame is None or self._seed_mask is None:
             return
-        if self._engine is not None:
-            self._stop_result_pump()
-            self._engine.close()
-        self._engine = self._engine_factory()
+        if self._engine is None:
+            self.prepare_matting()
+        engine = self._engine
+        if engine is None:
+            return
         try:
-            self._engine.start(
-                self._seed_frame,
-                self._seed_mask,
-                MattingConfig(
-                    internal_size=540,
-                    warmup_iterations=10,
-                    calibrate=True,
-                    latency_budget_ms=MATTE_INFERENCE_BUDGET_MS,
-                ),
-                self._live_pipeline_config(),
-            )
+            initializer = getattr(engine, "initialize", None)
+            if callable(initializer):
+                initializer(
+                    self._seed_frame,
+                    self._seed_mask,
+                    self._matting_config(),
+                    self._live_pipeline_config(),
+                )
+            else:
+                engine.start(
+                    self._seed_frame,
+                    self._seed_mask,
+                    self._matting_config(),
+                    self._live_pipeline_config(),
+                )
         except (OSError, RuntimeError, ValueError) as error:
-            self._engine.close()
-            self._engine = None
             self._set_state(
                 "seed-ready",
                 f"MatAnyone 2 failed to start: {str(error)[:200]}. Retry or choose a new seed.",
             )
             return
         self._set_state("initializing", "Warming up MatAnyone 2…")
+        self._tracking_started_at = time.perf_counter()
+        self._first_matte_ms = 0.0
+        self._person_candidates = ()
+        self.person_candidates_changed.emit(0)
+        self._seed_coordinator.reset(release_provider=True)
 
         self._sync_engine_pipeline()
-        self._engine.configure_harmonization(self._harmonization_settings)
-        self._start_result_pump(self._engine)
+        engine.configure_harmonization(self._harmonization_settings)
+        self._start_result_pump(engine)
 
     def retry_seed(self) -> None:
         """Discard the proposed target and capture a new stable frame."""
-        self._begin_reseed("Hold still while a new person seed is captured…")
+        self._begin_reseed("Finding you…")
 
     def reselect_person(self) -> None:
         """Explicitly clear temporal identity and return to seed capture."""
-        self._begin_reseed("Select the person again; hold still for a moment…")
+        self._begin_reseed("Finding you again…")
 
     def set_scene(self, scene: SceneReference, viewpoint: Viewpoint) -> None:
         """Load one room in the hidden canvas-only snapshot renderer."""
@@ -571,9 +626,13 @@ class NativeLivePreview(QWidget):
         if self._latest_frame is not None and source.shape != self._latest_frame.shape:
             self._begin_reseed("Camera format changed; capture a new person seed…")
         self._latest_frame = source
-        if self._state not in {"live", "seed-ready"}:
+        if self._state not in {"live", "seed-ready", "choose-person"}:
             self._surface.set_raw_frame(source)
-        if self._state == "seeding" and not self._seed_coordinator.active:
+        if (
+            self._state == "seeding"
+            and not self._seed_coordinator.active
+            and time.monotonic() >= self._next_seed_attempt_at
+        ):
             candidate = self._selector.offer(source)
             if candidate is not None:
                 self._generate_seed(candidate)
@@ -641,20 +700,53 @@ class NativeLivePreview(QWidget):
             setter(geometry.width, geometry.height)
 
     def _generate_seed(self, frame: NDArray[np.uint8]) -> None:
-        self._set_state("seeding", "Finding the person in the stable frame?")
+        self._set_state("seeding", "Finding you…")
         self._seed_coordinator.generate(frame)
 
     @Slot(object, object)
-    def _accept_seed(self, frame: object, mask: object) -> None:
-        if not isinstance(frame, np.ndarray) or not isinstance(mask, np.ndarray):
-            self._reject_seed("Seed provider returned invalid pixels")
+    def _accept_seed(self, frame: object, candidates: object) -> None:
+        if not isinstance(frame, np.ndarray) or not isinstance(candidates, tuple):
+            self._reject_seed("Person finder returned invalid results")
             return
         seed_frame = cast("NDArray[np.uint8]", frame)
-        seed_mask = cast("NDArray[np.uint8]", mask)
+        person_candidates = tuple(
+            candidate for candidate in candidates if isinstance(candidate, PersonCandidate)
+        )
+        if not person_candidates:
+            self._selector.reset()
+            self._next_seed_attempt_at = time.monotonic() + SEED_RETRY_INTERVAL_SECONDS
+            self._set_state(
+                "seeding",
+                "Move into view; background removal will start automatically",
+            )
+            return
         self._seed_frame = seed_frame
-        self._seed_mask = seed_mask
-        self._surface.set_seed_preview(seed_frame, seed_mask)
-        self._set_state("seed-ready", "Confirm the highlighted person or retry")
+        self._person_candidates = person_candidates
+        self._surface.set_seed_candidates(seed_frame, person_candidates)
+        if len(person_candidates) == 1:
+            self._choose_candidate(person_candidates[0])
+            return
+        self.person_candidates_changed.emit(min(4, len(person_candidates)))
+        self._set_state("choose-person", "Choose yourself in the preview")
+
+    @Slot(int)
+    def select_person_candidate(self, candidate_id: int) -> None:
+        """Select one outlined component from the preview or accessible controls."""
+        candidate = next(
+            (item for item in self._person_candidates if item.candidate_id == candidate_id),
+            None,
+        )
+        if candidate is not None:
+            self._choose_candidate(candidate)
+
+    def _choose_candidate(self, candidate: PersonCandidate) -> None:
+        seed_frame = self._seed_frame
+        if seed_frame is None:
+            return
+        self._seed_mask = candidate.mask
+        self._surface.set_seed_preview(seed_frame, candidate.mask)
+        self._set_state("seed-ready", "Starting background removal with the highlighted person")
+        self.confirm_seed()
 
     @Slot(str)
     def _reject_seed(self, message: str) -> None:
@@ -667,30 +759,7 @@ class NativeLivePreview(QWidget):
         if engine is None:
             return
         for event in engine.poll():
-            if isinstance(event, EngineReady):
-                self._seed_frame = None
-                self._seed_mask = None
-                self._display_rate.reset()
-                self._composition.reset()
-                self._active_device = event.capabilities.device_type
-                self._internal_size = event.selected_internal_size
-                self._invalid_matte_count = 0
-                if self._harmonization_requested and not event.real_time_supported:
-                    self._prepare_harmonizer()
-                if event.real_time_error is not None:
-                    self.harmonization_status_changed.emit(
-                        f"Portable live path active: {event.real_time_error}",
-                    )
-                device = event.capabilities.device_type.upper()
-                self._set_state("live", f"Live · MatAnyone 2 · {device}")
-            elif isinstance(event, CompletedMatte):
-                self._composition.submit(event)
-            elif isinstance(event, ProcessedFrame):
-                self._present_processed_frame(event)
-            elif isinstance(event, EngineFailure):
-                self._pause_tracking(
-                    f"Matting stopped: {event.message}. Re-select the person to retry.",
-                )
+            self._handle_engine_event(event)
 
     @Slot(object)
     def _accept_engine_event(self, payload: object) -> None:
@@ -699,36 +768,60 @@ class NativeLivePreview(QWidget):
         generation, event = payload
         if generation != self._result_generation:
             return
-        if isinstance(event, EngineReady):
-            self._seed_frame = None
-            self._seed_mask = None
-            self._display_rate.reset()
-            self._composition.reset()
-            self._active_device = event.capabilities.device_type
-            self._internal_size = event.selected_internal_size
-            self._invalid_matte_count = 0
-            if self._harmonization_requested and not event.real_time_supported:
-                self._prepare_harmonizer()
-            if event.real_time_error is not None:
-                self.harmonization_status_changed.emit(
-                    f"Portable live path active: {event.real_time_error}",
-                )
-            device = event.capabilities.device_type.upper()
-            self._set_state("live", f"Live - MatAnyone 2 - {device}")
+        self._handle_engine_event(event)
+
+    def _handle_engine_event(self, event: object) -> None:
+        if isinstance(event, EngineProgress):
+            self._handle_engine_progress(event)
+        elif isinstance(event, EnginePrepared):
+            self._model_preparation_ms = event.preparation_ms
+            if self._state == "preparing":
+                self._set_state("seeding", "Background removal is ready; finding you…")
+        elif isinstance(event, EngineReady):
+            self._handle_engine_ready(event)
         elif isinstance(event, CompletedMatte):
             self._composition.submit(event)
         elif isinstance(event, ProcessedFrame):
             self._present_processed_frame(event)
         elif isinstance(event, EngineFailure):
-            self._pause_tracking(
-                f"Matting stopped: {event.message}. Re-select the person to retry.",
+            self._reset_tracking()
+            self._set_state(
+                "error",
+                f"Background removal stopped: {event.message}. Restart preview to retry.",
             )
+
+    def _handle_engine_progress(self, event: EngineProgress) -> None:
+        if event.stage in {"optimizing", "validating", "calibrating", "warming"}:
+            self._set_state("initializing", event.message)
+        elif self._state in {"idle", "starting", "preparing"}:
+            self._set_state("preparing", event.message)
+        elif self._state == "seeding":
+            self._set_state("seeding", f"{event.message} · finding you")
+
+    def _handle_engine_ready(self, event: EngineReady) -> None:
+        self._seed_frame = None
+        self._seed_mask = None
+        self._display_rate.reset()
+        self._composition.reset()
+        self._active_device = event.capabilities.device_type
+        self._internal_size = event.selected_internal_size
+        self._seed_initialization_ms = event.initialization_ms
+        self._invalid_matte_count = 0
+        if self._harmonization_requested and not event.real_time_supported:
+            self._prepare_harmonizer()
+        if event.real_time_error is not None:
+            self.harmonization_status_changed.emit(
+                f"Portable live path active: {event.real_time_error}",
+            )
+        device = event.capabilities.device_type.upper()
+        self._set_state("live", f"Live · MatAnyone 2 · {device}")
 
     def _present_processed_frame(self, processed: ProcessedFrame) -> None:
         if processed.pipeline_revision != self._pipeline_revision:
             return
         if not self._surface.present_processed(processed):
             return
+        self._record_first_matte()
         occupancy = processed.occupancy
         self._invalid_matte_count = (
             self._invalid_matte_count + 1
@@ -782,6 +875,9 @@ class NativeLivePreview(QWidget):
             matting_ms=timings.matting_ms,
             post_processing_ms=timings.post_processing_ms,
             readback_ms=timings.readback_ms,
+            model_preparation_ms=self._model_preparation_ms,
+            seed_initialization_ms=self._seed_initialization_ms,
+            first_matte_ms=self._first_matte_ms,
             output_width=processed.packet.width,
             output_height=processed.packet.height,
         )
@@ -846,6 +942,7 @@ class NativeLivePreview(QWidget):
         composite: LiveComposite,
     ) -> None:
         completed = prepared.completed
+        self._record_first_matte()
         occupancy = (
             float(np.count_nonzero(completed.alpha >= ALPHA_MIDPOINT)) / completed.alpha.size
         )
@@ -905,6 +1002,9 @@ class NativeLivePreview(QWidget):
             matting_ms=completed.result.inference_ms,
             post_processing_ms=prepared.post_processing_ms,
             readback_ms=prepared.readback_ms,
+            model_preparation_ms=self._model_preparation_ms,
+            seed_initialization_ms=self._seed_initialization_ms,
+            first_matte_ms=self._first_matte_ms,
             output_width=prepared.source.shape[1],
             output_height=prepared.source.shape[0],
         )
@@ -915,6 +1015,11 @@ class NativeLivePreview(QWidget):
             comparison = self._surface.comparison_frames
             if comparison is not None:
                 self.comparison_frame.emit(comparison)
+
+    def _record_first_matte(self) -> None:
+        started_at = self._tracking_started_at
+        if started_at is not None and self._first_matte_ms == 0.0:
+            self._first_matte_ms = (time.perf_counter() - started_at) * 1_000.0
 
     @Slot(float)
     def _frame_painted(self, capture_to_paint_ms: float) -> None:
@@ -940,18 +1045,21 @@ class NativeLivePreview(QWidget):
 
     def _pause_tracking(self, message: str) -> None:
         self._reset_tracking()
-        self._set_state("lost", message)
+        self._set_state("seeding", f"{message} Finding you again…")
 
     def _reset_tracking(self) -> None:
         self._composition.reset()
         if self._engine is not None:
-            self._stop_result_pump()
-            self._engine.close()
-            self._engine = None
+            self._engine.reset()
         self._selector.reset()
         self._seed_coordinator.reset()
         self._seed_frame = None
         self._seed_mask = None
+        self._person_candidates = ()
+        self._next_seed_attempt_at = 0.0
+        self._tracking_started_at = None
+        self._first_matte_ms = 0.0
+        self.person_candidates_changed.emit(0)
         self._invalid_matte_count = 0
         self._surface.clear_matte()
 
@@ -966,6 +1074,7 @@ class NativeLivePreview(QWidget):
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802
         """Release native resources before the QWidget is destroyed."""
         self.stop_camera()
+        self._seed_coordinator.close()
         self._composition.close()
         super().closeEvent(event)
 

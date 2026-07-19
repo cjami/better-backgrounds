@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import cv2
@@ -19,6 +20,16 @@ RGB_CHANNELS = 3
 MASK_DIMENSIONS = 2
 MINIMUM_SEED_OCCUPANCY = 0.01
 MAXIMUM_SEED_OCCUPANCY = 0.85
+
+
+@dataclass(frozen=True, slots=True)
+class PersonCandidate:
+    """Describe one independently selectable person component."""
+
+    candidate_id: int
+    mask: NDArray[np.uint8]
+    bounds: tuple[int, int, int, int]
+    occupancy: float
 
 
 class StableFrameSelector:
@@ -96,6 +107,17 @@ class MediaPipeSeedProvider:
 
     def generate(self, frame: NDArray[np.uint8]) -> NDArray[np.uint8]:
         """Return one binary largest-person mask suitable for target initialization."""
+        candidates = self.generate_candidates(frame)
+        if not candidates:
+            msg = "No person was found; stay in frame and retry"
+            raise ValueError(msg)
+        return candidates[0].mask
+
+    def generate_candidates(
+        self,
+        frame: NDArray[np.uint8],
+    ) -> tuple[PersonCandidate, ...]:
+        """Return plausible person components ordered from largest to smallest."""
         segmenter = self._segmenter
         if segmenter is None:
             msg = "MediaPipe seed provider is closed"
@@ -112,7 +134,7 @@ class MediaPipeSeedProvider:
         labels = [label.lower() for label in segmenter.labels]
         person_index = labels.index("person") if "person" in labels else len(masks) - 1
         confidence = np.squeeze(np.array(masks[person_index].numpy_view(), copy=True))
-        return largest_person_component(confidence, threshold=0.5)
+        return person_candidates(confidence, threshold=0.5)
 
     def close(self) -> None:
         """Unload the bootstrap model before MatAnyone 2 starts."""
@@ -130,18 +152,50 @@ def largest_person_component(
     if confidence.ndim != MASK_DIMENSIONS:
         msg = "person confidence mask must be two-dimensional"
         raise ValueError(msg)
+    candidates = person_candidates(confidence, threshold=threshold)
+    if not candidates:
+        msg = "No person was found; stay in frame and retry"
+        raise ValueError(msg)
+    return candidates[0].mask
+
+
+def person_candidates(
+    confidence: NDArray[np.floating],
+    *,
+    threshold: float,
+) -> tuple[PersonCandidate, ...]:
+    """Return every plausible connected person region in descending area order."""
+    if confidence.ndim != MASK_DIMENSIONS:
+        msg = "person confidence mask must be two-dimensional"
+        raise ValueError(msg)
     binary = (confidence >= threshold).astype(np.uint8)
     component_count, labels, statistics, _centroids = cv2.connectedComponentsWithStats(
         binary,
         connectivity=8,
     )
-    if component_count <= 1:
-        msg = "No person was found; stay in frame and retry"
-        raise ValueError(msg)
-    largest = 1 + int(np.argmax(statistics[1:, cv2.CC_STAT_AREA]))
-    output = np.where(labels == largest, 255, 0).astype(np.uint8)
-    occupancy = float(np.count_nonzero(output)) / output.size
-    if not MINIMUM_SEED_OCCUPANCY <= occupancy <= MAXIMUM_SEED_OCCUPANCY:
-        msg = "Person seed is too small or fills the frame; move back and retry"
-        raise ValueError(msg)
-    return output
+    components = sorted(
+        range(1, component_count),
+        key=lambda label: int(statistics[label, cv2.CC_STAT_AREA]),
+        reverse=True,
+    )
+    candidates = []
+    for label in components:
+        area = int(statistics[label, cv2.CC_STAT_AREA])
+        occupancy = area / confidence.size
+        if not MINIMUM_SEED_OCCUPANCY <= occupancy <= MAXIMUM_SEED_OCCUPANCY:
+            continue
+        bounds = (
+            int(statistics[label, cv2.CC_STAT_LEFT]),
+            int(statistics[label, cv2.CC_STAT_TOP]),
+            int(statistics[label, cv2.CC_STAT_WIDTH]),
+            int(statistics[label, cv2.CC_STAT_HEIGHT]),
+        )
+        candidates.append(
+            PersonCandidate(
+                candidate_id=len(candidates) + 1,
+                mask=np.where(labels == label, 255, 0).astype(np.uint8),
+                bounds=bounds,
+                occupancy=occupancy,
+            ),
+        )
+    return tuple(candidates)

@@ -117,12 +117,19 @@ and non-pixel provenance are retained by the application.
 ## Live matting
 
 Qt Multimedia owns webcam enumeration, hot-plug behavior, and frame capture.
-MediaPipe is loaded only to propose a first-frame person mask and is unloaded
-before continuous inference begins. The pinned MatAnyone 2 `step()` pipeline
-then runs in a spawned process with temporal memory.
+The desktop immediately presents a lightweight startup screen while its shell is
+constructed. Checkpoint verification and MatAnyone loading then run in a spawned
+worker, leaving the raw camera preview responsive. MediaPipe is retained only
+during person acquisition and is unloaded before continuous inference begins.
+A single clear person starts automatically; separate people are outlined for an
+explicit click or numbered keyboard selection.
 
-Startup calibration chooses the highest of 360p, 432p, and 540p that meets the
-33.3 ms inference budget. A three-slot shared-memory ring allows one active frame
+Startup calibration tests 540p downward until it finds the highest resolution
+that meets the 33.3 ms inference budget. The selected size is cached by model,
+runtime, device, and capture geometry, then briefly validated on later launches.
+The spawned MatAnyone worker remains loaded across camera changes and person
+reselection while generation-tagged results prevent stale identity output. A
+three-slot shared-memory ring allows one active frame
 and one replaceable newest pending frame, dropping stale work instead of
 building latency. Every matte retains its source frame identity and timestamp;
 the native exact-frame compositor rejects mismatched source/matte pairs. Small

@@ -5,16 +5,15 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from queue import Empty
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import cv2
 import numpy as np
-import torch
-from torch.nn import functional
 
 from better_backgrounds.matting.contracts import (
     INTERNAL_SIZES,
     FramePacket,
+    InternalSize,
     LivePipelineConfig,
     MatteResult,
     MattingCapabilities,
@@ -22,7 +21,6 @@ from better_backgrounds.matting.contracts import (
     ProcessedResult,
     StageTimings,
     calibration_p95_latency,
-    choose_internal_size,
 )
 from better_backgrounds.matting.refinement import TemporalAlphaStabilizer
 from better_backgrounds.matting.ring import FrameRingDescriptor, SharedFrameRing
@@ -31,11 +29,34 @@ if TYPE_CHECKING:
     from multiprocessing.queues import Queue
     from pathlib import Path
 
+    import torch
+
     from better_backgrounds.harmonization import HarmonizationSettings
+    from better_backgrounds.matting.calibration import CalibrationProfileStore
+    from better_backgrounds.matting.runtime import MatAnyoneRuntime
 
 RGB_DIMENSIONS = 3
 RGB_CHANNELS = 3
 ALPHA_MIDPOINT = 128
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerPrepared:
+    """Report that checkpoint verification and model loading completed."""
+
+    capabilities: MattingCapabilities
+    preparation_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProgress:
+    """Report one truthful model preparation or initialization stage."""
+
+    stage: str
+    message: str
+    completed: int = 0
+    total: int = 0
+    generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +68,7 @@ class WorkerReady:
     selected_internal_size: int
     fused: bool = False
     real_time_error: str | None = None
+    generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,11 +77,61 @@ class WorkerFailure:
 
     message: str
     frame_id: int | None = None
+    generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class StopWorker:
     """Request orderly model and shared-memory teardown."""
+
+
+@dataclass(frozen=True, slots=True)
+class InitializeTracking:
+    """Attach a new camera ring and seed retained MatAnyone weights."""
+
+    descriptor: FrameRingDescriptor
+    config: MattingConfig
+    seed_packet: FramePacket
+    pipeline_config: LivePipelineConfig | None
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResetTracking:
+    """Release camera memory while retaining the loaded network."""
+
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerReset:
+    """Acknowledge that an older camera ring is no longer attached."""
+
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessFrame:
+    """Bind a frame packet to the tracking generation that submitted it."""
+
+    packet: FramePacket
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerMatte:
+    """Bind a portable matte result to its tracking generation."""
+
+    result: MatteResult
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProcessed:
+    """Bind a fused output result to its tracking generation."""
+
+    result: ProcessedResult
+    generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,114 +213,75 @@ class FittedLiveBackgrounds:
 
 
 WorkerCommand = (
-    FramePacket
+    ProcessFrame
+    | InitializeTracking
+    | ResetTracking
     | StopWorker
     | SetLiveBackground
     | ConfigurePresentation
     | ConfigureHarmonization
     | ConfigureGeometry
 )
-WorkerEvent = WorkerReady | MatteResult | ProcessedResult | WorkerFailure
+WorkerEvent = (
+    WorkerPrepared
+    | WorkerProgress
+    | WorkerReady
+    | WorkerReset
+    | WorkerMatte
+    | WorkerProcessed
+    | WorkerFailure
+)
 
 
 def matting_worker_main(  # noqa: PLR0912
-    descriptor: FrameRingDescriptor,
     checkpoint: Path,
     config: MattingConfig,
-    seed_packet: FramePacket,
     commands: Queue,
     events: Queue,
-    pipeline_config: LivePipelineConfig | None = None,
+    calibration_path: Path | None = None,
 ) -> None:
-    """Load MatAnyone 2 once, then process sequential exact-frame commands."""
-    ring = SharedFrameRing.attach(descriptor)
+    """Load MatAnyone once, then accept repeated camera and person seeds."""
+    ring = None
     runtime = None
     cuda_engine = None
     tensor_stabilizer = None
     try:
-        from better_backgrounds.matting.runtime import MatAnyoneRuntime  # noqa: PLC0415
+        import torch  # noqa: PLC0415
+        from torch.nn import functional  # noqa: PLC0415
+
+        from better_backgrounds.matting.calibration import (  # noqa: PLC0415
+            CalibrationProfileStore,
+        )
+        from better_backgrounds.matting.runtime import (  # noqa: PLC0415
+            MatAnyoneRuntime,
+            verify_checkpoint_path,
+        )
 
         started = time.perf_counter()
+        events.put(WorkerProgress("verifying", "Verifying background removal model"))
+        verify_checkpoint_path(checkpoint)
+        events.put(WorkerProgress("loading", "Loading background removal model"))
         runtime = MatAnyoneRuntime(checkpoint, config)
-        seed_frame = ring.read_frame(seed_packet.shared_slot)
-        seed_mask = ring.read_alpha(seed_packet.shared_slot)
-        selected_size = config.internal_size
-        if config.calibrate:
-            latencies: dict[int, float] = {}
-            for size in INTERNAL_SIZES:
-                trial = config.model_copy(
-                    update={
-                        "internal_size": size,
-                        "calibrate": False,
-                    },
-                )
-                runtime.reconfigure(trial)
-                runtime.initialize(seed_frame, seed_mask)
-                timings = []
-                for _index in range(config.calibration_frames):
-                    runtime.synchronize()
-                    frame_started = time.perf_counter()
-                    runtime.step(seed_frame)
-                    runtime.synchronize()
-                    timings.append((time.perf_counter() - frame_started) * 1000.0)
-                latencies[size] = calibration_p95_latency(timings)
-            if runtime.capabilities.accelerated and not any(
-                latency <= config.latency_budget_ms for latency in latencies.values()
-            ):
-                _fail_latency_gate(latencies, budget_ms=config.latency_budget_ms)
-            selected_size = choose_internal_size(
-                latencies,
-                budget_ms=config.latency_budget_ms,
-            )
-            config = config.model_copy(
-                update={"internal_size": selected_size, "calibrate": False},
-            )
-            runtime.reconfigure(config)
-        seed_alpha = runtime.initialize(seed_frame, seed_mask)
-        ring.write_alpha(seed_packet.shared_slot, seed_alpha)
-        stabilizer = TemporalAlphaStabilizer()
-        fused = bool(
-            pipeline_config is not None
-            and pipeline_config.prefer_cuda
-            and runtime.capabilities.device_type == "cuda"
-        )
-        real_time_error = None
-        harmonizer = None
-        if fused:
-            try:
-                from better_backgrounds.harmonization.pih import (  # noqa: PLC0415
-                    create_appearance_harmonizer,
-                )
-                from better_backgrounds.matting.accelerated import (  # noqa: PLC0415
-                    CudaCompositionOptions,
-                    CudaLiveEngine,
-                    TensorAlphaStabilizer,
-                )
-
-                cuda_engine = CudaLiveEngine()
-                tensor_stabilizer = TensorAlphaStabilizer()
-                harmonizer = create_appearance_harmonizer()
-            except (OSError, RuntimeError, TypeError, ValueError) as error:
-                fused = False
-                real_time_error = _safe_message(error)
-        elif pipeline_config is not None:
-            real_time_error = "real-time 1080p support requires Windows CUDA"
-        fitted_backgrounds = (
-            None if pipeline_config is None else FittedLiveBackgrounds(pipeline_config)
-        )
-        background_revision = 0
-        mirrored = True if pipeline_config is None else pipeline_config.mirrored
-        retain_standard = False if pipeline_config is None else pipeline_config.retain_standard
-        pipeline_revision = 0 if pipeline_config is None else pipeline_config.revision
         events.put(
-            WorkerReady(
+            WorkerPrepared(
                 capabilities=runtime.capabilities,
-                initialization_ms=(time.perf_counter() - started) * 1000.0,
-                selected_internal_size=selected_size,
-                fused=fused,
-                real_time_error=real_time_error,
+                preparation_ms=(time.perf_counter() - started) * 1_000.0,
             ),
         )
+        profile_store = CalibrationProfileStore(calibration_path)
+        session_sizes: dict[tuple[int, int, float], int] = {}
+        current_generation = 0
+        selected_size = config.internal_size
+        stabilizer = TemporalAlphaStabilizer()
+        fused = False
+        real_time_error = None
+        harmonizer = None
+        pipeline_config = None
+        fitted_backgrounds = None
+        background_revision = 0
+        mirrored = True
+        retain_standard = False
+        pipeline_revision = 0
         while True:
             try:
                 command = commands.get(timeout=0.25)
@@ -256,6 +289,105 @@ def matting_worker_main(  # noqa: PLR0912
                 continue
             if isinstance(command, StopWorker):
                 return
+            if isinstance(command, ResetTracking):
+                if ring is not None:
+                    ring.close()
+                    ring = None
+                current_generation = command.generation
+                runtime.reconfigure(config)
+                stabilizer = TemporalAlphaStabilizer()
+                tensor_stabilizer = None
+                events.put(WorkerReset(command.generation))
+                continue
+            if isinstance(command, InitializeTracking):
+                initialization_started = time.perf_counter()
+                if ring is not None:
+                    ring.close()
+                ring = SharedFrameRing.attach(command.descriptor)
+                current_generation = command.generation
+                pipeline_config = command.pipeline_config
+                seed_frame = ring.read_frame(command.seed_packet.shared_slot)
+                seed_mask = ring.read_alpha(command.seed_packet.shared_slot)
+                events.put(
+                    WorkerProgress(
+                        "optimizing",
+                        "Optimising background removal for this computer",
+                        generation=current_generation,
+                    ),
+                )
+                config, selected_size = _calibrated_config(
+                    runtime,
+                    command.config,
+                    seed_frame,
+                    seed_mask,
+                    command.descriptor,
+                    profile_store,
+                    session_sizes,
+                    events,
+                    current_generation,
+                )
+                events.put(
+                    WorkerProgress(
+                        "warming",
+                        "Starting background removal",
+                        generation=current_generation,
+                    ),
+                )
+                runtime.reconfigure(config)
+                seed_alpha = runtime.initialize(seed_frame, seed_mask)
+                ring.write_alpha(command.seed_packet.shared_slot, seed_alpha)
+                stabilizer = TemporalAlphaStabilizer()
+                requested_fused = bool(
+                    pipeline_config is not None
+                    and pipeline_config.prefer_cuda
+                    and runtime.capabilities.device_type == "cuda"
+                )
+                real_time_error = None
+                if requested_fused and cuda_engine is None:
+                    try:
+                        from better_backgrounds.harmonization.pih import (  # noqa: PLC0415
+                            create_appearance_harmonizer,
+                        )
+                        from better_backgrounds.matting.accelerated import (  # noqa: PLC0415
+                            CudaCompositionOptions,
+                            CudaLiveEngine,
+                            TensorAlphaStabilizer,
+                        )
+
+                        cuda_engine = CudaLiveEngine()
+                        harmonizer = create_appearance_harmonizer()
+                        tensor_stabilizer = TensorAlphaStabilizer()
+                    except (OSError, RuntimeError, TypeError, ValueError) as error:
+                        real_time_error = _safe_message(error)
+                elif requested_fused:
+                    from better_backgrounds.matting.accelerated import (  # noqa: PLC0415
+                        TensorAlphaStabilizer,
+                    )
+
+                    tensor_stabilizer = TensorAlphaStabilizer()
+                fused = requested_fused and cuda_engine is not None
+                if pipeline_config is not None and not requested_fused:
+                    real_time_error = "real-time 1080p support requires Windows CUDA"
+                fitted_backgrounds = (
+                    None if pipeline_config is None else FittedLiveBackgrounds(pipeline_config)
+                )
+                background_revision = 0
+                mirrored = True if pipeline_config is None else pipeline_config.mirrored
+                retain_standard = (
+                    False if pipeline_config is None else pipeline_config.retain_standard
+                )
+                pipeline_revision = 0 if pipeline_config is None else pipeline_config.revision
+                events.put(
+                    WorkerReady(
+                        capabilities=runtime.capabilities,
+                        initialization_ms=(time.perf_counter() - initialization_started) * 1_000.0,
+                        selected_internal_size=selected_size,
+                        fused=fused,
+                        real_time_error=real_time_error,
+                        generation=current_generation,
+                    ),
+                )
+                continue
             if isinstance(command, SetLiveBackground):
                 if fitted_backgrounds is not None:
                     fitted_backgrounds.replace(command.background, command.reference)
@@ -297,12 +429,15 @@ def matting_worker_main(  # noqa: PLR0912
                     if cuda_engine is not None:
                         cuda_engine.clear_backgrounds()
                 continue
-            if not isinstance(command, FramePacket):
+            if not isinstance(command, ProcessFrame):
                 events.put(WorkerFailure(message="Unknown matting worker command"))
                 continue
+            if command.generation != current_generation or ring is None:
+                continue
+            packet = command.packet
             inference_started = time.perf_counter()
             try:
-                source_frame = ring.read_frame(command.shared_slot)
+                source_frame = ring.read_frame(packet.shared_slot)
                 if (
                     fused
                     and cuda_engine is not None
@@ -313,7 +448,7 @@ def matting_worker_main(  # noqa: PLR0912
                     alpha_tensor = runtime.step_uploaded(source_tensor)
                     alpha_tensor = tensor_stabilizer.apply(
                         alpha_tensor.unsqueeze(0).unsqueeze(0),
-                        captured_at=command.captured_at,
+                        captured_at=packet.captured_at,
                     )
                     runtime.synchronize()
                     matting_ms = (time.perf_counter() - inference_started) * 1_000.0
@@ -331,15 +466,15 @@ def matting_worker_main(  # noqa: PLR0912
                         fitted_alpha,
                         room,
                         CudaCompositionOptions(
-                            captured_at=command.captured_at,
+                            captured_at=packet.captured_at,
                             harmonizer=harmonizer,
                             reference_background=room_reference,
                             retain_standard=retain_standard,
                         ),
                     )
-                    ring.write_output(command.shared_slot, accelerated.image)
+                    ring.write_output(packet.shared_slot, accelerated.image)
                     ring.write_output(
-                        command.shared_slot,
+                        packet.shared_slot,
                         accelerated.standard_image,
                         standard=True,
                     )
@@ -365,52 +500,59 @@ def matting_worker_main(  # noqa: PLR0912
                     )
                     diagnostic_readback_ms = (time.perf_counter() - diagnostic_started) * 1_000.0
                     events.put(
-                        ProcessedResult(
-                            frame_id=command.frame_id,
-                            captured_at=command.captured_at,
-                            alpha_slot=command.shared_slot,
-                            output_width=pipeline_config.output_width,
-                            output_height=pipeline_config.output_height,
-                            background_revision=background_revision,
-                            occupancy=occupancy,
-                            mask_preview=mask_preview,
-                            timings=StageTimings(
-                                normalization_ms=normalization_ms,
-                                queue_ms=max(
-                                    0.0,
-                                    inference_started * 1_000.0 - command.captured_at,
+                        WorkerProcessed(
+                            ProcessedResult(
+                                frame_id=packet.frame_id,
+                                captured_at=packet.captured_at,
+                                alpha_slot=packet.shared_slot,
+                                output_width=pipeline_config.output_width,
+                                output_height=pipeline_config.output_height,
+                                background_revision=background_revision,
+                                occupancy=occupancy,
+                                mask_preview=mask_preview,
+                                timings=StageTimings(
+                                    normalization_ms=normalization_ms,
+                                    queue_ms=max(
+                                        0.0,
+                                        inference_started * 1_000.0 - packet.captured_at,
+                                    ),
+                                    matting_ms=matting_ms,
+                                    post_processing_ms=accelerated.post_processing_ms,
+                                    readback_ms=(accelerated.readback_ms + diagnostic_readback_ms),
                                 ),
-                                matting_ms=matting_ms,
-                                post_processing_ms=accelerated.post_processing_ms,
-                                readback_ms=(accelerated.readback_ms + diagnostic_readback_ms),
+                                standard_retained=retain_standard,
+                                pipeline_revision=pipeline_revision,
+                                harmonized=accelerated.harmonized,
+                                harmonization_ms=accelerated.harmonization_ms,
+                                harmonization_degraded=accelerated.harmonization_degraded,
                             ),
-                            standard_retained=retain_standard,
-                            pipeline_revision=pipeline_revision,
-                            harmonized=accelerated.harmonized,
-                            harmonization_ms=accelerated.harmonization_ms,
-                            harmonization_degraded=accelerated.harmonization_degraded,
+                            current_generation,
                         ),
                     )
                     continue
                 alpha = runtime.step(source_frame)
                 runtime.synchronize()
-                alpha = stabilizer.apply(alpha, captured_at=command.captured_at)
-                ring.write_alpha(command.shared_slot, alpha)
+                alpha = stabilizer.apply(alpha, captured_at=packet.captured_at)
+                ring.write_alpha(packet.shared_slot, alpha)
             except Exception as error:  # noqa: BLE001
                 events.put(
                     WorkerFailure(
                         message=_safe_message(error),
-                        frame_id=command.frame_id,
+                        frame_id=packet.frame_id,
+                        generation=current_generation,
                     ),
                 )
                 return
             matting_ms = (time.perf_counter() - inference_started) * 1000.0
             events.put(
-                MatteResult(
-                    frame_id=command.frame_id,
-                    captured_at=command.captured_at,
-                    alpha_slot=command.shared_slot,
-                    inference_ms=matting_ms,
+                WorkerMatte(
+                    MatteResult(
+                        frame_id=packet.frame_id,
+                        captured_at=packet.captured_at,
+                        alpha_slot=packet.shared_slot,
+                        inference_ms=matting_ms,
+                    ),
+                    current_generation,
                 ),
             )
     except Exception as error:  # noqa: BLE001
@@ -418,7 +560,153 @@ def matting_worker_main(  # noqa: PLR0912
     finally:
         if runtime is not None:
             runtime.close()
-        ring.close()
+        if ring is not None:
+            ring.close()
+
+
+def _calibrated_config(
+    runtime: MatAnyoneRuntime,
+    requested: MattingConfig,
+    seed_frame: np.ndarray,
+    seed_mask: np.ndarray,
+    descriptor: FrameRingDescriptor,
+    profile_store: CalibrationProfileStore,
+    session_sizes: dict[tuple[int, int, float], int],
+    events: Queue,
+    generation: int,
+) -> tuple[MattingConfig, int]:
+    """Reuse a session/profile size or measure from highest quality downward."""
+    if not requested.calibrate:
+        return requested, requested.internal_size
+    session_key = (
+        descriptor.width,
+        descriptor.height,
+        requested.latency_budget_ms,
+    )
+    session_size = session_sizes.get(session_key)
+    if session_size is not None:
+        selected = cast("InternalSize", session_size)
+        return (
+            requested.model_copy(update={"internal_size": selected, "calibrate": False}),
+            selected,
+        )
+
+    from better_backgrounds.matting.calibration import (  # noqa: PLC0415
+        CalibrationIdentity,
+        CalibrationProfile,
+    )
+    from better_backgrounds.matting.runtime import (  # noqa: PLC0415
+        load_matanyone_asset_manifest,
+    )
+
+    manifest = load_matanyone_asset_manifest()
+    device_name, torch_version, accelerator_version = runtime.calibration_device_identity()
+    identity = CalibrationIdentity(
+        checkpoint_sha256=manifest.checkpoint.sha256,
+        upstream_revision=manifest.upstream_revision,
+        device_type=runtime.capabilities.device_type,
+        device_name=device_name,
+        torch_version=torch_version,
+        accelerator_version=accelerator_version,
+        capture_width=descriptor.width,
+        capture_height=descriptor.height,
+        latency_budget_ms=requested.latency_budget_ms,
+    )
+    latencies: dict[int, float] = {}
+    cached = profile_store.find(identity)
+    selected: InternalSize | None = None
+    if cached is not None:
+        events.put(
+            WorkerProgress(
+                "validating",
+                "Checking saved background removal settings",
+                total=1,
+                generation=generation,
+            ),
+        )
+        cached_latency = _measure_size(
+            runtime,
+            requested,
+            cached.selected_internal_size,
+            seed_frame,
+            seed_mask,
+            frames=5,
+        )
+        latencies[cached.selected_internal_size] = cached_latency
+        if cached_latency <= requested.latency_budget_ms or (
+            not runtime.capabilities.accelerated
+            and cached.selected_internal_size == INTERNAL_SIZES[0]
+        ):
+            selected = cached.selected_internal_size
+
+    if selected is None:
+        descending = tuple(reversed(INTERNAL_SIZES))
+        for index, size in enumerate(descending, start=1):
+            if size in latencies:
+                latency = latencies[size]
+            else:
+                events.put(
+                    WorkerProgress(
+                        "calibrating",
+                        f"Testing background removal quality ({size}p)",
+                        completed=index - 1,
+                        total=len(descending),
+                        generation=generation,
+                    ),
+                )
+                latency = _measure_size(
+                    runtime,
+                    requested,
+                    size,
+                    seed_frame,
+                    seed_mask,
+                    frames=requested.calibration_frames,
+                )
+                latencies[size] = latency
+            if latency <= requested.latency_budget_ms:
+                selected = cast("InternalSize", size)
+                break
+        if selected is None:
+            if runtime.capabilities.accelerated:
+                _fail_latency_gate(latencies, budget_ms=requested.latency_budget_ms)
+            selected = INTERNAL_SIZES[0]
+
+    selected_latency = latencies.get(selected, 0.0)
+    profile_store.save(
+        CalibrationProfile(
+            identity=identity,
+            selected_internal_size=selected,
+            measured_p95_ms=selected_latency,
+        ),
+    )
+    session_sizes[session_key] = selected
+    return (
+        requested.model_copy(update={"internal_size": selected, "calibrate": False}),
+        selected,
+    )
+
+
+def _measure_size(
+    runtime: MatAnyoneRuntime,
+    requested: MattingConfig,
+    size: int,
+    seed_frame: np.ndarray,
+    seed_mask: np.ndarray,
+    *,
+    frames: int,
+) -> float:
+    """Measure one resolution after recreating its temporal inference core."""
+    trial = requested.model_copy(update={"internal_size": size, "calibrate": False})
+    runtime.reconfigure(trial)
+    runtime.initialize(seed_frame, seed_mask)
+    timings = []
+    for _index in range(frames):
+        runtime.synchronize()
+        frame_started = time.perf_counter()
+        runtime.step(seed_frame)
+        runtime.synchronize()
+        timings.append((time.perf_counter() - frame_started) * 1_000.0)
+    return calibration_p95_latency(timings)
 
 
 def _fit_output_tensors(
@@ -428,6 +716,9 @@ def _fit_output_tensors(
     *,
     mirrored: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    import torch  # noqa: PLC0415
+    from torch.nn import functional  # noqa: PLC0415
+
     if mirrored:
         source = torch.flip(source, dims=(3,))
         alpha = torch.flip(alpha, dims=(3,))

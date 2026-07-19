@@ -28,10 +28,18 @@ from better_backgrounds.matting.worker import (
     ConfigureGeometry,
     ConfigureHarmonization,
     ConfigurePresentation,
+    InitializeTracking,
+    ProcessFrame,
+    ResetTracking,
     SetLiveBackground,
     StopWorker,
     WorkerFailure,
+    WorkerMatte,
+    WorkerPrepared,
+    WorkerProcessed,
+    WorkerProgress,
     WorkerReady,
+    WorkerReset,
     matting_worker_main,
 )
 
@@ -46,6 +54,24 @@ RGB_CHANNELS = 3
 ALPHA_MIDPOINT = 128
 MINIMUM_SEED_OCCUPANCY = 0.01
 MAXIMUM_SEED_OCCUPANCY = 0.95
+
+
+@dataclass(frozen=True, slots=True)
+class EnginePrepared:
+    """Publish successful checkpoint verification and model loading."""
+
+    capabilities: MattingCapabilities
+    preparation_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class EngineProgress:
+    """Publish a truthful preparation or initialization stage."""
+
+    stage: str
+    message: str
+    completed: int = 0
+    total: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,11 +102,25 @@ class EngineFailure:
     message: str
 
 
-EngineEvent = EngineReady | CompletedMatte | ProcessedFrame | EngineFailure
+EngineEvent = (
+    EnginePrepared | EngineProgress | EngineReady | CompletedMatte | ProcessedFrame | EngineFailure
+)
 
 
 class MattingEngine(Protocol):
     """Define the stateful MatAnyone 2 lifecycle used by the live session."""
+
+    def prepare(self, config: MattingConfig) -> None:
+        """Load and retain model weights without requiring a person seed."""
+
+    def initialize(
+        self,
+        seed_frame: NDArray[np.uint8],
+        seed_mask: NDArray[np.uint8],
+        config: MattingConfig,
+        pipeline_config: LivePipelineConfig | None = None,
+    ) -> None:
+        """Seed or reseed temporal memory using the retained model."""
 
     def start(
         self,
@@ -110,24 +150,33 @@ class MattingEngine(Protocol):
 class ProcessMattingEngine:
     """Keep MatAnyone 2 and temporal state outside the UI process."""
 
-    def __init__(self, checkpoint: Path) -> None:
-        """Retain the verified checkpoint path until a seed is confirmed."""
+    def __init__(self, checkpoint: Path, calibration_path: Path | None = None) -> None:
+        """Retain lightweight paths until the background worker verifies them."""
         self._checkpoint = checkpoint
+        self._calibration_path = calibration_path
         self._context = multiprocessing.get_context("spawn")
         self._commands = None
         self._events = None
         self._process = None
         self._ring: SharedFrameRing | None = None
+        self._retired_rings: list[tuple[int, SharedFrameRing]] = []
         self._scheduler = LatestFrameScheduler()
         self._free_slots = set(range(RING_SLOTS))
         self._seed_slot: int | None = None
         self._next_frame_id = 0
         self._ready = False
+        self._prepared = False
         self._failure_reported = False
         self.rejected_frames = 0
         self._event_lock = threading.RLock()
         self._pipeline_config: LivePipelineConfig | None = None
         self._fused = False
+        self._generation = 0
+
+    @property
+    def prepared(self) -> bool:
+        """Return whether the retained network weights finished loading."""
+        return self._prepared
 
     @property
     def ready(self) -> bool:
@@ -151,9 +200,52 @@ class ProcessMattingEngine:
         config: MattingConfig,
         pipeline_config: LivePipelineConfig | None = None,
     ) -> None:
-        """Allocate the ring and spawn one worker for a confirmed target mask."""
+        """Prepare the retained worker and initialize one target."""
+        self.prepare(config)
+        self.initialize(seed_frame, seed_mask, config, pipeline_config)
+
+    def prepare(self, config: MattingConfig) -> None:
+        """Spawn checkpoint verification and model loading without camera pixels."""
+        if self._process is not None and self._process.is_alive():
+            return
         self.close()
+        self._commands = self._context.Queue()
+        self._events = self._context.Queue()
+        self._process = self._context.Process(
+            target=matting_worker_main,
+            args=(
+                self._checkpoint,
+                config,
+                self._commands,
+                self._events,
+                self._calibration_path,
+            ),
+            name="matanyone2-live-worker",
+            daemon=True,
+        )
+        self._ready = False
+        self._prepared = False
+        self._failure_reported = False
+        self._process.start()
+
+    def initialize(
+        self,
+        seed_frame: NDArray[np.uint8],
+        seed_mask: NDArray[np.uint8],
+        config: MattingConfig,
+        pipeline_config: LivePipelineConfig | None = None,
+    ) -> None:
+        """Attach a fresh camera ring and reseed retained model weights."""
         self._validate_seed(seed_frame, seed_mask)
+        self.prepare(config)
+        if self._commands is None:
+            msg = "MatAnyone 2 worker did not start"
+            raise RuntimeError(msg)
+        next_generation = self._generation + 1
+        if self._ring is not None:
+            self._retired_rings.append((next_generation, self._ring))
+            self._ring = None
+        self._scheduler.reset()
         height, width = seed_frame.shape[:2]
         self._pipeline_config = pipeline_config
         self._ring = SharedFrameRing.create(
@@ -174,28 +266,21 @@ class ProcessMattingEngine:
             height=height,
             shared_slot=seed_slot,
         )
-        self._commands = self._context.Queue()
-        self._events = self._context.Queue()
-        self._process = self._context.Process(
-            target=matting_worker_main,
-            args=(
-                self._ring.descriptor,
-                self._checkpoint,
-                config,
-                seed_packet,
-                self._commands,
-                self._events,
-                pipeline_config,
-            ),
-            name="matanyone2-live-worker",
-            daemon=True,
-        )
+        self._generation = next_generation
         self._ready = False
         self._failure_reported = False
         self._next_frame_id = 1
         self.rejected_frames = 0
         self._scheduler = LatestFrameScheduler()
-        self._process.start()
+        self._commands.put(
+            InitializeTracking(
+                self._ring.descriptor,
+                config,
+                seed_packet,
+                pipeline_config,
+                self._generation,
+            ),
+        )
 
     def submit(self, frame: NDArray[np.uint8], *, captured_at: float) -> bool:
         """Write one RGB frame and keep it as active or newest pending work."""
@@ -228,7 +313,7 @@ class ProcessMattingEngine:
         if submission.dropped is not None:
             self._release_slot(submission.dropped.shared_slot)
         if submission.dispatch is not None:
-            self._commands.put(submission.dispatch)
+            self._commands.put(ProcessFrame(submission.dispatch, self._generation))
         return True
 
     def poll(self) -> tuple[EngineEvent, ...]:
@@ -337,33 +422,7 @@ class ProcessMattingEngine:
         published: list[EngineEvent] = []
         with self._event_lock:
             for event in raw_events:
-                if isinstance(event, WorkerReady):
-                    self._ready = True
-                    self._fused = event.fused
-                    if self._seed_slot is not None:
-                        self._release_slot(self._seed_slot)
-                        self._seed_slot = None
-                    published.append(
-                        EngineReady(
-                            capabilities=event.capabilities,
-                            initialization_ms=event.initialization_ms,
-                            selected_internal_size=event.selected_internal_size,
-                            real_time_supported=event.fused,
-                            real_time_error=event.real_time_error,
-                        ),
-                    )
-                elif isinstance(event, MatteResult):
-                    completed = self._complete(event)
-                    if completed is not None:
-                        published.append(completed)
-                elif isinstance(event, ProcessedResult):
-                    completed = self._complete_processed(event)
-                    if completed is not None:
-                        published.append(completed)
-                elif isinstance(event, WorkerFailure):
-                    self._ready = False
-                    self._failure_reported = True
-                    published.append(EngineFailure(event.message))
+                published.extend(self._publish_event(event))
             if (
                 self._process is not None
                 and not self._process.is_alive()
@@ -374,9 +433,78 @@ class ProcessMattingEngine:
                 published.append(EngineFailure("MatAnyone 2 worker stopped unexpectedly"))
         return tuple(published)
 
+    def _publish_event(self, event: object) -> list[EngineEvent]:
+        published: list[EngineEvent] = []
+        if isinstance(event, WorkerPrepared):
+            self._prepared = True
+            published.append(EnginePrepared(event.capabilities, event.preparation_ms))
+        elif isinstance(event, WorkerProgress):
+            if event.generation is None or event.generation == self._generation:
+                published.append(
+                    EngineProgress(
+                        event.stage,
+                        event.message,
+                        event.completed,
+                        event.total,
+                    ),
+                )
+        elif isinstance(event, WorkerReset):
+            self._close_retired_rings(through_generation=event.generation)
+        elif isinstance(event, WorkerReady):
+            published.extend(self._publish_ready(event))
+        elif isinstance(event, (WorkerMatte, WorkerProcessed)):
+            published.extend(self._publish_result(event))
+        elif isinstance(event, WorkerFailure) and (
+            event.generation is None or event.generation == self._generation
+        ):
+            self._ready = False
+            self._failure_reported = True
+            published.append(EngineFailure(event.message))
+        return published
+
+    def _publish_result(self, event: WorkerMatte | WorkerProcessed) -> list[EngineEvent]:
+        if event.generation != self._generation:
+            return []
+        completed = (
+            self._complete(event.result)
+            if isinstance(event, WorkerMatte)
+            else self._complete_processed(event.result)
+        )
+        return [] if completed is None else [completed]
+
+    def _publish_ready(self, event: WorkerReady) -> list[EngineEvent]:
+        self._close_retired_rings(through_generation=event.generation)
+        if event.generation != self._generation:
+            return []
+        self._ready = True
+        self._fused = event.fused
+        if self._seed_slot is not None:
+            self._release_slot(self._seed_slot)
+            self._seed_slot = None
+        return [
+            EngineReady(
+                capabilities=event.capabilities,
+                initialization_ms=event.initialization_ms,
+                selected_internal_size=event.selected_internal_size,
+                real_time_supported=event.fused,
+                real_time_error=event.real_time_error,
+            ),
+        ]
+
     def reset(self) -> None:
-        """Discard the current person identity and temporal memory."""
-        self.close()
+        """Discard person identity while retaining the model process and weights."""
+        with self._event_lock:
+            self._generation += 1
+            self._ready = False
+            self._fused = False
+            self._scheduler.reset()
+            if self._ring is not None:
+                self._retired_rings.append((self._generation, self._ring))
+                self._ring = None
+            self._free_slots = set(range(RING_SLOTS))
+            self._seed_slot = None
+            if self._commands is not None:
+                self._commands.put(ResetTracking(self._generation))
 
     def close(self) -> None:
         """Stop the owned worker and unlink shared-memory blocks."""
@@ -395,15 +523,18 @@ class ProcessMattingEngine:
         self._events = None
         self._process = None
         self._ready = False
+        self._prepared = False
         self._failure_reported = False
         self._scheduler.reset()
         if self._ring is not None:
             self._ring.close(unlink=True)
             self._ring = None
+        self._close_retired_rings()
         self._free_slots = set(range(RING_SLOTS))
         self._seed_slot = None
         self._pipeline_config = None
         self._fused = False
+        self._generation = 0
 
     def _complete(self, result: MatteResult) -> CompletedMatte | None:
         ring = self._ring
@@ -419,7 +550,7 @@ class ProcessMattingEngine:
         alpha = ring.read_alpha(completion.completed.shared_slot)
         self._release_slot(completion.completed.shared_slot)
         if completion.dispatch is not None:
-            self._commands.put(completion.dispatch)
+            self._commands.put(ProcessFrame(completion.dispatch, self._generation))
         return CompletedMatte(completion.completed, result, source, alpha)
 
     def _complete_processed(self, result: ProcessedResult) -> ProcessedFrame | None:
@@ -461,7 +592,7 @@ class ProcessMattingEngine:
         )
         self._release_slot(completion.completed.shared_slot)
         if completion.dispatch is not None:
-            self._commands.put(completion.dispatch)
+            self._commands.put(ProcessFrame(completion.dispatch, self._generation))
         return ProcessedFrame(
             packet=packet,
             primary=primary,
@@ -486,6 +617,15 @@ class ProcessMattingEngine:
 
     def _release_slot(self, slot: int) -> None:
         self._free_slots.add(slot)
+
+    def _close_retired_rings(self, *, through_generation: int | None = None) -> None:
+        retained = []
+        for generation, ring in self._retired_rings:
+            if through_generation is None or generation <= through_generation:
+                ring.close(unlink=True)
+            else:
+                retained.append((generation, ring))
+        self._retired_rings = retained
 
     @staticmethod
     def _validate_seed(
