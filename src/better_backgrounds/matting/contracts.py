@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +13,92 @@ RING_SLOTS = 3
 MINIMUM_RATE_SAMPLES = 2
 INTERNAL_SIZES = (360, 432, 540)
 InternalSize = Literal[360, 432, 540]
+MASK_DIMENSIONS = 2
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+
+@dataclass(frozen=True, slots=True)
+class StageTimings:
+    """Record the independently actionable latency stages for one output frame."""
+
+    normalization_ms: float = 0.0
+    queue_ms: float = 0.0
+    matting_ms: float = 0.0
+    post_processing_ms: float = 0.0
+    readback_ms: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Reject corrupt diagnostic values at process boundaries."""
+        values = (
+            self.normalization_ms,
+            self.queue_ms,
+            self.matting_ms,
+            self.post_processing_ms,
+            self.readback_ms,
+        )
+        if any(not math.isfinite(value) or value < 0 for value in values):
+            msg = "stage timings must be finite and non-negative"
+            raise ValueError(msg)
+
+
+class LivePipelineConfig(BaseModel):
+    """Describe immutable output and acceleration choices for one live session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    output_width: int = Field(gt=0, le=8_192)
+    output_height: int = Field(gt=0, le=8_192)
+    aspect_ratio: float = Field(gt=0, le=8.0, allow_inf_nan=False)
+    prefer_cuda: bool = True
+    mirrored: bool = True
+    retain_standard: bool = False
+    revision: int = Field(default=0, ge=0)
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessedFrame:
+    """Carry one exact completed frame and its final process-owned outputs."""
+
+    packet: FramePacket
+    primary: NDArray
+    standard: NDArray | None
+    mask_preview: NDArray
+    background_revision: int
+    occupancy: float
+    timings: StageTimings
+    pipeline_revision: int = 0
+    harmonized: bool = False
+    harmonization_ms: float = 0.0
+    harmonization_degraded: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate frame identity and bounded output evidence."""
+        if self.background_revision < 0:
+            msg = "background revision must be non-negative"
+            raise ValueError(msg)
+        if self.pipeline_revision < 0:
+            msg = "pipeline revision must be non-negative"
+            raise ValueError(msg)
+        if not math.isfinite(self.occupancy) or not 0.0 <= self.occupancy <= 1.0:
+            msg = "occupancy must be between zero and one"
+            raise ValueError(msg)
+        expected = (self.packet.height, self.packet.width, 3)
+        if self.primary.dtype.name != "uint8" or self.primary.shape != expected:
+            msg = f"primary output must be {expected} uint8 RGB"
+            raise ValueError(msg)
+        if self.standard is not None and (
+            self.standard.dtype.name != "uint8" or self.standard.shape != expected
+        ):
+            msg = f"standard output must be {expected} uint8 RGB"
+            raise ValueError(msg)
+        if self.mask_preview.dtype.name != "uint8" or self.mask_preview.ndim != MASK_DIMENSIONS:
+            msg = "mask preview must be two-dimensional uint8"
+            raise ValueError(msg)
+        if not math.isfinite(self.harmonization_ms) or self.harmonization_ms < 0:
+            msg = "harmonization time must be finite and non-negative"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +165,53 @@ class MatteResult:
             raise ValueError(msg)
 
 
+@dataclass(frozen=True, slots=True)
+class ProcessedResult:
+    """Identify final output pixels written by the fused worker."""
+
+    frame_id: int
+    captured_at: float
+    alpha_slot: int
+    output_width: int
+    output_height: int
+    background_revision: int
+    occupancy: float
+    mask_preview: NDArray
+    timings: StageTimings
+    standard_retained: bool = False
+    pipeline_revision: int = 0
+    harmonized: bool = False
+    harmonization_ms: float = 0.0
+    harmonization_degraded: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the small result message before shared output is read."""
+        MatteResult(
+            self.frame_id,
+            self.captured_at,
+            self.alpha_slot,
+            self.timings.matting_ms,
+        )
+        if self.output_width <= 0 or self.output_height <= 0:
+            msg = "processed output dimensions must be positive"
+            raise ValueError(msg)
+        if self.background_revision < 0:
+            msg = "background revision must be non-negative"
+            raise ValueError(msg)
+        if self.pipeline_revision < 0:
+            msg = "pipeline revision must be non-negative"
+            raise ValueError(msg)
+        if not math.isfinite(self.occupancy) or not 0.0 <= self.occupancy <= 1.0:
+            msg = "occupancy must be between zero and one"
+            raise ValueError(msg)
+        if self.mask_preview.dtype.name != "uint8" or self.mask_preview.ndim != MASK_DIMENSIONS:
+            msg = "processed mask preview must be two-dimensional uint8"
+            raise ValueError(msg)
+        if not math.isfinite(self.harmonization_ms) or self.harmonization_ms < 0:
+            msg = "harmonization time must be finite and non-negative"
+            raise ValueError(msg)
+
+
 class MattingCapabilities(BaseModel):
     """Describe the effective MatAnyone 2 execution backend."""
 
@@ -106,6 +239,14 @@ class LiveDiagnostics(BaseModel):
     processing_height: int = Field(gt=0, le=8_192)
     device_type: Literal["cuda", "mps", "cpu"]
     background_refresh_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
+    normalization_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
+    queue_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
+    matting_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
+    post_processing_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
+    readback_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
+    capture_to_paint_ms: float = Field(default=0.0, ge=0, le=60_000, allow_inf_nan=False)
+    output_width: int = Field(default=1, gt=0, le=8_192)
+    output_height: int = Field(default=1, gt=0, le=8_192)
 
 
 class SlidingFrameRate:

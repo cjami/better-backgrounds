@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 from PySide6.QtWidgets import QApplication, QWidget
 
 from better_backgrounds.desktop.live_preview import (
@@ -12,6 +13,7 @@ from better_backgrounds.desktop.live_preview import (
     rgb_to_qimage,
 )
 from better_backgrounds.harmonization import HarmonizationResult, HarmonizationSettings
+from better_backgrounds.matting.accelerated import CudaLiveEngine
 from better_backgrounds.matting.compositor import background_has_content, compose_live_frame
 from better_backgrounds.matting.contracts import FramePacket, MatteResult, MattingCapabilities
 from better_backgrounds.matting.engine import CompletedMatte, EngineReady
@@ -124,6 +126,39 @@ def test_compositor_preserves_reference_blend_at_all_alpha_levels() -> None:
     )
 
     assert np.array_equal(composite.image, expected)
+
+
+def test_cuda_integer_composite_preserves_standard_rounding() -> None:
+    """Keep baseline pixels exact when the fused CUDA path is selected."""
+    random = np.random.default_rng(41)
+    source = random.integers(0, 256, (1, 3, 8, 9), dtype=np.uint8)
+    background = random.integers(0, 256, (1, 3, 8, 9), dtype=np.uint8)
+    alpha = random.integers(0, 256, (1, 1, 8, 9), dtype=np.uint8)
+    expected = (
+        source.astype(np.uint32) * alpha.astype(np.uint32)
+        + background.astype(np.uint32) * (255 - alpha.astype(np.uint32))
+        + 127
+    ) // 255
+
+    actual = CudaLiveEngine._standard_composite(  # noqa: SLF001
+        torch.from_numpy(source),
+        torch.from_numpy(alpha),
+        torch.from_numpy(background),
+    )
+
+    assert np.array_equal(actual.numpy(), expected.astype(np.uint8))
+
+
+def test_cuda_engine_binds_the_resolved_current_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat tensors on cuda:0 as belonging to a current-device CUDA engine."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+
+    engine = CudaLiveEngine()
+
+    assert engine._device == torch.device("cuda:0")  # noqa: SLF001
 
 
 def test_compositor_blends_a_refined_foreground_but_retains_raw_source() -> None:

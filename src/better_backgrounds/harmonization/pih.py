@@ -8,6 +8,7 @@ import pickle
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -43,6 +44,17 @@ MINIMUM_GAIN = 0.6
 MAXIMUM_GAIN = 1.0
 RGB_CHANNELS = 3
 RGB_DIMENSIONS = 3
+TENSOR_DIMENSIONS = 4
+
+
+@dataclass(frozen=True, slots=True)
+class TensorHarmonizationResult:
+    """Return PIH output on its execution device without forcing a readback."""
+
+    image: torch.Tensor | None
+    processing_ms: float
+    degraded_components: tuple[str, ...]
+    applied: bool
 
 
 class _PihPredictor(Protocol):
@@ -287,6 +299,86 @@ class PihAppearanceHarmonizer:
             applied=True,
         )
 
+    def apply_tensors(
+        self,
+        source: torch.Tensor,
+        alpha: torch.Tensor,
+        background: torch.Tensor,
+        *,
+        captured_at: float,
+        reference_background: torch.Tensor | None = None,
+    ) -> TensorHarmonizationResult:
+        """Predict and render PIH without intermediate device-to-host transfers."""
+        started = time.perf_counter()
+        degraded = self._unavailable_component()
+        if degraded is not None:
+            return TensorHarmonizationResult(
+                image=None,
+                processing_ms=(time.perf_counter() - started) * 1_000.0,
+                degraded_components=degraded,
+                applied=False,
+            )
+        try:
+            model, device = self._ensure_model()
+            self._validate_frame_tensors(source, alpha, background, device=device)
+            reference = background if reference_background is None else reference_background
+            self._validate_frame_tensors(source, alpha, reference, device=device)
+            prediction_image = source * alpha + reference * (1.0 - alpha)
+            display_image = (
+                prediction_image
+                if reference_background is None
+                else source * alpha + background * (1.0 - alpha)
+            )
+            low_image = functional.interpolate(
+                prediction_image,
+                PihInferenceModel.input_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            low_mask = functional.interpolate(
+                alpha,
+                PihInferenceModel.input_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            low_background = functional.interpolate(
+                reference,
+                PihInferenceModel.input_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            predictor = cast("_PihPredictor", model)
+            with torch.inference_mode():
+                curves = self._session_curves(
+                    predictor,
+                    low_background,
+                    low_image,
+                    low_mask,
+                    captured_at=captured_at,
+                )
+                gain = predictor.predict_gain(low_background, low_image, low_mask, curves)
+                gain = self._smooth_gain(gain, low_mask)
+                image = self._render_tensor(
+                    (display_image, background, alpha),
+                    (curves, gain),
+                    captured_at=captured_at,
+                )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            self._error = str(error)[:240]
+            return TensorHarmonizationResult(
+                image=None,
+                processing_ms=(time.perf_counter() - started) * 1_000.0,
+                degraded_components=("pih",),
+                applied=False,
+            )
+        self._error = None
+        return TensorHarmonizationResult(
+            image=image,
+            processing_ms=(time.perf_counter() - started) * 1_000.0,
+            degraded_components=(),
+            applied=True,
+        )
+
     def _session_curves(
         self,
         predictor: _PihPredictor,
@@ -340,6 +432,27 @@ class PihAppearanceHarmonizer:
         *,
         captured_at: float,
     ) -> NDArray[np.uint8]:
+        output = self._render_tensor(frame, parameters, captured_at=captured_at)
+        return cast(
+            "NDArray[np.uint8]",
+            output[0]
+            .clamp(0.0, 1.0)
+            .mul(255.0)
+            .round()
+            .to(torch.uint8)
+            .permute(1, 2, 0)
+            .contiguous()
+            .cpu()
+            .numpy(),
+        )
+
+    def _render_tensor(
+        self,
+        frame: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        parameters: tuple[torch.Tensor, torch.Tensor],
+        *,
+        captured_at: float,
+    ) -> torch.Tensor:
         composite, background, mask = frame
         curves, gain = parameters
         predicted_color = apply_rgb_curves(composite, curves)
@@ -355,19 +468,30 @@ class PihAppearanceHarmonizer:
             self._transition_started_at = captured_at
         elapsed = captured_at - self._transition_started_at
         transition = float(np.clip(elapsed / SESSION_TRANSITION_MS, 0.0, 1.0))
-        output = torch.lerp(composite, harmonized, transition)
-        return cast(
-            "NDArray[np.uint8]",
-            output[0]
-            .clamp(0.0, 1.0)
-            .mul(255.0)
-            .round()
-            .to(torch.uint8)
-            .permute(1, 2, 0)
-            .contiguous()
-            .cpu()
-            .numpy(),
-        )
+        return torch.lerp(composite, harmonized, transition)
+
+    @staticmethod
+    def _validate_frame_tensors(
+        source: torch.Tensor,
+        alpha: torch.Tensor,
+        background: torch.Tensor,
+        *,
+        device: torch.device,
+    ) -> None:
+        expected_alpha = (source.shape[0], 1, *source.shape[-2:])
+        if source.ndim != TENSOR_DIMENSIONS or source.shape[1] != RGB_CHANNELS:
+            msg = "source tensor must be BCHW RGB"
+            raise ValueError(msg)
+        if alpha.shape != expected_alpha:
+            msg = "alpha tensor must be B1HW and match source"
+            raise ValueError(msg)
+        if background.shape != source.shape:
+            msg = "background tensor must match source"
+            raise ValueError(msg)
+        tensors = (source, alpha, background)
+        if any(tensor.device != device or tensor.dtype != torch.float32 for tensor in tensors):
+            msg = "PIH tensors must be FP32 on the model device"
+            raise ValueError(msg)
 
     def _ensure_model(self) -> tuple[nn.Module, torch.device]:
         if self._model is not None and self._device is not None:
@@ -426,6 +550,8 @@ class PihAppearanceHarmonizer:
         if requested not in {"cpu", "cuda", "mps"}:
             msg = f"Unsupported PIH device: {requested}"
             raise RuntimeError(msg)
+        if requested == "cuda":
+            return torch.device("cuda", torch.cuda.current_device())
         return torch.device(requested)
 
     def _prepare_composite(

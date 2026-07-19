@@ -246,6 +246,10 @@ class MainWindow(QMainWindow):
         installed = scene is not None and self._library.assets.is_ready(scene)
         viewpoint = self._library.viewpoints.load(room_id)
         self._adjust_page.set_room(room_id, scene, installed=installed, viewpoint=viewpoint)
+        output_viewpoint = viewpoint or (
+            scene.default_viewpoint if scene is not None else Viewpoint()
+        )
+        self._show_page.set_output_aspect_ratio(output_viewpoint.aspect_ratio)
         if installed and scene is not None:
             live_viewpoint = viewpoint or scene.default_viewpoint
             live_viewpoint = live_viewpoint.model_copy(
@@ -306,6 +310,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _preview_viewpoint(self, viewpoint: object) -> None:
         if isinstance(viewpoint, Viewpoint):
+            self._show_page.set_output_aspect_ratio(viewpoint.aspect_ratio)
             setter = getattr(self._live_preview, "set_viewpoint", None)
             if callable(setter):
                 setter(viewpoint)

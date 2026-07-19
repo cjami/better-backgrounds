@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import threading
-from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -14,13 +13,11 @@ if TYPE_CHECKING:
     from better_backgrounds.desktop.live_preview.surface import NativeCompositeSurface
     from better_backgrounds.matting.engine import CompletedMatte
 
-PRESENTATION_BUFFER_SIZE = 2
-
 
 class CompositionCoordinator(QObject):
     """Prepare mattes off-thread while retaining only the latest pending frame."""
 
-    buffer_ready = Signal()
+    frame_ready = Signal()
     failed = Signal(str)
     _prepared = Signal(int, object)
     _preparation_failed = Signal(int, str)
@@ -30,10 +27,11 @@ class CompositionCoordinator(QObject):
         super().__init__(parent)
         self._surface = surface
         self._pending: CompletedMatte | None = None
-        self._ready: deque[PreparedComposite] = deque(maxlen=PRESENTATION_BUFFER_SIZE)
+        self._ready: PreparedComposite | None = None
         self._inflight = False
         self._revision = 0
         self._presentation_drops = 0
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-compositor")
         self._prepared.connect(self._accept)
         self._preparation_failed.connect(self._reject)
 
@@ -52,45 +50,56 @@ class CompositionCoordinator(QObject):
         self._start(completed)
 
     def take_ready(self) -> PreparedComposite | None:
-        """Return the oldest prepared frame available for presentation."""
-        return self._ready.popleft() if self._ready else None
+        """Return the newest prepared frame available for immediate presentation."""
+        prepared = self._ready
+        self._ready = None
+        return prepared
 
     def reset(self) -> None:
         """Invalidate background work and discard every queued frame."""
         self._pending = None
-        self._ready.clear()
+        self._ready = None
         self._inflight = False
         self._revision += 1
         self._presentation_drops = 0
+
+    def close(self) -> None:
+        """Stop accepting preparation work without blocking Qt shutdown."""
+        self.reset()
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _start(self, completed: CompletedMatte) -> None:
         self._inflight = True
         revision = self._revision
 
-        def compose() -> None:
+        def compose() -> PreparedComposite:
+            return self._surface.prepare_matte(completed)
+
+        future = self._executor.submit(compose)
+
+        def completed_future(result: Future[PreparedComposite]) -> None:
             try:
-                prepared = self._surface.prepare_matte(completed)
+                prepared = result.result()
             except (OSError, RuntimeError, TypeError, ValueError) as error:
                 self._preparation_failed.emit(revision, str(error)[:240])
             else:
                 self._prepared.emit(revision, prepared)
 
-        threading.Thread(target=compose, name="live-compositor", daemon=True).start()
+        future.add_done_callback(completed_future)
 
     @Slot(int, object)
     def _accept(self, revision: int, prepared: object) -> None:
         if revision != self._revision or not isinstance(prepared, PreparedComposite):
             return
         self._inflight = False
-        if len(self._ready) == PRESENTATION_BUFFER_SIZE:
+        if self._ready is not None:
             self._presentation_drops += 1
-        self._ready.append(prepared)
+        self._ready = prepared
         pending = self._pending
         self._pending = None
         if pending is not None:
             self._start(pending)
-        if len(self._ready) == PRESENTATION_BUFFER_SIZE:
-            self.buffer_ready.emit()
+        self.frame_ready.emit()
 
     @Slot(int, str)
     def _reject(self, revision: int, message: str) -> None:

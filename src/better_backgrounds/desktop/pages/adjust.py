@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from better_backgrounds.desktop.pages.common import AspectRatioContainer
 from better_backgrounds.desktop.pages.common import label as _label
 from better_backgrounds.harmonization import HarmonizationSettings
 from better_backgrounds.scene import CropRegion, SceneReference, Viewpoint
@@ -76,7 +77,9 @@ class AdjustPage(QWidget):
         scene_layout.addLayout(overlays)
         self._renderer = renderer_factory()
         self._renderer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        scene_layout.addWidget(self._renderer, 1)
+        self._aspect_preview = AspectRatioContainer(self._renderer)
+        self._aspect_preview.setObjectName("adjustAspectPreview")
+        scene_layout.addWidget(self._aspect_preview, 1)
         renderer_progress = getattr(self._renderer, "scene_progressed", None)
         if renderer_progress is not None:
             renderer_progress.connect(self._set_scene_progress)
@@ -359,6 +362,8 @@ class AdjustPage(QWidget):
         self._viewpoint = self._viewpoint.model_copy(
             update={"aspect_ratio": float(self._aspect.currentData())},
         )
+        self._drafts[self._room_id] = self._viewpoint
+        self._aspect_preview.set_aspect_ratio(self._viewpoint.aspect_ratio)
         setter = getattr(self._renderer, "set_viewpoint", None)
         if callable(setter):
             setter(self._viewpoint)
@@ -398,6 +403,7 @@ class AdjustPage(QWidget):
         self._aspect.blockSignals(True)  # noqa: FBT003
         self._aspect.setCurrentIndex(index)
         self._aspect.blockSignals(False)  # noqa: FBT003
+        self._aspect_preview.set_aspect_ratio(self._viewpoint.aspect_ratio)
         self._sync_depth_controls()
 
     def _sync_depth_controls(self) -> None:

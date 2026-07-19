@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from better_backgrounds.desktop.pages.common import AspectRatioContainer
 from better_backgrounds.desktop.pages.common import label as _label
 
 if TYPE_CHECKING:
@@ -111,7 +112,9 @@ class ShowPage(QWidget):
         self._overlay = overlay
         self._feed_stack.addWidget(overlay)
         self._feed_stack.setCurrentWidget(overlay)
-        feed_layout.addWidget(feed_surface, 1)
+        self._aspect_preview = AspectRatioContainer(feed_surface)
+        self._aspect_preview.setObjectName("showAspectPreview")
+        feed_layout.addWidget(self._aspect_preview, 1)
         self._camera = QPushButton("●  Start virtual camera")
         self._camera.setObjectName("cameraToggle")
         self._camera.setProperty("active", False)  # noqa: FBT003
@@ -263,6 +266,10 @@ class ShowPage(QWidget):
             self._rooms.setItemWidget(item, self._room_card(room))
         self._rooms.blockSignals(False)  # noqa: FBT003
         self.set_room(target or (rooms[0] if rooms else ""))
+
+    def set_output_aspect_ratio(self, aspect_ratio: float) -> None:
+        """Match the visible feed viewport to the selected room output."""
+        self._aspect_preview.set_aspect_ratio(aspect_ratio)
 
     @property
     def current_room(self) -> str:

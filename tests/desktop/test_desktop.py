@@ -2,8 +2,9 @@
 
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
+import pytest
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +26,7 @@ from better_backgrounds.desktop.camera import InputCamera, InputCameraSource
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow
 from better_backgrounds.desktop.pages import AdjustPage
+from better_backgrounds.desktop.pages.common import AspectRatioContainer
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.desktop.webview import navigation_is_allowed
 from better_backgrounds.jobs.build_session import IdleBuild
@@ -35,9 +37,6 @@ from better_backgrounds.scene import (
     Viewpoint,
     load_sample_manifest,
 )
-
-if TYPE_CHECKING:
-    import pytest
 
 TAB_COUNT = 4
 BUILD_TAB = 1
@@ -244,6 +243,27 @@ def test_adjust_enables_depth_of_field_for_every_spatial_scene() -> None:
     page.close()
 
 
+def test_adjust_and_show_follow_the_same_output_aspect() -> None:
+    """Keep room framing identical while moving between adjustment and presentation."""
+    window = MainWindow(command_factory=lambda _job_id, _outcome: [], renderer_factory=ScenePreview)
+    containers = {
+        container.objectName(): container for container in window.findChildren(AspectRatioContainer)
+    }
+
+    assert containers["showAspectPreview"].aspect_ratio == 16 / 9
+    assert containers["adjustAspectPreview"].aspect_ratio == 16 / 9
+    aspects = [
+        combo
+        for combo in window.findChildren(QComboBox)
+        if combo.accessibleName() == "Output aspect ratio"
+    ]
+    assert len(aspects) == 1
+    aspects[0].setCurrentIndex(1)
+    assert containers["showAspectPreview"].aspect_ratio == 4 / 3
+    assert containers["adjustAspectPreview"].aspect_ratio == 4 / 3
+    window.close()
+
+
 def test_show_tab_has_a_clear_camera_toggle() -> None:
     """Expose explicit start and stop actions for local webcam capture."""
     camera_source = InputCameraSource(
@@ -370,6 +390,19 @@ def test_renderer_bridge_rejects_invalid_scene_status() -> None:
     assert not bridge.report_snapshot_ready("sample-room", -1, "background", "cG5n")
     assert not bridge.report_snapshot_ready("sample-room", 3, "depth", "cG5n")
     assert not bridge.report_snapshot_ready("sample-room", 3, "background", "")
+
+
+def test_renderer_bridge_bounds_fixed_output_size() -> None:
+    """Keep output framebuffer requests inside the trusted renderer limit."""
+    bridge = RendererBridge()
+    requested: list[tuple[int, int]] = []
+    bridge.output_size_requested.connect(lambda width, height: requested.append((width, height)))
+
+    bridge.request_output_size(1920, 1080)
+
+    assert requested == [(1920, 1080)]
+    with pytest.raises(ValueError, match="between 1 and 8192"):
+        bridge.request_output_size(0, 1080)
 
 
 def test_live_bridge_validates_camera_state_and_diagnostics() -> None:

@@ -3,8 +3,16 @@
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from better_backgrounds.desktop.camera import InputCameraSelectionStore
-from better_backgrounds.desktop.camera.capture import FrameRateLimiter, camera_format_score
+from better_backgrounds.desktop.camera.capture import (
+    FrameRateLimiter,
+    camera_format_score,
+    capture_profile,
+    fit_frame_to_output,
+    normalize_capture_frame,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,21 +36,94 @@ def test_invalid_input_camera_selection_is_ignored(tmp_path: Path) -> None:
     assert InputCameraSelectionStore(path).load() is None
 
 
-def test_camera_format_prefers_720p_at_the_target_frame_rate() -> None:
-    """Do not select a 60 fps capture mode that overloads the 30 fps pipeline."""
-    target = camera_format_score(1280, 720, 30.0, 30.0)
+def test_camera_format_prefers_native_1080p_at_the_target_frame_rate() -> None:
+    """Prefer native 1080p without paying for unnecessary 4K or 60 fps capture."""
+    target = camera_format_score(1920, 1080, 30.0, 30.0)
 
-    assert target < camera_format_score(1280, 720, 60.0, 60.0)
-    assert target < camera_format_score(1920, 1080, 30.0, 30.0)
+    assert target < camera_format_score(3840, 2160, 30.0, 30.0)
+    assert target < camera_format_score(1920, 1080, 60.0, 60.0)
+    assert target < camera_format_score(1280, 720, 30.0, 30.0)
+
+
+def test_camera_format_keeps_thirty_fps_ahead_of_resolution() -> None:
+    """Fall back to 720p when a higher-resolution mode cannot approach 30 fps."""
+    assert camera_format_score(1280, 720, 30.0, 30.0) < camera_format_score(
+        3840,
+        2160,
+        15.0,
+        15.0,
+    )
+    assert camera_format_score(1280, 720, 30.0, 30.0) < camera_format_score(
+        1920,
+        1080,
+        15.0,
+        15.0,
+    )
+
+
+def test_capture_profile_maps_source_tiers_without_upscaling() -> None:
+    """Map 4K and 1080p to 1080p, retain 720p, and preserve smaller sources."""
+    assert capture_profile(3840, 2160, 30.0, 30.0).processing_width == 1920
+    assert capture_profile(1920, 1080, 30.0, 30.0).processing_height == 1080
+    assert capture_profile(1280, 720, 30.0, 30.0).processing_height == 720
+    smaller = capture_profile(960, 540, 30.0, 30.0)
+    assert (smaller.processing_width, smaller.processing_height) == (960, 540)
+
+
+def test_output_geometry_uses_tier_height_and_requested_aspect() -> None:
+    """Treat 1080p as vertical resolution for every supported output aspect."""
+    profile = capture_profile(3840, 2160, 30.0, 30.0)
+
+    assert (profile.output_geometry(16 / 9).width, profile.output_geometry(16 / 9).height) == (
+        1920,
+        1080,
+    )
+    assert profile.output_geometry(4 / 3).width == 1440
+    assert profile.output_geometry(1.0).width == 1080
+
+
+def test_higher_resolution_capture_is_normalized_once() -> None:
+    """Downsample 4K input to the selected 1080p processing canvas."""
+    profile = capture_profile(3840, 2160, 30.0, 30.0)
+    source = np.zeros((2160, 3840, 3), dtype=np.uint8)
+
+    normalized = normalize_capture_frame(source, profile)
+
+    assert normalized.shape == (1080, 1920, 3)
+
+
+def test_source_and_alpha_are_cropped_together_for_narrower_output() -> None:
+    """Preserve foreground alignment while moving from 16:9 to 4:3."""
+    source = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
+    alpha = np.arange(6 * 8, dtype=np.uint8).reshape(6, 8)
+    geometry = capture_profile(8, 6, 30.0, 30.0).output_geometry(1.0)
+
+    fitted_source, fitted_alpha = fit_frame_to_output(source, alpha, geometry)
+
+    assert fitted_source.shape == (6, 6, 3)
+    assert fitted_alpha.shape == (6, 6)
+    assert np.array_equal(fitted_source[:, :, 0], source[:, 1:7, 0])
+    assert np.array_equal(fitted_alpha, alpha[:, 1:7])
+
+
+def test_narrow_source_is_background_padded_without_stretching() -> None:
+    """Keep a narrow camera's pixels unchanged inside a wider output canvas."""
+    source = np.full((4, 3, 3), 19, dtype=np.uint8)
+    alpha = np.full((4, 3), 255, dtype=np.uint8)
+    geometry = capture_profile(3, 4, 30.0, 30.0).output_geometry(1.5)
+
+    fitted_source, fitted_alpha = fit_frame_to_output(source, alpha, geometry)
+
+    assert fitted_source.shape == (4, 6, 3)
+    assert np.array_equal(fitted_source[:, 1:4], source)
+    assert np.count_nonzero(fitted_alpha[:, :1]) == 0
+
+
+def test_camera_format_prefers_720p_sixty_over_1080p_fifteen() -> None:
+    """Prefer a stable sampled cadence over a visibly slow high-resolution feed."""
     assert camera_format_score(1280, 720, 60.0, 60.0) < camera_format_score(
         1920,
         1080,
-        30.0,
-        30.0,
-    )
-    assert camera_format_score(1920, 1080, 30.0, 30.0) < camera_format_score(
-        1280,
-        720,
         15.0,
         15.0,
     )
@@ -67,3 +148,10 @@ def test_camera_rate_limiter_tolerates_nominal_thirty_fps_jitter() -> None:
     emitted = [timestamp for timestamp in timestamps if limiter.allows(timestamp)]
 
     assert emitted == timestamps
+
+
+def test_capture_profile_preserves_non_widescreen_source_shape() -> None:
+    """Normalize by tier height without stretching a 4:3 camera to 16:9."""
+    profile = capture_profile(1440, 1080, 30.0, 30.0)
+
+    assert (profile.processing_width, profile.processing_height) == (1440, 1080)

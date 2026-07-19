@@ -50,6 +50,9 @@ def test_composition_queue_keeps_latest_pending_frame_and_reset_discards_it() ->
     assert coordinator.presentation_drops == 1
     coordinator._inflight = False  # noqa: SLF001
     coordinator._accept(0, _prepared(first))  # noqa: SLF001
+    ready = coordinator.take_ready()
+    assert ready is not None
+    assert ready.completed is latest
     for _attempt in range(20):
         app.processEvents()
         if surface.calls:
@@ -59,6 +62,24 @@ def test_composition_queue_keeps_latest_pending_frame_and_reset_discards_it() ->
     coordinator.reset()
     assert coordinator.presentation_drops == 0
     assert coordinator.take_ready() is None
+    coordinator.close()
+
+
+def test_composition_queue_replaces_an_unpainted_prepared_frame() -> None:
+    """Expose only the newest completed preparation to the Qt presenter."""
+    surface = RecordingSurface()
+    coordinator = CompositionCoordinator(cast("NativeCompositeSurface", surface))
+    first = cast("CompletedMatte", object())
+    latest = cast("CompletedMatte", object())
+
+    coordinator._accept(0, _prepared(first))  # noqa: SLF001
+    coordinator._accept(0, _prepared(latest))  # noqa: SLF001
+
+    prepared = coordinator.take_ready()
+    assert prepared is not None
+    assert prepared.completed is latest
+    assert coordinator.presentation_drops == 1
+    coordinator.close()
 
 
 def _prepared(completed: CompletedMatte) -> PreparedComposite:

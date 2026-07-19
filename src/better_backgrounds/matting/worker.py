@@ -7,12 +7,20 @@ from dataclasses import dataclass
 from queue import Empty
 from typing import TYPE_CHECKING
 
+import cv2
+import numpy as np
+import torch
+from torch.nn import functional
+
 from better_backgrounds.matting.contracts import (
     INTERNAL_SIZES,
     FramePacket,
+    LivePipelineConfig,
     MatteResult,
     MattingCapabilities,
     MattingConfig,
+    ProcessedResult,
+    StageTimings,
     calibration_p95_latency,
     choose_internal_size,
 )
@@ -23,6 +31,12 @@ if TYPE_CHECKING:
     from multiprocessing.queues import Queue
     from pathlib import Path
 
+    from better_backgrounds.harmonization import HarmonizationSettings
+
+RGB_DIMENSIONS = 3
+RGB_CHANNELS = 3
+ALPHA_MIDPOINT = 128
+
 
 @dataclass(frozen=True, slots=True)
 class WorkerReady:
@@ -31,6 +45,8 @@ class WorkerReady:
     capabilities: MattingCapabilities
     initialization_ms: float
     selected_internal_size: int
+    fused: bool = False
+    real_time_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,21 +62,66 @@ class StopWorker:
     """Request orderly model and shared-memory teardown."""
 
 
-WorkerCommand = FramePacket | StopWorker
-WorkerEvent = WorkerReady | MatteResult | WorkerFailure
+@dataclass(frozen=True, slots=True)
+class SetLiveBackground:
+    """Replace immutable output-sized room tensors between frame commands."""
+
+    background: np.ndarray | None
+    reference: np.ndarray | None
+    revision: int
 
 
-def matting_worker_main(
+@dataclass(frozen=True, slots=True)
+class ConfigurePresentation:
+    """Update cheap session presentation choices without reseeding."""
+
+    mirrored: bool
+    retain_standard: bool
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigureHarmonization:
+    """Apply room-scoped appearance settings inside the persistent worker."""
+
+    settings: HarmonizationSettings
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigureGeometry:
+    """Change output aspect and dimensions without resetting temporal memory."""
+
+    width: int
+    height: int
+    aspect_ratio: float
+    revision: int
+
+
+WorkerCommand = (
+    FramePacket
+    | StopWorker
+    | SetLiveBackground
+    | ConfigurePresentation
+    | ConfigureHarmonization
+    | ConfigureGeometry
+)
+WorkerEvent = WorkerReady | MatteResult | ProcessedResult | WorkerFailure
+
+
+def matting_worker_main(  # noqa: PLR0912
     descriptor: FrameRingDescriptor,
     checkpoint: Path,
     config: MattingConfig,
     seed_packet: FramePacket,
     commands: Queue,
     events: Queue,
+    pipeline_config: LivePipelineConfig | None = None,
 ) -> None:
     """Load MatAnyone 2 once, then process sequential exact-frame commands."""
     ring = SharedFrameRing.attach(descriptor)
     runtime = None
+    cuda_engine = None
+    tensor_stabilizer = None
     try:
         from better_backgrounds.matting.runtime import MatAnyoneRuntime  # noqa: PLC0415
 
@@ -103,11 +164,45 @@ def matting_worker_main(
         seed_alpha = runtime.initialize(seed_frame, seed_mask)
         ring.write_alpha(seed_packet.shared_slot, seed_alpha)
         stabilizer = TemporalAlphaStabilizer()
+        fused = bool(
+            pipeline_config is not None
+            and pipeline_config.prefer_cuda
+            and runtime.capabilities.device_type == "cuda"
+        )
+        real_time_error = None
+        harmonizer = None
+        if fused:
+            try:
+                from better_backgrounds.harmonization.pih import (  # noqa: PLC0415
+                    create_appearance_harmonizer,
+                )
+                from better_backgrounds.matting.accelerated import (  # noqa: PLC0415
+                    CudaCompositionOptions,
+                    CudaLiveEngine,
+                    TensorAlphaStabilizer,
+                )
+
+                cuda_engine = CudaLiveEngine()
+                tensor_stabilizer = TensorAlphaStabilizer()
+                harmonizer = create_appearance_harmonizer()
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
+                fused = False
+                real_time_error = _safe_message(error)
+        elif pipeline_config is not None:
+            real_time_error = "real-time 1080p support requires Windows CUDA"
+        background = None
+        reference = None
+        background_revision = 0
+        mirrored = True if pipeline_config is None else pipeline_config.mirrored
+        retain_standard = False if pipeline_config is None else pipeline_config.retain_standard
+        pipeline_revision = 0 if pipeline_config is None else pipeline_config.revision
         events.put(
             WorkerReady(
                 capabilities=runtime.capabilities,
                 initialization_ms=(time.perf_counter() - started) * 1000.0,
                 selected_internal_size=selected_size,
+                fused=fused,
+                real_time_error=real_time_error,
             ),
         )
         while True:
@@ -117,12 +212,144 @@ def matting_worker_main(
                 continue
             if isinstance(command, StopWorker):
                 return
+            if isinstance(command, SetLiveBackground):
+                background = command.background
+                reference = command.reference
+                background_revision = command.revision
+                if cuda_engine is not None:
+                    cuda_engine.clear_backgrounds()
+                if harmonizer is not None:
+                    if reference is None:
+                        harmonizer.clear_room()
+                    else:
+                        harmonizer.set_room(reference, revision=command.revision)
+                continue
+            if isinstance(command, ConfigurePresentation):
+                mirrored = command.mirrored
+                retain_standard = command.retain_standard
+                pipeline_revision = command.revision
+                continue
+            if isinstance(command, ConfigureHarmonization):
+                if harmonizer is not None:
+                    harmonizer.configure(command.settings)
+                    if command.settings.active:
+                        harmonizer.prepare()
+                    if cuda_engine is not None:
+                        fused = cuda_engine.supports(harmonizer)
+                continue
+            if isinstance(command, ConfigureGeometry):
+                if pipeline_config is not None:
+                    pipeline_config = pipeline_config.model_copy(
+                        update={
+                            "output_width": command.width,
+                            "output_height": command.height,
+                            "aspect_ratio": command.aspect_ratio,
+                            "revision": command.revision,
+                        },
+                    )
+                    pipeline_revision = command.revision
+                    if cuda_engine is not None:
+                        cuda_engine.clear_backgrounds()
+                continue
             if not isinstance(command, FramePacket):
                 events.put(WorkerFailure(message="Unknown matting worker command"))
                 continue
             inference_started = time.perf_counter()
             try:
-                alpha = runtime.step(ring.read_frame(command.shared_slot))
+                source_frame = ring.read_frame(command.shared_slot)
+                if (
+                    fused
+                    and cuda_engine is not None
+                    and tensor_stabilizer is not None
+                    and pipeline_config is not None
+                ):
+                    source_tensor = cuda_engine.upload_frame(source_frame)
+                    alpha_tensor = runtime.step_uploaded(source_tensor)
+                    alpha_tensor = tensor_stabilizer.apply(
+                        alpha_tensor.unsqueeze(0).unsqueeze(0),
+                        captured_at=command.captured_at,
+                    )
+                    runtime.synchronize()
+                    matting_ms = (time.perf_counter() - inference_started) * 1_000.0
+                    normalization_started = time.perf_counter()
+                    fitted_source, fitted_alpha = _fit_output_tensors(
+                        source_tensor,
+                        alpha_tensor,
+                        pipeline_config,
+                        mirrored=mirrored,
+                    )
+                    room = _fit_background(background, pipeline_config)
+                    room_reference = (
+                        room if reference is None else _fit_background(reference, pipeline_config)
+                    )
+                    normalization_ms = (time.perf_counter() - normalization_started) * 1_000.0
+                    accelerated = cuda_engine.compose_uploaded(
+                        fitted_source,
+                        fitted_alpha,
+                        room,
+                        CudaCompositionOptions(
+                            captured_at=command.captured_at,
+                            harmonizer=harmonizer,
+                            reference_background=room_reference,
+                            retain_standard=retain_standard,
+                        ),
+                    )
+                    ring.write_output(command.shared_slot, accelerated.image)
+                    ring.write_output(
+                        command.shared_slot,
+                        accelerated.standard_image,
+                        standard=True,
+                    )
+                    diagnostic_started = time.perf_counter()
+                    preview_width = min(160, pipeline_config.output_width)
+                    preview_height = max(
+                        1,
+                        round(preview_width / pipeline_config.aspect_ratio),
+                    )
+                    mask_preview = (
+                        functional.interpolate(
+                            fitted_alpha.to(torch.float32),
+                            (preview_height, preview_width),
+                            mode="area",
+                        )[0, 0]
+                        .round()
+                        .to(torch.uint8)
+                        .cpu()
+                        .numpy()
+                    )
+                    occupancy = float(
+                        (fitted_alpha >= ALPHA_MIDPOINT).to(torch.float32).mean().item(),
+                    )
+                    diagnostic_readback_ms = (time.perf_counter() - diagnostic_started) * 1_000.0
+                    events.put(
+                        ProcessedResult(
+                            frame_id=command.frame_id,
+                            captured_at=command.captured_at,
+                            alpha_slot=command.shared_slot,
+                            output_width=pipeline_config.output_width,
+                            output_height=pipeline_config.output_height,
+                            background_revision=background_revision,
+                            occupancy=occupancy,
+                            mask_preview=mask_preview,
+                            timings=StageTimings(
+                                normalization_ms=normalization_ms,
+                                queue_ms=max(
+                                    0.0,
+                                    inference_started * 1_000.0 - command.captured_at,
+                                ),
+                                matting_ms=matting_ms,
+                                post_processing_ms=accelerated.post_processing_ms,
+                                readback_ms=(accelerated.readback_ms + diagnostic_readback_ms),
+                            ),
+                            standard_retained=retain_standard,
+                            pipeline_revision=pipeline_revision,
+                            harmonized=accelerated.harmonized,
+                            harmonization_ms=accelerated.harmonization_ms,
+                            harmonization_degraded=accelerated.harmonization_degraded,
+                        ),
+                    )
+                    continue
+                alpha = runtime.step(source_frame)
                 runtime.synchronize()
                 alpha = stabilizer.apply(alpha, captured_at=command.captured_at)
                 ring.write_alpha(command.shared_slot, alpha)
@@ -134,12 +361,13 @@ def matting_worker_main(
                     ),
                 )
                 return
+            matting_ms = (time.perf_counter() - inference_started) * 1000.0
             events.put(
                 MatteResult(
                     frame_id=command.frame_id,
                     captured_at=command.captured_at,
                     alpha_slot=command.shared_slot,
-                    inference_ms=(time.perf_counter() - inference_started) * 1000.0,
+                    inference_ms=matting_ms,
                 ),
             )
     except Exception as error:  # noqa: BLE001
@@ -148,6 +376,84 @@ def matting_worker_main(
         if runtime is not None:
             runtime.close()
         ring.close()
+
+
+def _fit_output_tensors(
+    source: torch.Tensor,
+    alpha: torch.Tensor,
+    config: LivePipelineConfig,
+    *,
+    mirrored: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if mirrored:
+        source = torch.flip(source, dims=(3,))
+        alpha = torch.flip(alpha, dims=(3,))
+    target_width = config.output_width
+    target_height = config.output_height
+    if source.shape[2] != target_height:
+        resized_width = round(source.shape[3] * target_height / source.shape[2])
+        source = (
+            functional.interpolate(
+                source.to(torch.float32),
+                (target_height, resized_width),
+                mode="area",
+            )
+            .round()
+            .to(torch.uint8)
+        )
+        alpha = (
+            functional.interpolate(
+                alpha.to(torch.float32),
+                (target_height, resized_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            .round()
+            .to(torch.uint8)
+        )
+    if source.shape[3] >= target_width:
+        left = (source.shape[3] - target_width) // 2
+        return (
+            source[:, :, :, left : left + target_width],
+            alpha[:, :, :, left : left + target_width],
+        )
+    left = (target_width - source.shape[3]) // 2
+    fitted_source = torch.zeros(
+        (1, 3, target_height, target_width),
+        dtype=torch.uint8,
+        device=source.device,
+    )
+    fitted_alpha = torch.zeros(
+        (1, 1, target_height, target_width),
+        dtype=torch.uint8,
+        device=alpha.device,
+    )
+    fitted_source[:, :, :, left : left + source.shape[3]] = source
+    fitted_alpha[:, :, :, left : left + source.shape[3]] = alpha
+    return fitted_source, fitted_alpha
+
+
+def _fit_background(
+    background: np.ndarray | None,
+    config: LivePipelineConfig,
+) -> np.ndarray:
+    shape = (config.output_height, config.output_width, 3)
+    if background is None:
+        return np.zeros(shape, dtype=np.uint8)
+    if (
+        background.dtype != np.uint8
+        or background.ndim != RGB_DIMENSIONS
+        or background.shape[2] != RGB_CHANNELS
+    ):
+        msg = "worker background must be uint8 RGB"
+        raise ValueError(msg)
+    if background.shape != shape:
+        return cv2.resize(
+            background,
+            (config.output_width, config.output_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    return background
 
 
 def _safe_message(error: Exception) -> str:

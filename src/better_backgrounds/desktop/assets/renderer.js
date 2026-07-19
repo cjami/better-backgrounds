@@ -66280,6 +66280,9 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	  }
 
 	  connectBridge() {
+	    this.bridge.output_size_requested.connect((width, height) => {
+	      this.setOutputSize(width, height);
+	    });
 	    this.bridge.scene_requested.connect((assetId, url, payload) => {
 	      this.loadScene(assetId, url, payload);
 	    });
@@ -66293,6 +66296,19 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	      this.setLoading(false, 'No spatial scene selected');
 	      this.requestSceneFrame();
 	    });
+	  }
+
+	  setOutputSize(width, height) {
+	    if (!this.cacheSceneFrames || !this.app) return;
+	    if (!Number.isInteger(width) || !Number.isInteger(height)) return;
+	    if (width < 1 || height < 1 || width > 8192 || height > 8192) return;
+	    const canvas = this.app.graphicsDevice.canvas;
+	    if (canvas.width === width && canvas.height === height) return;
+	    this.app.setCanvasResolution(RESOLUTION_FIXED, width, height);
+	    this.snapshotRevision += 1;
+	    this.refreshViewDepthProxy(true);
+	    if (this.sceneEntity) this.queueSnapshotRefresh(true);
+	    else this.requestSceneFrame();
 	  }
 
 	  loadScene(assetId, url, payload) {

@@ -18,11 +18,13 @@ from better_backgrounds.matting.contracts import MattingCapabilities, MattingCon
 if TYPE_CHECKING:
     from types import ModuleType
 
+    import torch
     from numpy.typing import NDArray
 
 MATANYONE2_REVISION = "d3bb5a1ebedf259a5453c6d168e6840fff85581e"
 RGB_DIMENSIONS = 3
 RGB_CHANNELS = 3
+TENSOR_DIMENSIONS = 4
 DeviceRequest = Literal["auto", "cuda", "mps", "cpu"]
 DeviceType = Literal["cuda", "mps", "cpu"]
 
@@ -202,6 +204,65 @@ class MatAnyoneRuntime:
             output = self._core.step(self._image_tensor(frame))
         return self._alpha_array(output, output_size=original_size)
 
+    def initialize_tensor(
+        self,
+        frame: NDArray[np.uint8],
+        mask: NDArray[np.uint8],
+    ) -> torch.Tensor:
+        """Seed temporal memory and return a full-resolution device alpha tensor."""
+        if mask.dtype != np.uint8 or mask.shape != frame.shape[:2]:
+            msg = "seed mask must match the RGB frame"
+            raise ValueError(msg)
+        output_size = (frame.shape[0], frame.shape[1])
+        resized_frame, resized_mask = self._resize_for_inference(frame, mask)
+        if resized_mask is None:
+            msg = "seed mask was lost while preparing inference"
+            raise RuntimeError(msg)
+        image = self._image_tensor(resized_frame)
+        seed = self._torch.from_numpy(np.ascontiguousarray(resized_mask)).float().to(self.device)
+        with self._torch.inference_mode():
+            output = self._core.step(image, seed, objects=[1])
+            for _index in range(self.config.warmup_iterations):
+                output = self._core.step(image, first_frame_pred=True)
+        return self._alpha_tensor(output, output_size=output_size)
+
+    def step_tensor(self, frame: NDArray[np.uint8]) -> torch.Tensor:
+        """Return full-resolution uint8 alpha on the execution device."""
+        output_size = (frame.shape[0], frame.shape[1])
+        inference_frame, _mask = self._resize_for_inference(frame)
+        with self._torch.inference_mode():
+            output = self._core.step(self._image_tensor(inference_frame))
+        return self._alpha_tensor(output, output_size=output_size)
+
+    def step_uploaded(self, source: torch.Tensor) -> torch.Tensor:
+        """Run one live step from an already-uploaded full-resolution RGB tensor."""
+        if (
+            source.device.type != self.device
+            or source.dtype != self._torch.uint8
+            or source.ndim != TENSOR_DIMENSIONS
+            or source.shape[0] != 1
+            or source.shape[1] != RGB_CHANNELS
+        ):
+            msg = "uploaded MatAnyone source must be BCHW RGB uint8 on the runtime device"
+            raise ValueError(msg)
+        output_size = (int(source.shape[-2]), int(source.shape[-1]))
+        image = source.to(dtype=self._torch.float32).div_(255.0)
+        shortest = min(output_size)
+        if shortest > self.config.internal_size:
+            scale = self.config.internal_size / shortest
+            inference_size = (
+                round(output_size[0] * scale),
+                round(output_size[1] * scale),
+            )
+            image = self._torch.nn.functional.interpolate(
+                image,
+                inference_size,
+                mode="area",
+            )
+        with self._torch.inference_mode():
+            output = self._core.step(image[0])
+        return self._alpha_tensor(output, output_size=output_size)
+
     def synchronize(self) -> None:
         """Wait for asynchronous accelerator work before recording latency."""
         if self.device == "cuda":
@@ -279,3 +340,20 @@ class MatAnyoneRuntime:
                 cv2.resize(array, output_size, interpolation=cv2.INTER_LINEAR),
             )
         return array
+
+    def _alpha_tensor(
+        self,
+        output: object,
+        *,
+        output_size: tuple[int, int],
+    ) -> torch.Tensor:
+        matte = self._core.output_prob_to_mask(output)
+        alpha = matte.detach().float().clamp(0.0, 1.0)
+        if tuple(alpha.shape[-2:]) != output_size:
+            alpha = self._torch.nn.functional.interpolate(
+                alpha.reshape(1, 1, *alpha.shape[-2:]),
+                output_size,
+                mode="bilinear",
+                align_corners=False,
+            )[0, 0]
+        return alpha.mul(255.0).round().to(self._torch.uint8)

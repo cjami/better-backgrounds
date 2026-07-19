@@ -1,4 +1,4 @@
-"""Fixed shared-memory ring for RGB webcam frames and alpha mattes."""
+"""Fixed shared-memory ring for source, matte, and processed live frames."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 from better_backgrounds.matting.contracts import RING_SLOTS
 
+RGB_DIMENSIONS = 3
+RGB_CHANNELS = 3
+
 
 @dataclass(frozen=True, slots=True)
 class FrameRingDescriptor:
@@ -21,8 +24,12 @@ class FrameRingDescriptor:
 
     frame_name: str
     alpha_name: str
+    primary_name: str
+    standard_name: str
     width: int
     height: int
+    output_width: int
+    output_height: int
     slots: int = RING_SLOTS
 
 
@@ -34,11 +41,15 @@ class SharedFrameRing:
         descriptor: FrameRingDescriptor,
         frame_memory: SharedMemory,
         alpha_memory: SharedMemory,
+        primary_memory: SharedMemory,
+        standard_memory: SharedMemory,
     ) -> None:
         """Create typed views over two already-open shared-memory blocks."""
         self.descriptor = descriptor
         self._frame_memory = frame_memory
         self._alpha_memory = alpha_memory
+        self._primary_memory = primary_memory
+        self._standard_memory = standard_memory
         self._frames = np.ndarray(
             (descriptor.slots, descriptor.height, descriptor.width, 3),
             dtype=np.uint8,
@@ -49,29 +60,70 @@ class SharedFrameRing:
             dtype=np.uint8,
             buffer=alpha_memory.buf,
         )
+        output_shape = (
+            descriptor.slots,
+            descriptor.output_height,
+            descriptor.output_width,
+            3,
+        )
+        self._primary = np.ndarray(output_shape, dtype=np.uint8, buffer=primary_memory.buf)
+        self._standard = np.ndarray(output_shape, dtype=np.uint8, buffer=standard_memory.buf)
 
     @classmethod
-    def create(cls, *, width: int, height: int) -> SharedFrameRing:
+    def create(
+        cls,
+        *,
+        width: int,
+        height: int,
+        output_width: int | None = None,
+        output_height: int | None = None,
+    ) -> SharedFrameRing:
         """Allocate the three-slot ring in the owning process."""
         if width <= 0 or height <= 0:
             msg = "shared frame dimensions must be positive"
             raise ValueError(msg)
-        frame_memory = SharedMemory(create=True, size=RING_SLOTS * width * height * 3)
+        output_width = width if output_width is None else output_width
+        output_height = height if output_height is None else output_height
+        if output_width <= 0 or output_height <= 0:
+            msg = "shared output dimensions must be positive"
+            raise ValueError(msg)
+        memories: list[SharedMemory] = []
         try:
+            frame_memory = SharedMemory(create=True, size=RING_SLOTS * width * height * 3)
+            memories.append(frame_memory)
             alpha_memory = SharedMemory(create=True, size=RING_SLOTS * width * height)
+            memories.append(alpha_memory)
+            output_bytes = RING_SLOTS * output_width * output_height * 3
+            primary_memory = SharedMemory(create=True, size=output_bytes)
+            memories.append(primary_memory)
+            standard_memory = SharedMemory(create=True, size=output_bytes)
+            memories.append(standard_memory)
         except BaseException:
-            frame_memory.close()
-            frame_memory.unlink()
+            for memory in memories:
+                memory.close()
+                memory.unlink()
             raise
         descriptor = FrameRingDescriptor(
             frame_name=frame_memory.name,
             alpha_name=alpha_memory.name,
+            primary_name=primary_memory.name,
+            standard_name=standard_memory.name,
             width=width,
             height=height,
+            output_width=output_width,
+            output_height=output_height,
         )
-        ring = cls(descriptor, frame_memory, alpha_memory)
+        ring = cls(
+            descriptor,
+            frame_memory,
+            alpha_memory,
+            primary_memory,
+            standard_memory,
+        )
         ring._frames.fill(0)
         ring._alphas.fill(0)
+        ring._primary.fill(0)
+        ring._standard.fill(0)
         return ring
 
     @classmethod
@@ -83,7 +135,23 @@ class SharedFrameRing:
         except BaseException:
             frame_memory.close()
             raise
-        return cls(descriptor, frame_memory, alpha_memory)
+        attached = [frame_memory, alpha_memory]
+        try:
+            primary_memory = SharedMemory(name=descriptor.primary_name, track=False)
+            attached.append(primary_memory)
+            standard_memory = SharedMemory(name=descriptor.standard_name, track=False)
+            attached.append(standard_memory)
+        except BaseException:
+            for memory in attached:
+                memory.close()
+            raise
+        return cls(
+            descriptor,
+            frame_memory,
+            alpha_memory,
+            primary_memory,
+            standard_memory,
+        )
 
     def write_frame(self, slot: int, frame: NDArray[np.uint8]) -> None:
         """Copy one contiguous RGB frame into its owned slot."""
@@ -109,14 +177,65 @@ class SharedFrameRing:
         """Copy alpha pixels so the slot can immediately be recycled."""
         return self._alphas[self._validate_slot(slot)].copy()
 
+    def write_output(
+        self,
+        slot: int,
+        pixels: NDArray[np.uint8],
+        *,
+        standard: bool = False,
+    ) -> None:
+        """Write primary or Compare baseline pixels into the matching frame slot."""
+        maximum = (self.descriptor.output_height, self.descriptor.output_width)
+        if (
+            pixels.dtype != np.uint8
+            or pixels.ndim != RGB_DIMENSIONS
+            or pixels.shape[2] != RGB_CHANNELS
+            or pixels.shape[0] > maximum[0]
+            or pixels.shape[1] > maximum[1]
+        ):
+            msg = f"output must fit inside {maximum} uint8 RGB"
+            raise ValueError(msg)
+        outputs = self._standard if standard else self._primary
+        output = outputs[self._validate_slot(slot)]
+        output[: pixels.shape[0], : pixels.shape[1]] = pixels
+
+    def read_output(
+        self,
+        slot: int,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        standard: bool = False,
+    ) -> NDArray[np.uint8]:
+        """Copy one completed primary or Compare output before slot release."""
+        outputs = self._standard if standard else self._primary
+        width = self.descriptor.output_width if width is None else width
+        height = self.descriptor.output_height if height is None else height
+        if (
+            not 0 < width <= self.descriptor.output_width
+            or not 0 < height <= self.descriptor.output_height
+        ):
+            msg = "output read dimensions must fit inside the shared frame ring"
+            raise ValueError(msg)
+        return outputs[self._validate_slot(slot), :height, :width].copy()
+
     def close(self, *, unlink: bool = False) -> None:
         """Close views and optionally remove blocks owned by this process."""
         self._frames = np.empty((0, 0, 0, 3), dtype=np.uint8)
         self._alphas = np.empty((0, 0, 0), dtype=np.uint8)
+        self._primary = np.empty((0, 0, 0, 3), dtype=np.uint8)
+        self._standard = np.empty((0, 0, 0, 3), dtype=np.uint8)
         self._frame_memory.close()
         self._alpha_memory.close()
+        self._primary_memory.close()
+        self._standard_memory.close()
         if unlink:
-            for memory in (self._frame_memory, self._alpha_memory):
+            for memory in (
+                self._frame_memory,
+                self._alpha_memory,
+                self._primary_memory,
+                self._standard_memory,
+            ):
                 with suppress(FileNotFoundError):
                     memory.unlink()
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
+import torch
 
+from better_backgrounds.matting.accelerated import TensorAlphaStabilizer
 from better_backgrounds.matting.refinement import (
     TemporalAlphaStabilizer,
     decontaminate_foreground,
@@ -34,6 +36,27 @@ def test_temporal_stabilizer_releases_after_a_frame_stall() -> None:
     current = np.array([[120]], dtype=np.uint8)
 
     assert np.array_equal(stabilizer.apply(current, captured_at=200.0), current)
+
+
+def test_tensor_temporal_stabilizer_matches_the_reference_policy() -> None:
+    """Keep CUDA temporal output within uint8 rounding of the NumPy path."""
+    reference = TemporalAlphaStabilizer()
+    accelerated = TensorAlphaStabilizer()
+    frames = (
+        np.array([[0, 100, 255], [12, 180, 245]], dtype=np.uint8),
+        np.array([[0, 120, 255], [15, 160, 245]], dtype=np.uint8),
+        np.array([[0, 220, 255], [9, 150, 245]], dtype=np.uint8),
+    )
+
+    for index, frame in enumerate(frames):
+        captured_at = index * 1_000.0 / 30.0
+        expected = reference.apply(frame, captured_at=captured_at)
+        actual = accelerated.apply(
+            torch.from_numpy(frame).reshape(1, 1, *frame.shape),
+            captured_at=captured_at,
+        )[0, 0].numpy()
+
+        assert np.abs(actual.astype(np.int16) - expected.astype(np.int16)).max() <= 1
 
 
 def test_edge_decontamination_removes_a_bright_original_background() -> None:

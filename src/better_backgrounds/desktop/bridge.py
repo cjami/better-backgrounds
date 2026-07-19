@@ -10,6 +10,7 @@ from better_backgrounds.scene import Viewpoint
 ViewpointMessage = Viewpoint
 MAX_CAMERA_STATUS_LENGTH = 300
 MAX_SNAPSHOT_BASE64_LENGTH = 16 * 1024 * 1024
+MAX_RENDERER_OUTPUT_SIZE = 8_192
 
 
 class SceneErrorMessage(BaseModel):
@@ -34,6 +35,7 @@ class RendererBridge(QObject):
     viewpoint_requested = Signal(str)
     reset_requested = Signal()
     scene_cleared = Signal()
+    output_size_requested = Signal(int, int)
 
     @Slot()
     def renderer_ready(self) -> None:
@@ -114,6 +116,16 @@ class RendererBridge(QObject):
     def request_scene_clear(self) -> None:
         """Ask the renderer to remove an unavailable or deselected scene."""
         self.scene_cleared.emit()
+
+    def request_output_size(self, width: int, height: int) -> None:
+        """Set a bounded fixed renderer framebuffer for native snapshots."""
+        if (
+            not 1 <= width <= MAX_RENDERER_OUTPUT_SIZE
+            or not 1 <= height <= MAX_RENDERER_OUTPUT_SIZE
+        ):
+            msg = "renderer output dimensions must be between 1 and 8192 pixels"
+            raise ValueError(msg)
+        self.output_size_requested.emit(width, height)
 
 
 class CameraDeviceMessage(BaseModel):

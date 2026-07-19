@@ -331,3 +331,14 @@ def test_pih_applies_a_soft_matte_once(tmp_path: Path) -> None:
         expected[0].clamp(0.0, 1.0).mul(255.0).round().to(torch.uint8).permute(1, 2, 0).numpy()
     )
     assert np.array_equal(result.image, expected_image)
+
+
+def test_pih_binds_the_resolved_current_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept fused tensors on cuda:0 instead of treating cuda as a different device."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    harmonizer = PihAppearanceHarmonizer(preferred_device="cuda")
+
+    assert harmonizer._select_device() == torch.device("cuda:0")  # noqa: SLF001

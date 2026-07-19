@@ -184,10 +184,13 @@ class SecureRendererView(QWebEngineView):
         self.setAccessibleName("Secure spatial scene renderer")
         self._scene: SceneReference | None = None
         self._viewpoint = Viewpoint()
+        self._output_size: tuple[int, int] | None = None
         self._load_placeholder()
 
     def _renderer_became_ready(self) -> None:
         self._renderer_ready = True
+        if self._output_size is not None:
+            self._bridge.request_output_size(*self._output_size)
         self._send_pending_scene()
 
     def _load_placeholder(self) -> None:
@@ -225,6 +228,14 @@ class SecureRendererView(QWebEngineView):
     def reset_viewpoint(self) -> None:
         """Ask the active scene to restore its safe default preset."""
         self._bridge.request_reset()
+
+    def set_output_size(self, width: int, height: int) -> None:
+        """Render snapshot frames at output resolution, independent of widget size."""
+        if not self._snapshot:
+            return
+        self._output_size = (width, height)
+        if self._renderer_ready:
+            self._bridge.request_output_size(width, height)
 
     def _send_pending_scene(self) -> None:
         if not self._renderer_ready:
