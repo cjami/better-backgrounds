@@ -18,11 +18,20 @@ from better_backgrounds.matting.refinement import (
     BOUNDARY_ALPHA_MAXIMUM,
     BOUNDARY_ALPHA_MINIMUM,
     DECONTAMINATION_STRENGTH,
+    LIGHT_WRAP_STRENGTH,
     MAXIMUM_STABILIZATION_GAP_MS,
     MAXIMUM_STABILIZED_DELTA,
     MINIMUM_RECOVERY_ALPHA,
+    SRGB_DECODE_DIVISOR,
+    SRGB_DECODE_THRESHOLD,
+    SRGB_ENCODE_MULTIPLIER,
+    SRGB_ENCODE_THRESHOLD,
+    SRGB_GAMMA,
+    SRGB_OFFSET,
+    SRGB_SCALE,
     TARGET_FRAME_INTERVAL_MS,
     TEMPORAL_RETENTION,
+    light_wrap_radius,
 )
 
 if TYPE_CHECKING:
@@ -125,7 +134,7 @@ class CudaLiveEngine:
         self._device = torch.device("cuda", torch.cuda.current_device())
         self._backgrounds: dict[
             tuple[int, tuple[int, ...]],
-            tuple[NDArray[np.uint8], torch.Tensor, torch.Tensor],
+            tuple[NDArray[np.uint8], torch.Tensor, torch.Tensor, torch.Tensor],
         ] = {}
 
     @staticmethod
@@ -179,12 +188,16 @@ class CudaLiveEngine:
             raise ValueError(msg)
         torch.cuda.synchronize(self._device)
         started = time.perf_counter()
-        background_u8, background_float = self._background_tensor(background)
+        background_float, background_linear, wrapped_light = self._background_tensor(background)
         source_float = source_u8.to(torch.float32).div_(255.0)
         alpha_float = alpha_u8.to(torch.float32).div_(255.0)
         foreground_float = self._decontaminate(source_float, alpha_float)
-        foreground_u8 = foreground_float.mul(255.0).round().to(torch.uint8)
-        standard = self._standard_composite(foreground_u8, alpha_u8, background_u8)
+        standard = self._standard_composite(
+            foreground_float,
+            alpha_float,
+            background_linear,
+            wrapped_light,
+        )
         primary = standard
         harmonizer = options.harmonizer
         harmonized = harmonizer is not None and harmonizer.active
@@ -194,7 +207,7 @@ class CudaLiveEngine:
             reference_float = (
                 background_float
                 if options.reference_background is None
-                else self._background_tensor(options.reference_background)[1]
+                else self._background_tensor(options.reference_background)[0]
             )
             result = harmonizer.apply_tensors(
                 foreground_float,
@@ -207,7 +220,12 @@ class CudaLiveEngine:
             degraded = result.degraded_components
             harmonized = result.applied
             if result.image is not None:
-                primary = result.image.clamp(0.0, 1.0).mul(255.0).round().to(torch.uint8)
+                primary = (
+                    self._add_light_wrap(result.image, alpha_float, wrapped_light)
+                    .mul(255.0)
+                    .round()
+                    .to(torch.uint8)
+                )
         torch.cuda.synchronize(self._device)
         post_processing_ms = (time.perf_counter() - started) * 1_000.0
         readback_started = time.perf_counter()
@@ -235,20 +253,21 @@ class CudaLiveEngine:
     def _background_tensor(
         self,
         image: NDArray[np.uint8],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         key = (id(image), image.shape)
         cached = self._backgrounds.get(key)
         if cached is not None and cached[0] is image:
-            return cached[1], cached[2]
+            return cached[1], cached[2], cached[3]
         if cached is not None:
             self._backgrounds.pop(key)
-        uint8 = self._rgb_tensor(image)
-        floating = uint8.to(torch.float32).div_(255.0)
+        floating = self._rgb_tensor(image).to(torch.float32).div_(255.0)
+        linear = self._decode_srgb(floating)
+        wrapped_light = self._blur_background(linear)
         while len(self._backgrounds) >= BACKGROUND_CACHE_LIMIT:
             oldest = next(iter(self._backgrounds))
             self._backgrounds.pop(oldest)
-        self._backgrounds[key] = (image, uint8, floating)
-        return uint8, floating
+        self._backgrounds[key] = (image, floating, linear, wrapped_light)
+        return floating, linear, wrapped_light
 
     def _rgb_tensor(self, image: NDArray[np.uint8]) -> torch.Tensor:
         if (
@@ -280,7 +299,8 @@ class CudaLiveEngine:
             max(1, round(height * BACKGROUND_ESTIMATE_SCALE)),
             max(1, round(width * BACKGROUND_ESTIMATE_SCALE)),
         )
-        small_source = functional.interpolate(source, estimate_size, mode="area")
+        linear_source = CudaLiveEngine._decode_srgb(source)
+        small_source = functional.interpolate(linear_source, estimate_size, mode="area")
         small_alpha = functional.interpolate(alpha, estimate_size, mode="area")
         weight = (1.0 - small_alpha).pow(4.0)
         kernel_height, kernel_width = BACKGROUND_ESTIMATE_KERNEL
@@ -291,44 +311,97 @@ class CudaLiveEngine:
             kernel_height // 2,
         )
         numerator = functional.avg_pool2d(
-            functional.pad(small_source * weight, padding, mode="reflect"),
+            functional.pad(small_source * weight, padding, mode="replicate"),
             BACKGROUND_ESTIMATE_KERNEL,
             stride=1,
             divisor_override=1,
         )
         denominator = functional.avg_pool2d(
-            functional.pad(weight, padding, mode="reflect"),
+            functional.pad(weight, padding, mode="replicate"),
             BACKGROUND_ESTIMATE_KERNEL,
             stride=1,
             divisor_override=1,
         )
         estimate = (numerator / denominator.clamp_min(1e-4)).clamp(0.0, 1.0)
-        estimate = estimate.mul(255.0).round().div_(255.0)
         estimate = functional.interpolate(
             estimate,
             (height, width),
             mode="bilinear",
             align_corners=False,
         )
-        recovered = (source - (1.0 - alpha) * estimate) / alpha.clamp_min(
+        recovered = (linear_source - (1.0 - alpha) * estimate) / alpha.clamp_min(
             MINIMUM_RECOVERY_ALPHA,
         )
         recovered = recovered.clamp(0.0, 1.0)
-        cleaned = torch.lerp(source, recovered, DECONTAMINATION_STRENGTH)
-        cleaned = cleaned.mul(255.0).round().div_(255.0)
-        return torch.where(uncertain.expand_as(source), cleaned, source)
+        cleaned = torch.lerp(linear_source, recovered, DECONTAMINATION_STRENGTH)
+        cleaned = torch.where(uncertain.expand_as(source), cleaned, linear_source)
+        encoded = CudaLiveEngine._encode_srgb(cleaned)
+        return encoded.mul(255.0).round().div_(255.0)
 
     @staticmethod
     def _standard_composite(
         source: torch.Tensor,
         alpha: torch.Tensor,
-        background: torch.Tensor,
+        background_linear: torch.Tensor,
+        wrapped_light: torch.Tensor,
     ) -> torch.Tensor:
-        source_i32 = source.to(torch.int32)
-        alpha_i32 = alpha.to(torch.int32)
-        background_i32 = background.to(torch.int32)
-        blended = source_i32 * alpha_i32 + background_i32 * (255 - alpha_i32)
-        return torch.div(blended + 127, 255, rounding_mode="floor").to(torch.uint8)
+        source_linear = CudaLiveEngine._decode_srgb(source)
+        composite = source_linear * alpha + background_linear * (1.0 - alpha)
+        composite = CudaLiveEngine._apply_light_wrap(composite, alpha, wrapped_light)
+        return CudaLiveEngine._encode_uint8(composite)
+
+    @staticmethod
+    def _decode_srgb(image: torch.Tensor) -> torch.Tensor:
+        return torch.where(
+            image <= SRGB_DECODE_THRESHOLD,
+            image / SRGB_DECODE_DIVISOR,
+            ((image + SRGB_OFFSET) / SRGB_SCALE).pow(SRGB_GAMMA),
+        )
+
+    @staticmethod
+    def _encode_srgb(image: torch.Tensor) -> torch.Tensor:
+        clipped = image.clamp(0.0, 1.0)
+        return torch.where(
+            clipped <= SRGB_ENCODE_THRESHOLD,
+            clipped * SRGB_ENCODE_MULTIPLIER,
+            SRGB_SCALE * clipped.pow(1.0 / SRGB_GAMMA) - SRGB_OFFSET,
+        )
+
+    @staticmethod
+    def _blur_background(background: torch.Tensor) -> torch.Tensor:
+        height, width = background.shape[-2:]
+        radius = light_wrap_radius(height, width)
+        kernel_size = radius * 2 + 1
+        padding = (radius, radius, radius, radius)
+        return functional.avg_pool2d(
+            functional.pad(background, padding, mode="replicate"),
+            kernel_size,
+            stride=1,
+        )
+
+    @staticmethod
+    def _apply_light_wrap(
+        composite: torch.Tensor,
+        alpha: torch.Tensor,
+        wrapped_light: torch.Tensor,
+    ) -> torch.Tensor:
+        boundary = 4.0 * alpha * (1.0 - alpha) * LIGHT_WRAP_STRENGTH
+        screened = composite + (1.0 - composite) * wrapped_light
+        return torch.lerp(composite, screened, boundary).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _add_light_wrap(
+        composite: torch.Tensor,
+        alpha: torch.Tensor,
+        wrapped_light: torch.Tensor,
+    ) -> torch.Tensor:
+        linear = CudaLiveEngine._decode_srgb(composite)
+        linear = CudaLiveEngine._apply_light_wrap(linear, alpha, wrapped_light)
+        return CudaLiveEngine._encode_srgb(linear)
+
+    @staticmethod
+    def _encode_uint8(image: torch.Tensor) -> torch.Tensor:
+        return CudaLiveEngine._encode_srgb(image).mul(255.0).round().to(torch.uint8)
 
     @staticmethod
     def _rgb_array(tensor: torch.Tensor) -> NDArray[np.uint8]:

@@ -5,10 +5,12 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from better_backgrounds.matting.accelerated import TensorAlphaStabilizer
+from better_backgrounds.matting.accelerated import CudaLiveEngine, TensorAlphaStabilizer
 from better_backgrounds.matting.refinement import (
     TemporalAlphaStabilizer,
+    decode_srgb,
     decontaminate_foreground,
+    encode_srgb,
 )
 
 
@@ -68,8 +70,11 @@ def test_edge_decontamination_removes_a_bright_original_background() -> None:
     foreground_value = 30.0
     original_background_value = 240.0
     weight = alpha.astype(np.float32) / 255.0
-    observed = foreground_value * weight + original_background_value * (1.0 - weight)
-    source = np.repeat(np.rint(observed)[..., None], 3, axis=2).astype(np.uint8)
+    foreground = np.full((height, width, 3), foreground_value, dtype=np.uint8)
+    original_background = np.full_like(foreground, original_background_value)
+    observed = decode_srgb(foreground) * weight[..., None]
+    observed += decode_srgb(original_background) * (1.0 - weight[..., None])
+    source = encode_srgb(observed)
 
     cleaned = decontaminate_foreground(source, alpha)
 
@@ -79,3 +84,25 @@ def test_edge_decontamination_removes_a_bright_original_background() -> None:
     assert cleaned_error < original_error * 0.45
     assert np.array_equal(cleaned[alpha == 0], source[alpha == 0])
     assert np.array_equal(cleaned[alpha == 255], source[alpha == 255])
+
+
+def test_tensor_decontamination_matches_the_linear_reference() -> None:
+    """Keep CUDA edge recovery in the same radiometric space as the portable path."""
+    height, width = 32, 32
+    alpha = np.zeros((height, width), dtype=np.uint8)
+    alpha[:, 8:17] = np.linspace(0, 255, 9, dtype=np.uint8)
+    alpha[:, 17:] = 255
+    foreground = np.full((height, width, 3), 30, dtype=np.uint8)
+    original_background = np.full_like(foreground, 240)
+    weight = alpha.astype(np.float32)[..., None] / 255.0
+    observed = decode_srgb(foreground) * weight
+    observed += decode_srgb(original_background) * (1.0 - weight)
+    source = encode_srgb(observed)
+    expected = decontaminate_foreground(source, alpha)
+    source_tensor = torch.from_numpy(source).permute(2, 0, 1).unsqueeze(0).float().div(255.0)
+    alpha_tensor = torch.from_numpy(alpha).unsqueeze(0).unsqueeze(0).float().div(255.0)
+
+    actual = CudaLiveEngine._decontaminate(source_tensor, alpha_tensor)  # noqa: SLF001
+    actual = actual[0].mul(255.0).round().byte().permute(1, 2, 0).numpy()
+
+    assert np.abs(actual.astype(np.int16) - expected.astype(np.int16)).max() <= 4

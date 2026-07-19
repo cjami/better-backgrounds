@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Protocol, cast
 import cv2
 import numpy as np
 
+from better_backgrounds.matting.refinement import add_light_wrap, compose_linear_light
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
@@ -121,7 +123,7 @@ def compose_live_frame(
             reference_background=harmonization_background,
         )
         if result.image is not None:
-            image = result.image
+            image = add_light_wrap(result.image, alpha, background)
         harmonization_ms = result.processing_ms
         harmonization_degraded = result.degraded_components
         harmonized = result.applied
@@ -191,17 +193,4 @@ def _standard_composite(
     background: NDArray[np.uint8],
 ) -> NDArray[np.uint8]:
     """Blend the baseline only when display or Compare needs it."""
-    weight = cv2.cvtColor(alpha, cv2.COLOR_GRAY2RGB)
-    weighted_source = cv2.multiply(source, weight, dtype=cv2.CV_16U)
-    weighted_background = cv2.multiply(
-        background,
-        cv2.bitwise_not(weight),
-        dtype=cv2.CV_16U,
-    )
-    return cast(
-        "NDArray[np.uint8]",
-        cv2.convertScaleAbs(
-            cv2.add(weighted_source, weighted_background),
-            alpha=1 / 255,
-        ),
-    )
+    return compose_linear_light(source, alpha, background)

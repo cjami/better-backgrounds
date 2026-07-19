@@ -107,15 +107,13 @@ def test_compositor_rejects_mismatched_frame_and_matte() -> None:
         )
 
 
-def test_compositor_preserves_reference_blend_at_all_alpha_levels() -> None:
-    """Optimize full-resolution blending without changing output pixels."""
-    source = np.array([[[3, 71, 250], [240, 13, 99], [17, 18, 19]]], dtype=np.uint8)
-    background = np.array([[[251, 6, 88], [7, 220, 31], [199, 101, 2]]], dtype=np.uint8)
-    alpha = np.array([[1, 127, 254]], dtype=np.uint8)
-    packet = FramePacket(2, 20.0, 3, 1, 1)
+def test_compositor_blends_soft_edges_in_linear_light() -> None:
+    """Avoid the dark midpoint produced by gamma-encoded alpha arithmetic."""
+    source = np.zeros((1, 1, 3), dtype=np.uint8)
+    background = np.full((1, 1, 3), 255, dtype=np.uint8)
+    alpha = np.full((1, 1), 128, dtype=np.uint8)
+    packet = FramePacket(2, 20.0, 1, 1, 1)
     matte = MatteResult(2, 20.0, 1, 10.0)
-    weight = alpha.astype(np.float32)[..., None] / 255.0
-    expected = np.rint(source * weight + background * (1.0 - weight)).astype(np.uint8)
 
     composite = compose_live_frame(
         packet,
@@ -126,28 +124,45 @@ def test_compositor_preserves_reference_blend_at_all_alpha_levels() -> None:
         revision=1,
     )
 
-    assert np.array_equal(composite.image, expected)
+    assert np.all(composite.image == 192)
 
 
-def test_cuda_integer_composite_preserves_standard_rounding() -> None:
-    """Keep baseline pixels exact when the fused CUDA path is selected."""
+def test_tensor_compositor_matches_the_portable_linear_finish() -> None:
+    """Keep linear blending and light wrap aligned across live backends."""
     random = np.random.default_rng(41)
-    source = random.integers(0, 256, (1, 3, 8, 9), dtype=np.uint8)
-    background = random.integers(0, 256, (1, 3, 8, 9), dtype=np.uint8)
-    alpha = random.integers(0, 256, (1, 1, 8, 9), dtype=np.uint8)
-    expected = (
-        source.astype(np.uint32) * alpha.astype(np.uint32)
-        + background.astype(np.uint32) * (255 - alpha.astype(np.uint32))
-        + 127
-    ) // 255
+    source = random.integers(0, 256, (8, 9, 3), dtype=np.uint8)
+    background = random.integers(0, 256, (8, 9, 3), dtype=np.uint8)
+    alpha = random.integers(0, 256, (8, 9), dtype=np.uint8)
+    packet = FramePacket(9, 90.0, 9, 8, 0)
+    matte = MatteResult(9, 90.0, 0, 10.0)
+    expected = compose_live_frame(
+        packet,
+        matte,
+        source,
+        alpha,
+        background,
+        revision=1,
+    ).image
+    source_tensor = torch.from_numpy(source).permute(2, 0, 1).unsqueeze(0).float().div(255.0)
+    alpha_tensor = torch.from_numpy(alpha).unsqueeze(0).unsqueeze(0).float().div(255.0)
+    background_tensor = (
+        torch.from_numpy(background).permute(2, 0, 1).unsqueeze(0).float().div(255.0)
+    )
+    background_linear = CudaLiveEngine._decode_srgb(background_tensor)  # noqa: SLF001
+    wrapped_light = CudaLiveEngine._blur_background(background_linear)  # noqa: SLF001
 
-    actual = CudaLiveEngine._standard_composite(  # noqa: SLF001
-        torch.from_numpy(source),
-        torch.from_numpy(alpha),
-        torch.from_numpy(background),
+    actual = (
+        CudaLiveEngine._standard_composite(  # noqa: SLF001
+            source_tensor,
+            alpha_tensor,
+            background_linear,
+            wrapped_light,
+        )[0]
+        .permute(1, 2, 0)
+        .numpy()
     )
 
-    assert np.array_equal(actual.numpy(), expected.astype(np.uint8))
+    assert np.abs(actual.astype(np.int16) - expected.astype(np.int16)).max() <= 1
 
 
 def test_cuda_engine_binds_the_resolved_current_device(
@@ -197,7 +212,30 @@ def test_compositor_blends_a_refined_foreground_but_retains_raw_source() -> None
     )
 
     assert np.array_equal(composite.source, source)
-    assert int(composite.image[0, 0, 0]) == 20
+    assert int(composite.image[0, 0, 0]) == 27
+
+
+def test_light_wrap_adds_destination_colour_only_at_soft_edges() -> None:
+    """Use the room as restrained edge illumination without touching matte extrema."""
+    source = np.full((1, 3, 3), 40, dtype=np.uint8)
+    background = np.zeros_like(source)
+    background[..., 0] = 220
+    alpha = np.array([[255, 128, 0]], dtype=np.uint8)
+    packet = FramePacket(10, 100.0, 3, 1, 0)
+    matte = MatteResult(10, 100.0, 0, 10.0)
+
+    composite = compose_live_frame(
+        packet,
+        matte,
+        source,
+        alpha,
+        background,
+        revision=1,
+    )
+
+    assert np.array_equal(composite.image[0, 0], source[0, 0])
+    assert np.array_equal(composite.image[0, 2], background[0, 2])
+    assert composite.image[0, 1, 0] > composite.image[0, 1, 1]
 
 
 def test_background_content_rejects_transient_uniform_renderer_frames() -> None:
