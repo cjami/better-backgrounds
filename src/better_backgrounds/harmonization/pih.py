@@ -39,6 +39,8 @@ DEVELOPMENT_PIH_CHECKPOINT = (
 DEFAULT_CURVE_STRENGTH = 0.65
 CURVE_SAMPLE_COUNT = 5
 CURVE_SAMPLE_INTERVAL_MS = 100.0
+CURVE_RECALIBRATION_INTERVAL_MS = 1_000.0
+CURVE_ADAPTATION_TIME_MS = 2_000.0
 GAIN_NEW_FRAME_WEIGHT = 0.15
 MINIMUM_GAIN = 0.6
 MAXIMUM_GAIN = 1.0
@@ -152,6 +154,10 @@ class PihAppearanceHarmonizer:
         self._previous_curves: torch.Tensor | None = None
         self._last_curve_sample_at: float | None = None
         self._previous_gain_mean: torch.Tensor | None = None
+        self._gain_designs: dict[
+            tuple[torch.device, torch.dtype, int, int],
+            torch.Tensor,
+        ] = {}
         self._background_tensors: dict[
             int,
             tuple[NDArray[np.uint8], torch.Tensor, torch.Tensor],
@@ -282,6 +288,7 @@ class PihAppearanceHarmonizer:
                     captured_at=captured_at,
                 )
                 gain = predictor.predict_gain(low_background, low_image, low_mask, curves)
+                gain = self._regularize_gain_field(gain, low_mask)
                 gain = self._smooth_gain(gain, low_mask)
                 image = self._render(
                     (full_image, full_background, full_mask),
@@ -357,6 +364,7 @@ class PihAppearanceHarmonizer:
                     captured_at=captured_at,
                 )
                 gain = predictor.predict_gain(low_background, low_image, low_mask, curves)
+                gain = self._regularize_gain_field(gain, low_mask)
                 gain = self._smooth_gain(gain, low_mask)
                 image = self._render_tensor(
                     (display_image, background, alpha),
@@ -389,28 +397,76 @@ class PihAppearanceHarmonizer:
         captured_at: float,
     ) -> torch.Tensor:
         locked = self._locked_curves
-        if locked is not None:
-            return locked
         last_sample_at = self._last_curve_sample_at
-        if last_sample_at is not None and captured_at - last_sample_at < CURVE_SAMPLE_INTERVAL_MS:
+        sample_interval = (
+            CURVE_SAMPLE_INTERVAL_MS if locked is None else CURVE_RECALIBRATION_INTERVAL_MS
+        )
+        if last_sample_at is not None and captured_at - last_sample_at < sample_interval:
             previous = self._previous_curves
             if previous is None:
                 msg = "PIH curve sampling state is incomplete"
                 raise RuntimeError(msg)
             return previous
-        sample = predictor.predict_curves(background, composite, mask)
+        sample = self._anchor_curves(
+            predictor.predict_curves(background, composite, mask),
+        )
         self._last_curve_sample_at = captured_at
         self._curve_samples.append(sample)
+        if len(self._curve_samples) > CURVE_SAMPLE_COUNT:
+            self._curve_samples.pop(0)
         samples = torch.stack(self._curve_samples)
         curves = samples.mean(dim=0)
         if len(self._curve_samples) == CURVE_SAMPLE_COUNT:
-            median = samples.median(dim=0).values
-            distances = (samples - median).square().flatten(start_dim=1).mean(dim=1)
-            curves = samples[distances.argmin()]
+            curves = self._coherent_curves(samples)
+        if locked is not None:
+            elapsed = sample_interval if last_sample_at is None else captured_at - last_sample_at
+            update_weight = 1.0 - float(np.exp(-elapsed / CURVE_ADAPTATION_TIME_MS))
+            curves = torch.lerp(locked, curves, update_weight)
+        if len(self._curve_samples) == CURVE_SAMPLE_COUNT:
             self._locked_curves = curves.clone()
-            self._curve_samples.clear()
         self._previous_curves = curves.clone()
         return curves
+
+    @staticmethod
+    def _anchor_curves(curves: torch.Tensor) -> torch.Tensor:
+        black = curves[:, :, :1]
+        white = curves[:, :, -1:]
+        span = (white - black).clamp_min(torch.finfo(curves.dtype).eps)
+        return ((curves - black) * (white / span)).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _coherent_curves(samples: torch.Tensor) -> torch.Tensor:
+        median = samples.median(dim=0).values
+        distances = (samples - median).square().flatten(start_dim=1).mean(dim=1)
+        return samples[distances.argmin()]
+
+    def _regularize_gain_field(self, gain: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        batch, _channels, height, width = gain.shape
+        dtype = gain.dtype
+        device = gain.device
+        key = (device, dtype, height, width)
+        design = self._gain_designs.get(key)
+        if design is None:
+            vertical, horizontal = torch.meshgrid(
+                torch.linspace(-1.0, 1.0, height, dtype=dtype, device=device),
+                torch.linspace(-1.0, 1.0, width, dtype=dtype, device=device),
+                indexing="ij",
+            )
+            design = torch.stack(
+                (torch.ones_like(horizontal), horizontal, vertical),
+            ).reshape(1, 3, -1)
+            self._gain_designs[key] = design
+        design = design.expand(batch, -1, -1)
+        weight = mask.to(dtype).reshape(batch, 1, -1)
+        weighted_design = design * weight
+        normal = weighted_design @ design.transpose(1, 2)
+        scale = normal.diagonal(dim1=1, dim2=2).mean(dim=1).clamp_min(1.0)
+        regularizer = torch.eye(3, dtype=dtype, device=device).unsqueeze(0)
+        normal = normal + regularizer * (scale * torch.finfo(dtype).eps)[:, None, None]
+        target = weighted_design @ gain.reshape(batch, 1, -1).transpose(1, 2)
+        coefficients = torch.linalg.solve(normal, target)
+        projected = (coefficients.transpose(1, 2) @ design).reshape(batch, 1, height, width)
+        return projected.clamp(MINIMUM_GAIN, MAXIMUM_GAIN)
 
     def _smooth_gain(self, gain: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         weight = mask.to(gain.dtype)

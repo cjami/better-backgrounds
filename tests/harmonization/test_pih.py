@@ -106,6 +106,49 @@ def test_compact_curve_renderer_matches_the_official_expanded_lut() -> None:
     assert torch.allclose(actual, expected, atol=2e-7, rtol=0.0)
 
 
+def test_pih_anchors_curve_black_without_changing_the_learned_white_point() -> None:
+    """Prevent washed-out shadows while retaining learned highlight compression."""
+    curves = torch.tensor(
+        [
+            [
+                [0.2, 0.4, 0.8],
+                [0.1, 0.5, 0.9],
+                [0.3, 0.6, 0.7],
+            ],
+        ],
+    )
+
+    anchored = PihAppearanceHarmonizer._anchor_curves(curves)  # noqa: SLF001
+
+    assert torch.equal(anchored[:, :, 0], torch.zeros((1, 3)))
+    assert torch.equal(anchored[:, :, -1], curves[:, :, -1])
+    assert torch.allclose(anchored[0, :, 1], torch.tensor([4 / 15, 0.45, 0.525]))
+
+
+def test_pih_gain_regularizer_removes_blobs_but_preserves_directional_light() -> None:
+    """Represent local shading as a smooth illumination field over the subject."""
+    harmonizer = PihAppearanceHarmonizer(preferred_device="cpu")
+    mask = torch.ones((1, 1, 8, 8))
+    blob = torch.ones_like(mask)
+    blob[:, :, 2:6, 2:6] = 0.6
+
+    regularized_blob = harmonizer._regularize_gain_field(  # noqa: SLF001
+        blob,
+        mask,
+    )
+
+    horizontal = torch.linspace(-1.0, 1.0, 8).view(1, 1, 1, 8)
+    directional = (0.8 + horizontal * 0.1).expand_as(mask)
+    regularized_directional = harmonizer._regularize_gain_field(  # noqa: SLF001
+        directional,
+        mask,
+    )
+
+    assert regularized_blob.std() < 1e-5
+    assert torch.allclose(regularized_blob.mean(), blob.mean(), atol=1e-5, rtol=0.0)
+    assert torch.allclose(regularized_directional, directional, atol=1e-5, rtol=0.0)
+
+
 def test_pih_checkpoint_is_external_and_selects_the_available_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -236,6 +279,30 @@ def test_pih_locks_global_curves_after_startup_samples(tmp_path: Path) -> None:
 
     assert model.curve_calls == CURVE_SAMPLE_COUNT
     assert model.gain_calls == CURVE_SAMPLE_COUNT + 2
+
+
+def test_pih_resamples_global_curves_after_startup_calibration(tmp_path: Path) -> None:
+    """Keep adapting global tone when webcam lighting changes during a live session."""
+    checkpoint = tmp_path / "pih.pth"
+    model = StubPihModel()
+    torch.save({"state_dict": model.state_dict()}, checkpoint)
+    harmonizer = PihAppearanceHarmonizer(
+        checkpoint,
+        preferred_device="cpu",
+        model_factory=lambda: model,
+    )
+    image = np.full((2, 2, 3), 128, dtype=np.uint8)
+    alpha = np.full((2, 2), 255, dtype=np.uint8)
+    harmonizer.set_room(image, revision=1)
+    harmonizer.configure(HarmonizationSettings(global_harmonization=True))
+    for index in range(CURVE_SAMPLE_COUNT):
+        assert harmonizer.apply(image, alpha, image, captured_at=index * 100.0).applied
+
+    harmonizer.apply(image, alpha, image, captured_at=900.0)
+    assert model.curve_calls == CURVE_SAMPLE_COUNT
+
+    harmonizer.apply(image, alpha, image, captured_at=1_400.0)
+    assert model.curve_calls == CURVE_SAMPLE_COUNT + 1
 
 
 def test_pih_recalibrates_when_returning_to_a_room(tmp_path: Path) -> None:
