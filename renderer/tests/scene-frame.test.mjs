@@ -103,6 +103,33 @@ test('cached scene requests render on demand until a valid frame can be captured
   assert.equal(renderer.sceneFramesRemaining, 2);
 });
 
+test('interactive scene save exports the currently visible framebuffer', () => {
+  const published = [];
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.assetId = 'room-v1';
+  renderer.snapshotRevision = 4;
+  renderer.sceneEntity = {};
+  renderer.captureSceneFrame = () => ({ hasContent: true });
+  renderer.publishSceneSnapshot = (...args) => published.push(args);
+  renderer.bridge = { report_scene_error: () => {} };
+
+  renderer.publishCurrentSnapshot();
+
+  assert.deepEqual(published, [['room-v1', 4, 'background']]);
+});
+
+test('inactive interactive renderer does not schedule hidden frames', () => {
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.rendererActive = false;
+  renderer.cacheSceneFrames = false;
+  renderer.app = { autoRender: false, renderNextFrame: false };
+
+  renderer.requestSceneFrame();
+
+  assert.equal(renderer.app.autoRender, false);
+  assert.equal(renderer.app.renderNextFrame, false);
+});
+
 test('cached scene publishes after a bounded GSplat settling window', () => {
   const published = [];
   let postrender;

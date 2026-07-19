@@ -168,12 +168,8 @@ class SecureRendererView(QWebEngineView):
         self._renderer_ready = False
         self._scene_clear_pending = False
         self._bridge.ready.connect(self._renderer_became_ready)
-        self._bridge.scene_progressed.connect(
-            lambda _asset_id, loaded, total: self.scene_progressed.emit(loaded, total),
-        )
-        self._bridge.scene_failed.connect(
-            lambda error: self.scene_failed.emit(error.message),
-        )
+        self._bridge.scene_progressed.connect(self._forward_scene_progress)
+        self._bridge.scene_failed.connect(self._forward_scene_error)
         self._bridge.viewpoint_received.connect(self.viewpoint_changed)
         self._bridge.snapshot_ready.connect(self.snapshot_ready)
         self._channel = QWebChannel(self)
@@ -185,6 +181,8 @@ class SecureRendererView(QWebEngineView):
         self._scene: SceneReference | None = None
         self._viewpoint = Viewpoint()
         self._output_size: tuple[int, int] | None = None
+        self._snapshot_pending = False
+        self._resource_active = True
         self._load_placeholder()
 
     def _renderer_became_ready(self) -> None:
@@ -192,6 +190,21 @@ class SecureRendererView(QWebEngineView):
         if self._output_size is not None:
             self._bridge.request_output_size(*self._output_size)
         self._send_pending_scene()
+        self._bridge.request_renderer_active(active=self._resource_active)
+        if self._snapshot_pending:
+            self._snapshot_pending = False
+            self._bridge.request_snapshot()
+
+    def _forward_scene_progress(self, asset_id: str, loaded: int, total: int) -> None:
+        scene = self._scene
+        if scene is not None and asset_id == scene.asset_id:
+            self.scene_progressed.emit(loaded, total)
+
+    def _forward_scene_error(self, error: object) -> None:
+        scene = self._scene
+        asset_id = getattr(error, "asset_id", "")
+        if asset_id == "renderer" or (scene is not None and asset_id == scene.asset_id):
+            self.scene_failed.emit(str(getattr(error, "message", "Unknown renderer error")))
 
     def _load_placeholder(self) -> None:
         template_name = "background.html" if self._snapshot else "viewer.html"
@@ -236,6 +249,19 @@ class SecureRendererView(QWebEngineView):
         self._output_size = (width, height)
         if self._renderer_ready:
             self._bridge.request_output_size(width, height)
+
+    def request_snapshot(self) -> None:
+        """Export the framebuffer currently visible in the interactive view."""
+        if not self._renderer_ready:
+            self._snapshot_pending = True
+            return
+        self._bridge.request_snapshot()
+
+    def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
+        """Suspend hidden WebGL work while presentation owns the GPU."""
+        self._resource_active = active
+        if self._renderer_ready:
+            self._bridge.request_renderer_active(active=active)
 
     def _send_pending_scene(self) -> None:
         if not self._renderer_ready:

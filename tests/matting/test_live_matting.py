@@ -12,12 +12,14 @@ from better_backgrounds.matting.contracts import (
     FrameMismatchError,
     FramePacket,
     LatestFrameScheduler,
+    LivePipelineConfig,
     MatteResult,
     MattingConfig,
     SlidingFrameRate,
     calibration_p95_latency,
     choose_internal_size,
 )
+from better_backgrounds.matting.worker import FittedLiveBackgrounds
 
 
 def packet(frame_id: int, slot: int) -> FramePacket:
@@ -39,6 +41,35 @@ def result(source: FramePacket) -> MatteResult:
         alpha_slot=source.shared_slot,
         inference_ms=20.0,
     )
+
+
+def test_live_background_is_resized_once_and_reused_between_frames() -> None:
+    """Keep persisted viewport snapshots stable across every live output frame."""
+    config = LivePipelineConfig(
+        output_width=8,
+        output_height=4,
+        aspect_ratio=2.0,
+    )
+    background = np.zeros((3, 5, 3), dtype=np.uint8)
+    reference = np.ones((3, 5, 3), dtype=np.uint8)
+    fitted = FittedLiveBackgrounds(config)
+
+    fitted.replace(background, reference)
+    room, room_reference = fitted.frames
+
+    assert room.shape == (4, 8, 3)
+    assert room_reference.shape == (4, 8, 3)
+    assert all(fitted.frames[0] is room for _index in range(100))
+    assert all(fitted.frames[1] is room_reference for _index in range(100))
+
+    fitted.configure(
+        config.model_copy(
+            update={"output_width": 6, "output_height": 3, "aspect_ratio": 2.0},
+        ),
+    )
+
+    assert fitted.frames[0].shape == (3, 6, 3)
+    assert fitted.frames[0] is not room
 
 
 def test_matting_config_restricts_calibrated_sizes() -> None:

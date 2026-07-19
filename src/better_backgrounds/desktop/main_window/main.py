@@ -80,7 +80,11 @@ class MainWindow(QMainWindow):
         self._library = SceneLibrary(cache_root, actual_data_root)
         self._rooms = self._library.rooms
         self._room_ids = self._library.room_ids
-        self._selected_room = self._rooms[0]
+        selected_room_id = self._library.selection.load()
+        self._selected_room = next(
+            (room for room in self._rooms if self._room_ids[room] == selected_room_id),
+            self._rooms[0],
+        )
         self._sample_installing = False
         self._asset_signals = AssetSignals(self)
         self._asset_signals.progressed.connect(self._show_sample_progress)
@@ -98,6 +102,7 @@ class MainWindow(QMainWindow):
         self._show_page = ShowPage(self._rooms, lambda: self._live_preview)
         self._build_page = BuildPage()
         self._adjust_page = AdjustPage(actual_renderer_factory)
+        self._adjust_page.set_resource_active(False)
         self._compare_page = ComparePage()
         for page in (
             self._show_page,
@@ -168,6 +173,7 @@ class MainWindow(QMainWindow):
         self._show_page.build_requested.connect(self._build_controller.open)
         self._adjust_page.viewpoint_saved.connect(self._save_viewpoint)
         self._adjust_page.viewpoint_previewed.connect(self._preview_viewpoint)
+        self._adjust_page.snapshot_generated.connect(self._save_snapshot)
         self._adjust_page.mirroring_changed.connect(self._live_controller.change_mirroring)
         self._adjust_page.harmonization_changed.connect(
             self._live_controller.change_harmonization,
@@ -229,6 +235,7 @@ class MainWindow(QMainWindow):
         if 0 <= index < self._tabs.count():
             self._tabs.setCurrentIndex(index)
             self._header.set_active_tab(index)
+            self._adjust_page.set_resource_active(index == ADJUST_TAB)
             self._live_controller.set_resource_active(index != ADJUST_TAB)
             mode = "compare" if index == COMPARE_TAB else "show"
             self._live_controller.set_presentation(mode, DEFAULT_WIPE)
@@ -240,6 +247,7 @@ class MainWindow(QMainWindow):
             return
         self._selected_room = room
         room_id = self._room_ids[room]
+        self._library.selection.save(room_id)
         self._header.set_room(room)
         self._show_page.set_room(room)
         scene = self._library.scene_for_room(room)
@@ -250,14 +258,20 @@ class MainWindow(QMainWindow):
             scene.default_viewpoint if scene is not None else Viewpoint()
         )
         self._show_page.set_output_aspect_ratio(output_viewpoint.aspect_ratio)
+        aspect_setter = getattr(self._live_preview, "set_output_aspect_ratio", None)
+        if callable(aspect_setter):
+            aspect_setter(output_viewpoint.aspect_ratio)
+        cached = None
         if installed and scene is not None:
             live_viewpoint = viewpoint or scene.default_viewpoint
             live_viewpoint = live_viewpoint.model_copy(
                 update={"scene_transform": scene.default_viewpoint.scene_transform},
             )
-            setter = getattr(self._live_preview, "set_scene", None)
-            if callable(setter):
-                setter(scene, live_viewpoint)
+            cached = self._library.snapshots.load(scene, live_viewpoint)
+            if cached is not None:
+                setter = getattr(self._live_preview, "set_scene_snapshot", None)
+                if not callable(setter) or not setter(cached.background):
+                    cached = None
         else:
             clearer = getattr(self._live_preview, "clear_scene", None)
             if callable(clearer):
@@ -265,7 +279,7 @@ class MainWindow(QMainWindow):
         preview = None
         if installed and scene is not None and scene.preview is not None:
             preview = self._library.assets.resource_path(scene, scene.preview)
-        self._show_page.set_preview_image(preview)
+        self._show_page.set_preview_image(preview if cached is None else None)
         self._compare_page.set_room(room)
 
     @Slot()
@@ -311,9 +325,36 @@ class MainWindow(QMainWindow):
     def _preview_viewpoint(self, viewpoint: object) -> None:
         if isinstance(viewpoint, Viewpoint):
             self._show_page.set_output_aspect_ratio(viewpoint.aspect_ratio)
-            setter = getattr(self._live_preview, "set_viewpoint", None)
+            setter = getattr(self._live_preview, "set_output_aspect_ratio", None)
             if callable(setter):
-                setter(viewpoint)
+                setter(viewpoint.aspect_ratio)
+
+    @Slot(str, str, object, object)
+    def _save_snapshot(
+        self,
+        room_id: str,
+        asset_id: str,
+        viewpoint: object,
+        background: object,
+    ) -> None:
+        if not isinstance(viewpoint, Viewpoint) or not isinstance(background, bytes):
+            return
+        scene = self._library.scene_for_id(asset_id)
+        if scene is None or room_id != scene.asset_id:
+            return
+        try:
+            snapshot = self._library.snapshots.save(
+                scene,
+                viewpoint,
+                background,
+            )
+        except OSError, ValueError:
+            return
+        if self.selected_room_id != room_id:
+            return
+        setter = getattr(self._live_preview, "set_scene_snapshot", None)
+        if callable(setter):
+            setter(snapshot.background)
 
     @Slot(str, str)
     def _scene_completed(self, scene_id: str, room_name: str) -> None:

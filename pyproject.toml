@@ -246,6 +246,8 @@ files = [
     "src/better_backgrounds/scene/library.py",
     "src/better_backgrounds/scene/models.py",
     "src/better_backgrounds/scene/resolver.py",
+    "src/better_backgrounds/scene/selection.py",
+    "src/better_backgrounds/scene/snapshots.py",
     "src/better_backgrounds/scene/viewpoints.py",
 ]
 [[tool.uv.index]]

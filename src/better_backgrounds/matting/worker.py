@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from queue import Empty
 from typing import TYPE_CHECKING
 
@@ -95,6 +95,49 @@ class ConfigureGeometry:
     height: int
     aspect_ratio: float
     revision: int
+
+
+@dataclass(slots=True)
+class FittedLiveBackgrounds:
+    """Fit immutable room evidence once for the active output geometry."""
+
+    config: LivePipelineConfig
+    _background_source: np.ndarray | None = field(default=None, repr=False)
+    _reference_source: np.ndarray | None = field(default=None, repr=False)
+    _background: np.ndarray = field(init=False, repr=False)
+    _reference: np.ndarray = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Fit the initial empty room at the configured output size."""
+        self._refit()
+
+    @property
+    def frames(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return the stable arrays reused for every live frame."""
+        return self._background, self._reference
+
+    def replace(
+        self,
+        background: np.ndarray | None,
+        reference: np.ndarray | None,
+    ) -> None:
+        """Replace room sources and fit them to the current output once."""
+        self._background_source = background
+        self._reference_source = reference
+        self._refit()
+
+    def configure(self, config: LivePipelineConfig) -> None:
+        """Refit retained sources after an output geometry change."""
+        self.config = config
+        self._refit()
+
+    def _refit(self) -> None:
+        self._background = _fit_background(self._background_source, self.config)
+        self._reference = (
+            self._background
+            if self._reference_source is None
+            else _fit_background(self._reference_source, self.config)
+        )
 
 
 WorkerCommand = (
@@ -190,8 +233,9 @@ def matting_worker_main(  # noqa: PLR0912
                 real_time_error = _safe_message(error)
         elif pipeline_config is not None:
             real_time_error = "real-time 1080p support requires Windows CUDA"
-        background = None
-        reference = None
+        fitted_backgrounds = (
+            None if pipeline_config is None else FittedLiveBackgrounds(pipeline_config)
+        )
         background_revision = 0
         mirrored = True if pipeline_config is None else pipeline_config.mirrored
         retain_standard = False if pipeline_config is None else pipeline_config.retain_standard
@@ -213,16 +257,16 @@ def matting_worker_main(  # noqa: PLR0912
             if isinstance(command, StopWorker):
                 return
             if isinstance(command, SetLiveBackground):
-                background = command.background
-                reference = command.reference
+                if fitted_backgrounds is not None:
+                    fitted_backgrounds.replace(command.background, command.reference)
                 background_revision = command.revision
                 if cuda_engine is not None:
                     cuda_engine.clear_backgrounds()
                 if harmonizer is not None:
-                    if reference is None:
+                    if command.reference is None:
                         harmonizer.clear_room()
                     else:
-                        harmonizer.set_room(reference, revision=command.revision)
+                        harmonizer.set_room(command.reference, revision=command.revision)
                 continue
             if isinstance(command, ConfigurePresentation):
                 mirrored = command.mirrored
@@ -248,6 +292,8 @@ def matting_worker_main(  # noqa: PLR0912
                         },
                     )
                     pipeline_revision = command.revision
+                    if fitted_backgrounds is not None:
+                        fitted_backgrounds.configure(pipeline_config)
                     if cuda_engine is not None:
                         cuda_engine.clear_backgrounds()
                 continue
@@ -278,10 +324,7 @@ def matting_worker_main(  # noqa: PLR0912
                         pipeline_config,
                         mirrored=mirrored,
                     )
-                    room = _fit_background(background, pipeline_config)
-                    room_reference = (
-                        room if reference is None else _fit_background(reference, pipeline_config)
-                    )
+                    room, room_reference = _require_fitted_backgrounds(fitted_backgrounds)
                     normalization_ms = (time.perf_counter() - normalization_started) * 1_000.0
                     accelerated = cuda_engine.compose_uploaded(
                         fitted_source,
@@ -431,6 +474,15 @@ def _fit_output_tensors(
     fitted_source[:, :, :, left : left + source.shape[3]] = source
     fitted_alpha[:, :, :, left : left + source.shape[3]] = alpha
     return fitted_source, fitted_alpha
+
+
+def _require_fitted_backgrounds(
+    backgrounds: FittedLiveBackgrounds | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if backgrounds is None:
+        msg = "fused live output requires fitted room evidence"
+        raise RuntimeError(msg)
+    return backgrounds.frames
 
 
 def _fit_background(

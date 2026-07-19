@@ -1,11 +1,12 @@
 """Feature-first: Headless tests for the Python-owned desktop boundary."""
 
+import base64
 import sys
 from pathlib import Path
 from typing import cast
 
 import pytest
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -51,6 +52,8 @@ class TrackingRenderer(ScenePreview):
         super().__init__()
         self.scenes: list[tuple[SceneReference, Viewpoint]] = []
         self.viewpoints: list[Viewpoint] = []
+        self.clears = 0
+        self.resource_states: list[bool] = []
 
     def set_scene(self, scene: SceneReference, viewpoint: Viewpoint) -> None:
         """Record one managed scene load."""
@@ -59,6 +62,30 @@ class TrackingRenderer(ScenePreview):
     def set_viewpoint(self, viewpoint: Viewpoint) -> None:
         """Record one camera-only update."""
         self.viewpoints.append(viewpoint)
+
+    def clear_scene(self) -> None:
+        """Record release of retained spatial geometry."""
+        self.clears += 1
+
+    def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
+        """Record WebGL frame-loop suspension."""
+        self.resource_states.append(active)
+
+
+class SnapshotTrackingRenderer(TrackingRenderer):
+    """Expose current-frame snapshot signals for Adjust-page tests."""
+
+    snapshot_ready = Signal(str, int, str, str)
+    scene_progressed = Signal(int, int)
+
+    def __init__(self) -> None:
+        """Record requested output dimensions."""
+        super().__init__()
+        self.snapshot_requests = 0
+
+    def request_snapshot(self) -> None:
+        """Record one explicit current-frame export."""
+        self.snapshot_requests += 1
 
 
 def application() -> QApplication:
@@ -164,6 +191,30 @@ def test_sample_is_a_stable_room_without_forcing_navigation(tmp_path: Path) -> N
     window.close()
 
 
+def test_last_selected_room_is_restored_on_relaunch(tmp_path: Path) -> None:
+    """Open the previous room directly so its cached render can be presented."""
+    data_root = tmp_path / "data"
+    cache_root = tmp_path / "cache"
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        scene_cache_root=cache_root,
+        data_root=data_root,
+    )
+    window.select_room("Living room")
+    window.close()
+
+    restored = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        scene_cache_root=cache_root,
+        data_root=data_root,
+    )
+
+    assert restored.selected_room == "Living room"
+    restored.close()
+
+
 def test_adjust_reuses_scene_and_keeps_its_room_draft() -> None:
     """Avoid a scene reload when a room is revisited in the retained page."""
     application()
@@ -177,6 +228,75 @@ def test_adjust_reuses_scene_and_keeps_its_room_draft() -> None:
 
     assert len(renderer.scenes) == 1
     assert renderer.viewpoints[-1] == scene.default_viewpoint
+    page.close()
+
+
+def test_adjust_defers_spatial_scene_load_until_the_tab_is_active() -> None:
+    """Room selection alone must not load a splat for Show or Compare."""
+    application()
+    renderer = TrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    page.set_resource_active(False)
+
+    page.set_room(scene.asset_id, scene, installed=True)
+    assert renderer.scenes == []
+
+    page.set_resource_active(True)
+    assert renderer.scenes == [(scene, scene.default_viewpoint)]
+    page.close()
+
+
+def test_adjust_unloads_scene_and_suspends_rendering_when_hidden() -> None:
+    """Release splat memory and GPU time before Show resumes webcam inference."""
+    application()
+    renderer = TrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    page.set_room(scene.asset_id, scene, installed=True)
+
+    page.set_resource_active(False)
+
+    assert renderer.clears == 1
+    assert renderer.resource_states == [False]
+
+    page.set_resource_active(True)
+    assert renderer.resource_states == [False, True]
+    assert renderer.scenes == [
+        (scene, scene.default_viewpoint),
+        (scene, scene.default_viewpoint),
+    ]
+    page.close()
+
+
+def test_adjust_saves_the_current_renderer_frame_immediately() -> None:
+    """Use the visible framebuffer as both presentation and room evidence."""
+    application()
+    renderer = SnapshotTrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    generated: list[tuple[object, ...]] = []
+    page.snapshot_generated.connect(lambda *values: generated.append(values))
+    page.set_room(scene.asset_id, scene, installed=True)
+    renderer.scene_progressed.emit(100, 100)
+    save = next(
+        button
+        for button in page.findChildren(QPushButton)
+        if button.text() == "Save view & background"
+    )
+
+    save.click()
+    renderer.snapshot_ready.emit(
+        scene.asset_id,
+        4,
+        "background",
+        base64.b64encode(b"background").decode(),
+    )
+
+    assert renderer.snapshot_requests == 1
+    assert generated == [
+        (scene.asset_id, scene.asset_id, scene.default_viewpoint, b"background"),
+    ]
     page.close()
 
 
@@ -243,9 +363,14 @@ def test_adjust_enables_depth_of_field_for_every_spatial_scene() -> None:
     page.close()
 
 
-def test_adjust_and_show_follow_the_same_output_aspect() -> None:
+def test_adjust_and_show_follow_the_same_output_aspect(tmp_path: Path) -> None:
     """Keep room framing identical while moving between adjustment and presentation."""
-    window = MainWindow(command_factory=lambda _job_id, _outcome: [], renderer_factory=ScenePreview)
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        scene_cache_root=tmp_path / "cache",
+        data_root=tmp_path / "data",
+    )
     containers = {
         container.objectName(): container for container in window.findChildren(AspectRatioContainer)
     }

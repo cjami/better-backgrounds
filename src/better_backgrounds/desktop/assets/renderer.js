@@ -66178,6 +66178,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	  constructor(bridge, { cacheSceneFrames = false } = {}) {
 	    this.bridge = bridge;
 	    this.cacheSceneFrames = cacheSceneFrames;
+	    this.rendererActive = true;
 	    this.app = null;
 	    this.camera = null;
 	    this.cameraFrame = null;
@@ -66283,6 +66284,12 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	    this.bridge.output_size_requested.connect((width, height) => {
 	      this.setOutputSize(width, height);
 	    });
+	    this.bridge.snapshot_requested.connect(() => {
+	      this.publishCurrentSnapshot();
+	    });
+	    this.bridge.renderer_active_requested.connect((active) => {
+	      this.setRendererActive(active);
+	    });
 	    this.bridge.scene_requested.connect((assetId, url, payload) => {
 	      this.loadScene(assetId, url, payload);
 	    });
@@ -66311,11 +66318,23 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	    else this.requestSceneFrame();
 	  }
 
+	  setRendererActive(active) {
+	    this.rendererActive = Boolean(active);
+	    if (!this.app) return;
+	    if (!this.rendererActive) {
+	      this.flightKeys.clear();
+	      this.flightDirty = false;
+	      this.app.autoRender = false;
+	      return;
+	    }
+	    this.requestSceneFrame();
+	  }
+
 	  loadScene(assetId, url, payload) {
 	    if (!this.app || !this.camera) return;
 	    this.assetId = assetId;
-	    this.sceneSettled = false;
 	    this.removeScene();
+	    this.sceneSettled = false;
 	    this.firstPersonNavigation = isStreamedSceneUrl(url);
 	    this.applyViewpoint(payload, true);
 	    this.setLoading(true, 'Loading spatial scene…');
@@ -66839,7 +66858,7 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	  }
 
 	  requestSceneFrame(frameCount = 2, snapshotKind = null, revision = this.snapshotRevision) {
-	    if (!this.app) return;
+	    if (!this.app || this.rendererActive === false) return;
 	    if (!this.cacheSceneFrames) {
 	      this.app.autoRender = true;
 	      this.app.renderNextFrame = true;
@@ -66866,9 +66885,9 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	            if (this.snapshotRequiresSettlement && !this.sceneSettled) {
 	              this.sceneCaptureAttempts = 0;
 	            } else if (
-	              this.sceneEntity &&
-	              (!capture.hasContent || !this.sceneSettled) &&
-	              this.sceneCaptureAttempts < MAX_SCENE_CAPTURE_ATTEMPTS
+	              this.sceneEntity
+	              && (!capture.hasContent || !this.sceneSettled)
+	              && this.sceneCaptureAttempts < MAX_SCENE_CAPTURE_ATTEMPTS
 	            ) {
 	              this.sceneCaptureAttempts += 1;
 	              this.sceneFramesRemaining = 1;
@@ -66933,6 +66952,20 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 	      this.bridge.report_scene_error(
 	        assetId || 'renderer',
 	        'scene_frame_encode_failed',
+	        this.safeMessage(error),
+	      );
+	    }
+	  }
+
+	  publishCurrentSnapshot() {
+	    if (!this.sceneEntity) return;
+	    try {
+	      if (!this.captureSceneFrame().hasContent) return;
+	      void this.publishSceneSnapshot(this.assetId, this.snapshotRevision, 'background');
+	    } catch (error) {
+	      this.bridge.report_scene_error(
+	        this.assetId || 'renderer',
+	        'scene_frame_capture_failed',
 	        this.safeMessage(error),
 	      );
 	    }

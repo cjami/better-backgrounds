@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from better_backgrounds.scene.assets import AssetInstaller, load_sample_manifest
 from better_backgrounds.scene.catalogue import SceneCatalogue
 from better_backgrounds.scene.resolver import ManagedSceneResolver
+from better_backgrounds.scene.selection import RoomSelectionStore
+from better_backgrounds.scene.snapshots import SnapshotStore
 from better_backgrounds.scene.viewpoints import ViewpointStore
 
 if TYPE_CHECKING:
@@ -34,11 +36,13 @@ class SceneLibrary:
         self.catalogue = SceneCatalogue(data_root / "scene-catalogue-v1.json")
         self.generated_scenes = {scene.asset_id: scene for scene in self.catalogue.scenes()}
         self.assets = AssetInstaller(cache_root)
+        self.snapshots = SnapshotStore(cache_root / "rendered-snapshots-v1")
         self.resolver = ManagedSceneResolver(
             self.assets,
             [self.sample_scene, *self.generated_scenes.values()],
         )
         self.viewpoints = ViewpointStore(data_root / "viewpoints-v1.json")
+        self.selection = RoomSelectionStore(data_root / "selected-room-v1.json")
         generated_rooms = [scene.display_name for scene in self.generated_scenes.values()]
         self.rooms = [
             *generated_rooms,
@@ -52,6 +56,12 @@ class SceneLibrary:
             return self.sample_scene
         room_id = self.room_ids.get(room)
         return self.generated_scenes.get(room_id) if room_id is not None else None
+
+    def scene_for_id(self, asset_id: str) -> SceneReference | None:
+        """Resolve a stable scene identifier independently of the selected room."""
+        if asset_id == self.sample_scene.asset_id:
+            return self.sample_scene
+        return self.generated_scenes.get(asset_id)
 
     def register(self, scene_id: str, fallback_name: str) -> tuple[str, str]:
         """Register a completed generated scene and return its room name and ID."""

@@ -22,6 +22,8 @@ from better_backgrounds.scene.models import (
     sharp_scene_transform,
 )
 from better_backgrounds.scene.resolver import ManagedSceneResolver
+from better_backgrounds.scene.selection import RoomSelectionStore
+from better_backgrounds.scene.snapshots import SnapshotPaths, SnapshotStore
 from better_backgrounds.scene.viewpoints import ViewpointStore
 
 __all__ = [
@@ -34,12 +36,15 @@ __all__ = [
     "DepthOfFieldSettings",
     "ManagedSceneResolver",
     "Quaternion",
+    "RoomSelectionStore",
     "SceneAssetManifest",
     "SceneCatalogue",
     "SceneLibrary",
     "SceneProvenance",
     "SceneReference",
     "SceneTransform",
+    "SnapshotPaths",
+    "SnapshotStore",
     "SubjectRegion",
     "Vector3",
     "Viewpoint",

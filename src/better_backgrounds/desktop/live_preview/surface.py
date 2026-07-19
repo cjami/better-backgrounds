@@ -181,17 +181,12 @@ class NativeCompositeSurface(QWidget):
         """Apply the camera tier and viewpoint aspect to subsequent composites."""
         if geometry == self._output_geometry:
             return
-        has_room_evidence = (
-            self._background is not None or self._harmonization_background is not None
-        )
         self._output_geometry = geometry
-        if has_room_evidence:
-            self.clear_background()
-        else:
-            self._resized_backgrounds.clear()
-            self._resized_harmonization_backgrounds.clear()
-            if self._cuda_engine is not None:
-                self._cuda_engine.clear_backgrounds()
+        self._resized_backgrounds.clear()
+        self._resized_harmonization_backgrounds.clear()
+        if self._cuda_engine is not None:
+            self._cuda_engine.clear_backgrounds()
+        self._recompose()
 
     def set_harmonization_reference(self, image: QImage) -> bool:
         """Replace the sharp room evidence used only for subject appearance."""

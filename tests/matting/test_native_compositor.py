@@ -7,6 +7,7 @@ import pytest
 import torch
 from PySide6.QtWidgets import QApplication, QWidget
 
+from better_backgrounds.desktop.camera.capture import capture_profile
 from better_backgrounds.desktop.live_preview import (
     NativeCompositeSurface,
     NativeLivePreview,
@@ -161,6 +162,21 @@ def test_cuda_engine_binds_the_resolved_current_device(
     assert engine._device == torch.device("cuda:0")  # noqa: SLF001
 
 
+def test_cuda_background_cache_releases_superseded_images() -> None:
+    """Bound retained room tensors even when callers provide changing array identities."""
+    engine = object.__new__(CudaLiveEngine)
+    engine._device = torch.device("cpu")  # noqa: SLF001
+    engine._backgrounds = {}  # noqa: SLF001
+    images = [np.full((2, 3, 3), value, dtype=np.uint8) for value in range(4)]
+
+    for image in images:
+        engine._background_tensor(image)  # noqa: SLF001
+
+    retained = tuple(entry[0] for entry in engine._backgrounds.values())  # noqa: SLF001
+    assert len(retained) <= 2
+    assert all(image is not images[0] for image in retained)
+
+
 def test_compositor_blends_a_refined_foreground_but_retains_raw_source() -> None:
     """Keep camera evidence intact while using decontaminated boundary colours."""
     source = np.full((1, 1, 3), 200, dtype=np.uint8)
@@ -221,6 +237,25 @@ def test_surface_retains_last_room_when_renderer_grab_is_blank() -> None:
     composite = surface.apply_matte(completed)
 
     assert np.array_equal(composite.image, room)
+    surface.close()
+
+
+def test_surface_retains_restored_room_during_camera_geometry_negotiation() -> None:
+    """Keep the startup snapshot when the webcam reports its native profile."""
+    application()
+    surface = NativeCompositeSurface()
+    room = np.zeros((3, 5, 3), dtype=np.uint8)
+    room[1, 2] = [80, 40, 20]
+    assert surface.set_background(rgb_to_qimage(room))
+    before = surface.background_evidence()
+
+    geometry = capture_profile(1920, 1080, 30.0, 30.0).output_geometry(16 / 9)
+    surface.set_output_geometry(geometry)
+
+    after = surface.background_evidence()
+    assert after[0] is before[0]
+    assert after[1] is before[1]
+    assert after[2] == before[2]
     surface.close()
 
 

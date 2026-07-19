@@ -36,6 +36,8 @@ class RendererBridge(QObject):
     reset_requested = Signal()
     scene_cleared = Signal()
     output_size_requested = Signal(int, int)
+    snapshot_requested = Signal()
+    renderer_active_requested = Signal(bool)
 
     @Slot()
     def renderer_ready(self) -> None:
@@ -126,6 +128,14 @@ class RendererBridge(QObject):
             msg = "renderer output dimensions must be between 1 and 8192 pixels"
             raise ValueError(msg)
         self.output_size_requested.emit(width, height)
+
+    def request_snapshot(self) -> None:
+        """Capture the framebuffer currently visible in Adjust."""
+        self.snapshot_requested.emit()
+
+    def request_renderer_active(self, *, active: bool) -> None:
+        """Suspend or resume the interactive renderer's frame loop."""
+        self.renderer_active_requested.emit(active)
 
 
 class CameraDeviceMessage(BaseModel):

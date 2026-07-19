@@ -87,15 +87,9 @@ class NativeLivePreview(QWidget):
     ) -> None:
         """Create retained native resources without opening a camera."""
         super().__init__(parent)
+        _ = resolver
         if background_factory is None:
-            from better_backgrounds.desktop.webview import (  # noqa: PLC0415
-                create_background_renderer_view,
-            )
-
-            def create_background() -> QWidget:
-                return create_background_renderer_view(resolver)
-
-            background_factory = create_background
+            background_factory = QWidget
         checkpoint = packaged_checkpoint_path()
 
         def create_engine() -> ProcessMattingEngine:
@@ -371,6 +365,27 @@ class NativeLivePreview(QWidget):
                 update_harmonization_reference=not self._snapshot_handshake,
             ):
                 self._sync_engine_pipeline()
+
+    def set_scene_snapshot(self, background_path: Path) -> bool:
+        """Load a verified persisted frame without creating a spatial renderer."""
+        background = QImage(str(background_path))
+        if background.isNull():
+            return False
+        if not self._surface.set_background(
+            background,
+            update_harmonization_reference=False,
+        ):
+            return False
+        if not self._surface.set_harmonization_reference(background):
+            return False
+        self._scene = None
+        self._rendered_scene_asset_id = ""
+        self._sync_engine_pipeline()
+        return True
+
+    def set_output_aspect_ratio(self, aspect_ratio: float) -> None:
+        """Apply cached-room geometry without requesting a spatial rerender."""
+        self._set_output_aspect_ratio(aspect_ratio)
 
     def set_presentation(self, mode: str, wipe: int = 52) -> None:
         """Reuse this session in Show and Compare without duplicate work."""

@@ -34,6 +34,7 @@ TENSOR_DIMENSIONS = 4
 RGB_DIMENSIONS = 3
 ALPHA_DIMENSIONS = 2
 RGB_CHANNELS = 3
+BACKGROUND_CACHE_LIMIT = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,8 +240,13 @@ class CudaLiveEngine:
         cached = self._backgrounds.get(key)
         if cached is not None and cached[0] is image:
             return cached[1], cached[2]
+        if cached is not None:
+            self._backgrounds.pop(key)
         uint8 = self._rgb_tensor(image)
         floating = uint8.to(torch.float32).div_(255.0)
+        while len(self._backgrounds) >= BACKGROUND_CACHE_LIMIT:
+            oldest = next(iter(self._backgrounds))
+            self._backgrounds.pop(oldest)
         self._backgrounds[key] = (image, uint8, floating)
         return uint8, floating
 

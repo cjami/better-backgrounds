@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
@@ -34,6 +36,7 @@ class AdjustPage(QWidget):
 
     viewpoint_saved = Signal(str, object)
     viewpoint_previewed = Signal(object)
+    snapshot_generated = Signal(str, str, object, object)
     mirroring_changed = Signal(bool)
     harmonization_changed = Signal(object)
 
@@ -54,6 +57,10 @@ class AdjustPage(QWidget):
         self._sliders: dict[str, QSlider] = {}
         self._slider_labels: dict[str, QLabel] = {}
         self._loaded_scene_id = ""
+        self._scene: SceneReference | None = None
+        self._installed = False
+        self._resource_active = True
+        self._snapshot_request: tuple[str, str, Viewpoint] | None = None
         self._spatial_depth_available = False
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -89,6 +96,9 @@ class AdjustPage(QWidget):
         renderer_viewpoint = getattr(self._renderer, "viewpoint_changed", None)
         if renderer_viewpoint is not None:
             renderer_viewpoint.connect(self._accept_renderer_viewpoint)
+        renderer_snapshot = getattr(self._renderer, "snapshot_ready", None)
+        if renderer_snapshot is not None:
+            renderer_snapshot.connect(self._accept_renderer_snapshot)
         self._scene_status = _label("Select an installed spatial room", object_name="muted")
         scene_layout.addWidget(self._scene_status)
         actions = QHBoxLayout()
@@ -99,10 +109,11 @@ class AdjustPage(QWidget):
         reset.setObjectName("quietAction")
         reset.clicked.connect(self._reset_viewpoint)
         actions.addWidget(reset)
-        save = QPushButton("Save settings")
-        save.setObjectName("primary")
-        save.clicked.connect(self._save_viewpoint)
-        actions.addWidget(save)
+        self._save = QPushButton("Save view & background")
+        self._save.setObjectName("primary")
+        self._save.setEnabled(False)
+        self._save.clicked.connect(self._save_viewpoint)
+        actions.addWidget(self._save)
         scene_layout.addLayout(actions)
         root.addWidget(scene, 1)
 
@@ -201,6 +212,31 @@ class AdjustPage(QWidget):
             self._room_id = ""
             self._loaded_scene_id = ""
 
+    def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
+        """Load spatial geometry only while Adjust is the active product tab."""
+        if active == self._resource_active:
+            return
+        self._resource_active = active
+        resource_setter = getattr(self._renderer, "set_resource_active", None)
+        if not active:
+            clearer = getattr(self._renderer, "clear_scene", None)
+            if callable(clearer):
+                clearer()
+            self._loaded_scene_id = ""
+            self._save.setEnabled(False)
+            if callable(resource_setter):
+                resource_setter(active=False)
+            return
+        if callable(resource_setter):
+            resource_setter(active=True)
+        if self._room_id:
+            self.set_room(
+                self._room_id,
+                self._scene,
+                installed=self._installed,
+                viewpoint=self._viewpoint,
+            )
+
     def set_room(
         self,
         room: str,
@@ -214,6 +250,9 @@ class AdjustPage(QWidget):
             self._drafts[self._room_id] = self._viewpoint
             self._harmonization_drafts[self._room_id] = self._harmonization
         self._room_id = room
+        self._scene = scene
+        self._installed = installed
+        self._snapshot_request = None
         self.setAccessibleDescription(f"Adjust settings for {room}")
         self._default_viewpoint = scene.default_viewpoint if scene is not None else Viewpoint()
         self._spatial_depth_available = scene is not None
@@ -232,17 +271,23 @@ class AdjustPage(QWidget):
         self.harmonization_changed.emit(self._harmonization)
 
         if scene is None:
+            self._save.setEnabled(False)
             self._renderer.show()
             self._scene_status.setText("No spatial scene is registered for this room yet")
             self._attribution.clear()
             return
         self._attribution.setText(f"{scene.attribution} · {scene.license_name}")
         if not installed:
+            self._save.setEnabled(False)
             self._renderer.hide()
             self._scene_status.setText("Install this sample in Show to explore its spatial scene")
             return
         self._renderer.show()
+        self._save.setEnabled(self._loaded_scene_id == scene.asset_id)
         self._scene_status.setText("Loading spatial scene…")
+        if not self._resource_active:
+            self._scene_status.setText("Open Adjust to load the spatial scene")
+            return
         method_name = "set_viewpoint" if self._loaded_scene_id == scene.asset_id else "set_scene"
         setter = getattr(self._renderer, method_name, None)
         if callable(setter):
@@ -254,11 +299,13 @@ class AdjustPage(QWidget):
 
     def _set_scene_progress(self, loaded: int, total: int) -> None:
         progress = round(loaded / total * 100)
+        self._save.setEnabled(progress == COMPLETE_PROGRESS)
         message = "Scene ready" if progress == COMPLETE_PROGRESS else f"Loading scene… {progress}%"
         self._scene_status.setText(message)
 
     def _set_scene_error(self, message: str) -> None:
         self._loaded_scene_id = ""
+        self._save.setEnabled(False)
         self._scene_status.setText(f"Scene unavailable: {message}. Re-select the room to retry.")
 
     def _accept_renderer_viewpoint(self, viewpoint: object) -> None:
@@ -281,7 +328,53 @@ class AdjustPage(QWidget):
     def _save_viewpoint(self) -> None:
         if self._room_id:
             self.viewpoint_saved.emit(self._room_id, self._viewpoint)
+            self._request_snapshot()
+
+    def _request_snapshot(self) -> None:
+        scene = self._scene
+        requester = getattr(self._renderer, "request_snapshot", None)
+        if (
+            scene is None
+            or not self._installed
+            or self._loaded_scene_id != scene.asset_id
+            or not callable(requester)
+        ):
             self._scene_status.setText("Viewpoint saved for this room")
+            return
+        self._snapshot_request = (self._room_id, scene.asset_id, self._viewpoint)
+        requester()
+        self._scene_status.setText("Saving the current view...")
+
+    def _accept_renderer_snapshot(
+        self,
+        asset_id: str,
+        _revision: int,
+        kind: str,
+        payload: str,
+    ) -> None:
+        request = self._snapshot_request
+        if (
+            request is None
+            or asset_id != request[1]
+            or request[2] != self._viewpoint
+            or kind != "background"
+        ):
+            return
+        try:
+            background = base64.b64decode(payload.encode("ascii"), validate=True)
+        except UnicodeEncodeError, binascii.Error, ValueError:
+            self._scene_status.setText("Rendered background was invalid; save again to retry")
+            self._snapshot_request = None
+            return
+        room_id, requested_asset_id, viewpoint = request
+        self._snapshot_request = None
+        self.snapshot_generated.emit(
+            room_id,
+            requested_asset_id,
+            viewpoint,
+            background,
+        )
+        self._scene_status.setText("Settings and rendered background saved")
 
     def _apply_preset(self, name: str) -> None:
         default = self._default_viewpoint
