@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
 from better_backgrounds.desktop.camera.capture import qimage_to_rgb
-from better_backgrounds.harmonization.runtime import HarmonizerAppearanceHarmonizer
+from better_backgrounds.harmonization.pih import create_appearance_harmonizer
 from better_backgrounds.matting.compositor import (
     LiveComposite,
     background_has_content,
@@ -97,7 +97,7 @@ class NativeCompositeSurface(QWidget):
         self._mirrored = True
         self._diagnostics = "Waiting for camera"
         self._last_composite: LiveComposite | None = None
-        self._harmonizer = HarmonizerAppearanceHarmonizer()
+        self._harmonizer = create_appearance_harmonizer()
 
     @property
     def last_composite(self) -> LiveComposite | None:
@@ -155,6 +155,16 @@ class NativeCompositeSurface(QWidget):
         self._set_harmonization_background(background)
         self._recompose()
         return True
+
+    def clear_harmonization_reference(self) -> None:
+        """Suspend appearance inference until the current room evidence is ready."""
+        if self._harmonization_background is None:
+            return
+        self._harmonization_background = None
+        self._resized_harmonization_backgrounds.clear()
+        self._harmonization_revision += 1
+        self._harmonizer.clear_room()
+        self._recompose()
 
     def clear_background(self) -> None:
         """Discard room-scoped pixels and appearance evidence together."""
@@ -379,11 +389,17 @@ class NativeCompositeSurface(QWidget):
         )
         return self.present_matte(self.prepare_matte(completed))
 
-    def _set_harmonization_background(self, background: NDArray[np.uint8]) -> None:
+    def _set_harmonization_background(
+        self,
+        background: NDArray[np.uint8],
+    ) -> None:
         self._harmonization_background = background
         self._resized_harmonization_backgrounds.clear()
         self._harmonization_revision += 1
-        self._harmonizer.set_room(background, revision=self._harmonization_revision)
+        self._harmonizer.set_room(
+            background,
+            revision=self._harmonization_revision,
+        )
 
     @staticmethod
     def _resize_background(

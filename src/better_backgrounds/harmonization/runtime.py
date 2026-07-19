@@ -95,7 +95,12 @@ class HarmonizerAppearanceHarmonizer:
         if not settings.global_harmonization:
             self.reset_camera()
 
-    def set_room(self, background: NDArray[np.uint8], *, revision: int) -> None:
+    def set_room(
+        self,
+        background: NDArray[np.uint8],
+        *,
+        revision: int,
+    ) -> None:
         """Reset global controls for a changed room snapshot."""
         self._validate_rgb(background, name="background")
         self._room_revision = revision

@@ -158,6 +158,36 @@ Harmonization must not become the default until both real SHARP and MatAnyone
 gates plus its quality, latency, and soak gates pass on each supported reference
 platform.
 
+Adobe PIH is available as an experimental, opt-in alternative appearance backend.
+It predicts RGB curves and a frame-local shading map at 512 px, then applies those
+parameters at the camera resolution. The checkpoint remains external. Select it
+before starting the desktop application:
+
+```powershell
+$env:BETTER_BACKGROUNDS_HARMONIZATION_BACKEND = "pih"
+$env:BETTER_BACKGROUNDS_PIH_CHECKPOINT = "C:\path\to\ckpt_g39.pth"
+$env:BETTER_BACKGROUNDS_PIH_DEVICE = "cuda"
+$env:BETTER_BACKGROUNDS_PIH_CURVE_STRENGTH = "0.65"
+uv run better-backgrounds desktop
+```
+
+In a source checkout, the benchmark checkpoint at
+`.tools/pih_bench/ckpt_g39.pth` selects PIH automatically. An explicit backend
+environment setting still takes precedence.
+
+PIH defaults to CUDA, then Metal, then CPU according to availability. CPU is a
+functional fallback, not a live-performance target. The model is warmed after
+MatAnyone calibration and runs in the latest-frame composition coordinator. It takes
+five time-spaced global readings, locks the coherent prediction closest to their
+median, predicts a fresh local shading map for each frame, and stabilizes only its
+foreground-average gain. Global curves are applied at a conservative 0.65 strength
+by default; the optional environment setting accepts values from 0 to 1. Calibration
+starts only after the renderer delivers matching sharp-reference and finished-background
+snapshots. It is repeated after room or camera-angle changes rather than cached by room.
+It falls back to the standard composite on any checkpoint or inference failure.
+The original Harmonizer backend remains the default when no backend is selected
+and no development PIH checkpoint is available.
+
 ## Scene rendering and offline behavior
 
 The PlayCanvas renderer loads verified SOG samples, SHARP PLY scenes, directly
@@ -187,7 +217,8 @@ accelerates movement. While Adjust is active, live camera capture, matting, and
 hidden snapshot rendering are suspended; the settled hidden scene is retained so
 returning to a live page cannot publish a partially reloaded streamed room. Camera
 capture and matting resume on the live page. Re-importing a room resets stale saved
-framing so the new calibrated entry viewpoint is used immediately.
+framing so the new calibrated entry viewpoint is used immediately. Streamed rooms
+also wait for their resident LOD chunks to settle before publishing a Show snapshot.
 
 The Table Tennis Room sample is downloaded only when requested in Show, checked
 against its manifest, and attributed to Ethan (`ethan3111`) under CC BY 4.0.
@@ -208,6 +239,12 @@ The adapted Harmonizer inference subset is pinned to revision
 notes are under `src/better_backgrounds/_vendor/harmonizer/`. Both that runtime
 and the separately supplied official checkpoint are governed by Creative
 Commons Attribution-NonCommercial-ShareAlike 4.0 terms.
+
+The adapted Adobe PIH inference subset is pinned to revision
+`2823cccf0778c6ea213a3d366f03864ac8ab82e6`; its Apache-2.0 provenance and
+modification notes are under `src/better_backgrounds/_vendor/pih/`. The official
+PIH checkpoint is not bundled. Confirm the checkpoint's distribution and
+commercial-use terms independently before shipping it.
 
 Better Backgrounds source is available under the [MIT License](LICENSE). That
 license does not replace third-party terms. In particular, the Apple SHARP

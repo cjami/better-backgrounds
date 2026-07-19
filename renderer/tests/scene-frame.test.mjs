@@ -116,6 +116,8 @@ test('cached scene publishes after a bounded GSplat settling window', () => {
   renderer.sceneFramePending = false;
   renderer.sceneFramesRemaining = 1;
   renderer.sceneSettled = false;
+  renderer.firstPersonNavigation = false;
+  renderer.snapshotRequiresSettlement = false;
   renderer.captureSceneFrame = () => ({ hasContent: true });
   renderer.publishSceneSnapshot = (...args) => published.push(args);
   renderer.bridge = { report_scene_error: () => {} };
@@ -130,6 +132,39 @@ test('cached scene publishes after a bounded GSplat settling window', () => {
 
   assert.deepEqual(published, [['room-v1', 7, 'background']]);
   assert.equal(renderer.pendingSnapshotKind, null);
+  assert.equal(renderer.sceneFramePending, false);
+  assert.equal(renderer.app.autoRender, false);
+});
+
+test('non-SHARP scene waits for GSplat settlement before publishing its snapshot', () => {
+  const published = [];
+  let postrender;
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.assetId = 'streamed-room';
+  renderer.cacheSceneFrames = true;
+  renderer.pendingSnapshotKind = 'background';
+  renderer.pendingSnapshotRevision = 3;
+  renderer.sceneCaptureAttempts = 12;
+  renderer.sceneEntity = {};
+  renderer.sceneFramePending = false;
+  renderer.sceneFramesRemaining = 1;
+  renderer.sceneSettled = false;
+  renderer.firstPersonNavigation = false;
+  renderer.snapshotRequiresSettlement = true;
+  renderer.captureSceneFrame = () => ({ hasContent: true });
+  renderer.publishSceneSnapshot = (...args) => published.push(args);
+  renderer.bridge = { report_scene_error: () => {} };
+  renderer.app = {
+    autoRender: true,
+    once: (_event, callback) => { postrender = callback; },
+    renderNextFrame: false,
+  };
+
+  renderer.renderSceneFrame();
+  postrender();
+
+  assert.deepEqual(published, []);
+  assert.equal(renderer.pendingSnapshotKind, 'background');
   assert.equal(renderer.sceneFramePending, false);
   assert.equal(renderer.app.autoRender, false);
 });

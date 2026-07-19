@@ -613,6 +613,7 @@ class SceneRenderer {
     this.scenePixels = null;
     this.sceneCaptureAttempts = 0;
     this.sceneSettled = false;
+    this.snapshotRequiresSettlement = false;
     this.snapshotRevision = 0;
     this.pendingSnapshotKind = null;
     this.pendingSnapshotRevision = 0;
@@ -762,6 +763,7 @@ class SceneRenderer {
     this.sceneTransformKey = '';
     this.sceneSettled = false;
     this.firstPersonNavigation = false;
+    this.snapshotRequiresSettlement = false;
     this.snapshotQueue.length = 0;
     this.harmonizationViewpointKey = '';
   }
@@ -769,6 +771,7 @@ class SceneRenderer {
   createDepthProxy(resource) {
     if (!this.app || !this.sceneEntity) return;
     const intrinsicGeometry = buildDepthProxyGeometry(resource?.gsplatData);
+    this.snapshotRequiresSettlement = this.firstPersonNavigation || !intrinsicGeometry;
     if (intrinsicGeometry) {
       this.installDepthProxy(intrinsicGeometry, true);
       return;
@@ -1249,7 +1252,9 @@ class SceneRenderer {
         if (this.sceneFramesRemaining === 0) {
           if (this.cacheSceneFrames && this.pendingSnapshotKind) {
             const capture = this.captureSceneFrame();
-            if (
+            if (this.snapshotRequiresSettlement && !this.sceneSettled) {
+              this.sceneCaptureAttempts = 0;
+            } else if (
               this.sceneEntity &&
               (!capture.hasContent || !this.sceneSettled) &&
               this.sceneCaptureAttempts < MAX_SCENE_CAPTURE_ATTEMPTS

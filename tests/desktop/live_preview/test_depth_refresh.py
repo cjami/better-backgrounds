@@ -1,6 +1,6 @@
 """Focused tests for debounced and revision-safe scene snapshots."""
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import QBuffer, QIODevice, QRect, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
@@ -11,6 +11,9 @@ from better_backgrounds.desktop.live_preview.preview import (
     NativeLivePreview,
 )
 from better_backgrounds.scene import AssetResource, SceneReference, Viewpoint
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class SnapshotRenderer(QWidget):
@@ -73,10 +76,8 @@ def test_live_viewpoint_refresh_keeps_only_the_latest_debounced_request() -> Non
     assert renderer.viewpoints == []
     preview._apply_pending_viewpoint()  # noqa: SLF001
     assert renderer.viewpoints == [latest]
-    assert preview._background_timer.isActive()  # noqa: SLF001
-    preview._background_timer.stop()  # noqa: SLF001
-    preview._capture_background()  # noqa: SLF001
-    assert preview._surface._background_revision == 1  # noqa: SLF001
+    assert not preview._background_timer.isActive()  # noqa: SLF001
+    assert preview._surface._background_revision == 0  # noqa: SLF001
     assert preview._surface._harmonization_revision == 0  # noqa: SLF001
     preview.close()
 
@@ -143,11 +144,50 @@ def test_dof_snapshot_does_not_replace_the_sharp_harmonization_reference() -> No
     preview._scene_asset_id = "room-v1"  # noqa: SLF001
 
     renderer.snapshot_ready.emit("room-v1", 5, "harmonization", renderer.payload)
-    reference_revision = preview._surface._harmonization_revision  # noqa: SLF001
+    assert preview._surface._harmonization_revision == 0  # noqa: SLF001
+    assert preview._latest_harmonization_revision == -1  # noqa: SLF001
     renderer.snapshot_ready.emit("room-v1", 5, "background", renderer.payload)
+    reference_revision = preview._surface._harmonization_revision  # noqa: SLF001
+    renderer.snapshot_ready.emit("room-v1", 6, "background", renderer.payload)
 
     assert preview._latest_harmonization_revision == 5  # noqa: SLF001
-    assert preview._latest_snapshot_revision == 5  # noqa: SLF001
+    assert preview._latest_snapshot_revision == 6  # noqa: SLF001
     assert preview._surface._harmonization_revision == reference_revision  # noqa: SLF001
+    assert preview._surface._background_revision == 2  # noqa: SLF001
+    preview.close()
+
+
+def test_preview_image_waits_for_the_renderer_before_calibrating(tmp_path: Path) -> None:
+    """Do not calibrate PIH from the placeholder shown while a scene loads."""
+    application()
+    renderer = SnapshotRenderer()
+    preview = NativeLivePreview(background_factory=lambda: renderer)
+    path = tmp_path / "preview.png"
+    assert renderer._image.save(str(path))  # noqa: SLF001
+
+    preview.set_scene_image(path)
+
     assert preview._surface._background_revision == 1  # noqa: SLF001
+    assert preview._surface._harmonization_revision == 0  # noqa: SLF001
+    assert preview._surface._harmonization_background is None  # noqa: SLF001
+    preview.close()
+
+
+def test_camera_viewpoint_change_discards_reference_until_matching_pair_arrives() -> None:
+    """Avoid applying the old angle's calibration while a new angle renders."""
+    application()
+    renderer = SnapshotRenderer()
+    preview = NativeLivePreview(background_factory=lambda: renderer)
+    preview._scene_asset_id = "room-v1"  # noqa: SLF001
+    renderer.snapshot_ready.emit("room-v1", 1, "harmonization", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 1, "background", renderer.payload)
+    assert preview._surface._harmonization_background is not None  # noqa: SLF001
+
+    preview.set_viewpoint(Viewpoint(field_of_view=55))
+
+    assert preview._surface._harmonization_background is None  # noqa: SLF001
+    renderer.snapshot_ready.emit("room-v1", 2, "harmonization", renderer.payload)
+    assert preview._surface._harmonization_background is None  # noqa: SLF001
+    renderer.snapshot_ready.emit("room-v1", 2, "background", renderer.payload)
+    assert preview._surface._harmonization_background is not None  # noqa: SLF001
     preview.close()

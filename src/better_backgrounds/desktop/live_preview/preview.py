@@ -141,6 +141,7 @@ class NativeLivePreview(QWidget):
         self._scene_asset_id = ""
         self._latest_snapshot_revision = -1
         self._latest_harmonization_revision = -1
+        self._pending_harmonization_snapshot: tuple[int, QImage] | None = None
         self._pending_viewpoint: Viewpoint | None = None
         self._background_refresh_started_at: float | None = None
         self._background_refresh_ms = 0.0
@@ -249,6 +250,7 @@ class NativeLivePreview(QWidget):
         self._scene_asset_id = scene.asset_id
         self._latest_snapshot_revision = -1
         self._latest_harmonization_revision = -1
+        self._invalidate_harmonization_reference()
         setter = getattr(self._background_renderer, "set_scene", None)
         if self._resource_active and callable(setter):
             self._background_refresh_started_at = time.perf_counter()
@@ -265,6 +267,7 @@ class NativeLivePreview(QWidget):
         self._rendered_scene_asset_id = ""
         self._latest_snapshot_revision = -1
         self._latest_harmonization_revision = -1
+        self._pending_harmonization_snapshot = None
         self._background_refresh_started_at = None
         self._background_refresh_ms = 0.0
         clearer = getattr(self._background_renderer, "clear_scene", None)
@@ -274,7 +277,10 @@ class NativeLivePreview(QWidget):
 
     def set_viewpoint(self, viewpoint: Viewpoint) -> None:
         """Debounce expensive depth-of-field room snapshots."""
+        previous = self._scene_viewpoint
         self._scene_viewpoint = viewpoint
+        if previous is None or self._harmonization_viewpoint_changed(previous, viewpoint):
+            self._invalidate_harmonization_reference()
         if not self._resource_active:
             return
         self._pending_viewpoint = viewpoint
@@ -326,7 +332,10 @@ class NativeLivePreview(QWidget):
         if path is not None:
             pixmap = QPixmap(str(path))
             if not pixmap.isNull():
-                self._surface.set_background(pixmap.toImage())
+                self._surface.set_background(
+                    pixmap.toImage(),
+                    update_harmonization_reference=not self._snapshot_handshake,
+                )
 
     def set_presentation(self, mode: str, wipe: int = 52) -> None:
         """Reuse this session in Show and Compare without duplicate work."""
@@ -393,29 +402,66 @@ class NativeLivePreview(QWidget):
             or not 1 <= len(payload) <= MAX_SNAPSHOT_PAYLOAD_LENGTH
         ):
             return
-        latest_revision = (
-            self._latest_snapshot_revision
-            if kind == "background"
-            else self._latest_harmonization_revision
-        )
-        if revision < latest_revision:
+        if self._snapshot_revision_is_stale(kind, revision):
             return
+        image = self._decode_snapshot(payload)
+        if image is None:
+            return
+        if kind == "harmonization":
+            if revision == self._latest_snapshot_revision:
+                self._publish_harmonization_snapshot(revision, image)
+            else:
+                self._pending_harmonization_snapshot = (revision, image.copy())
+            return
+        self._publish_background_snapshot(revision, image)
+
+    def _snapshot_revision_is_stale(self, kind: str, revision: int) -> bool:
+        if kind == "background":
+            return revision < self._latest_snapshot_revision
+        pending_revision = (
+            -1
+            if self._pending_harmonization_snapshot is None
+            else self._pending_harmonization_snapshot[0]
+        )
+        return revision <= max(self._latest_harmonization_revision, pending_revision)
+
+    @staticmethod
+    def _decode_snapshot(payload: str) -> QImage | None:
         try:
             encoded = payload.encode("ascii")
             pixels = base64.b64decode(encoded, validate=True)
         except UnicodeEncodeError, binascii.Error, ValueError:
-            return
+            return None
         image = QImage.fromData(pixels)
-        if image.isNull():
-            return
-        if kind == "harmonization":
-            if self._surface.set_harmonization_reference(image):
-                self._latest_harmonization_revision = revision
-            return
+        return None if image.isNull() else image
+
+    def _publish_background_snapshot(self, revision: int, image: QImage) -> None:
         if self._surface.set_background(image, update_harmonization_reference=False):
             self._background_timer.stop()
             self._latest_snapshot_revision = revision
+            pending = self._pending_harmonization_snapshot
+            if pending is not None:
+                pending_revision, pending_image = pending
+                if pending_revision == revision:
+                    self._publish_harmonization_snapshot(pending_revision, pending_image)
+                elif pending_revision < revision:
+                    self._pending_harmonization_snapshot = None
             self._record_background_refresh()
+
+    def _publish_harmonization_snapshot(self, revision: int, image: QImage) -> None:
+        if self._surface.set_harmonization_reference(image):
+            self._latest_harmonization_revision = revision
+            self._pending_harmonization_snapshot = None
+
+    def _invalidate_harmonization_reference(self) -> None:
+        self._pending_harmonization_snapshot = None
+        self._surface.clear_harmonization_reference()
+
+    @staticmethod
+    def _harmonization_viewpoint_changed(previous: Viewpoint, current: Viewpoint) -> bool:
+        return previous.model_dump(exclude={"depth_of_field"}) != current.model_dump(
+            exclude={"depth_of_field"},
+        )
 
     def _record_background_refresh(self) -> None:
         started_at = self._background_refresh_started_at
@@ -424,6 +470,8 @@ class NativeLivePreview(QWidget):
             self._background_refresh_started_at = None
 
     def _schedule_background_capture(self) -> None:
+        if self._snapshot_handshake:
+            return
         self._background_capture_attempts = 0
         self._background_timer.start(BACKGROUND_CAPTURE_DELAY_MS)
 
@@ -543,8 +591,8 @@ class NativeLivePreview(QWidget):
             return
         if composite.harmonized:
             self.harmonization_status_changed.emit(
-                f"Global Harmonizer: {composite.harmonization_ms:.1f} ms/frame "
-                f"on {self._surface.harmonization_backend} "
+                f"Global harmonization: {composite.harmonization_ms:.1f} ms/frame "
+                f"via {self._surface.harmonization_backend} "
                 f"(30 FPS budget: {TARGET_FRAME_BUDGET_MS:.1f} ms).",
             )
         elif composite.harmonization_degraded:
