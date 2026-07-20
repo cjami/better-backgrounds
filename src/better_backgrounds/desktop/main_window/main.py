@@ -364,7 +364,10 @@ class MainWindow(QMainWindow):
     @Slot(str, object)
     def _save_viewpoint(self, room_id: str, viewpoint: object) -> None:
         if isinstance(viewpoint, Viewpoint):
-            self._library.viewpoints.save(room_id, viewpoint)
+            try:
+                self._library.viewpoints.save(room_id, viewpoint)
+            except OSError:
+                self._adjust_page.report_viewpoint_save_error(room_id, viewpoint)
 
     @Slot(object)
     def _preview_viewpoint(self, viewpoint: object) -> None:
@@ -374,18 +377,21 @@ class MainWindow(QMainWindow):
             if callable(setter):
                 setter(viewpoint.aspect_ratio)
 
-    @Slot(str, str, object, object)
+    @Slot(str, str, str, object, object)
     def _save_snapshot(
         self,
+        request_id: str,
         room_id: str,
         asset_id: str,
         viewpoint: object,
         background: object,
     ) -> None:
         if not isinstance(viewpoint, Viewpoint) or not isinstance(background, bytes):
+            self._adjust_page.report_snapshot_save_error(request_id)
             return
         scene = self._library.scene_for_id(asset_id)
         if scene is None or room_id != scene.asset_id:
+            self._adjust_page.report_snapshot_save_error(request_id)
             return
         try:
             snapshot = self._library.snapshots.save(
@@ -394,6 +400,7 @@ class MainWindow(QMainWindow):
                 background,
             )
         except OSError, ValueError:
+            self._adjust_page.report_snapshot_save_error(request_id)
             return
         if self.selected_room_id != room_id:
             return

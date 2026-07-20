@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import binascii
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 COMPLETE_PROGRESS = 100
+AUTOSAVE_DELAY_MS = 500
+AUTOSAVE_RETRY_MS = 2_000
 
 
 class AdjustPage(QWidget):
@@ -34,7 +37,7 @@ class AdjustPage(QWidget):
 
     viewpoint_saved = Signal(str, object)
     viewpoint_previewed = Signal(object)
-    snapshot_generated = Signal(str, str, object, object)
+    snapshot_generated = Signal(str, str, str, object, object)
 
     def __init__(
         self,
@@ -53,8 +56,18 @@ class AdjustPage(QWidget):
         self._scene: SceneReference | None = None
         self._installed = False
         self._resource_active = True
-        self._snapshot_request: tuple[str, str, Viewpoint] | None = None
+        self._scene_ready = False
+        self._dirty_rooms: set[str] = set()
+        self._retried_rooms: set[str] = set()
+        self._snapshot_requests: dict[str, tuple[str, str, Viewpoint]] = {}
+        self._latest_snapshot_by_room: dict[str, str] = {}
         self._spatial_depth_available = False
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.timeout.connect(self._flush_current_autosave)
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._flush_current_autosave)
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -85,16 +98,14 @@ class AdjustPage(QWidget):
         actions = QHBoxLayout()
         self._attribution = _label("", object_name="muted", word_wrap=True)
         actions.addWidget(self._attribution, 1)
+        self._save_status = _label("Changes save automatically", object_name="muted")
+        self._save_status.setAccessibleName("Automatic save status")
+        actions.addWidget(self._save_status)
         actions.addStretch()
         reset = QPushButton("Reset view")
         reset.setObjectName("quietAction")
         reset.clicked.connect(self._reset_viewpoint)
         actions.addWidget(reset)
-        self._save = QPushButton("Save changes")
-        self._save.setObjectName("primary")
-        self._save.setEnabled(False)
-        self._save.clicked.connect(self._save_viewpoint)
-        actions.addWidget(self._save)
         scene_layout.addLayout(actions)
         root.addWidget(scene, 1)
 
@@ -138,25 +149,34 @@ class AdjustPage(QWidget):
     def discard_viewpoint(self, room_id: str) -> None:
         """Forget an in-memory camera draft when scene framing is rebuilt."""
         self._drafts.pop(room_id, None)
+        self._dirty_rooms.discard(room_id)
+        self._retried_rooms.discard(room_id)
+        self._latest_snapshot_by_room.pop(room_id, None)
         if self._room_id == room_id:
             self._room_id = ""
             self._loaded_scene_id = ""
+            self._scene_ready = False
 
     def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
         """Load spatial geometry only while Adjust is the active product tab."""
         if active == self._resource_active:
             return
-        self._resource_active = active
         resource_setter = getattr(self._renderer, "set_resource_active", None)
         if not active:
+            self._autosave_timer.stop()
+            self._retry_timer.stop()
+            self._flush_current_autosave()
+            self._resource_active = False
             clearer = getattr(self._renderer, "clear_scene", None)
             if callable(clearer):
                 clearer()
             self._loaded_scene_id = ""
-            self._save.setEnabled(False)
+            self._scene_ready = False
             if callable(resource_setter):
                 resource_setter(active=False)
             return
+        self._resource_active = True
+        self._retried_rooms.discard(self._room_id)
         if callable(resource_setter):
             resource_setter(active=True)
         if self._room_id:
@@ -176,12 +196,15 @@ class AdjustPage(QWidget):
         viewpoint: Viewpoint | None = None,
     ) -> None:
         """Restore one room draft and load its managed scene at most once."""
+        if self._room_id and self._room_id != room:
+            self._autosave_timer.stop()
+            self._retry_timer.stop()
+            self._flush_current_autosave()
         if self._room_id:
             self._drafts[self._room_id] = self._viewpoint
         self._room_id = room
         self._scene = scene
         self._installed = installed
-        self._snapshot_request = None
         self.setAccessibleDescription(f"Adjust settings for {room}")
         self._default_viewpoint = scene.default_viewpoint if scene is not None else Viewpoint()
         self._spatial_depth_available = scene is not None
@@ -194,19 +217,17 @@ class AdjustPage(QWidget):
         self._sync_depth_controls()
 
         if scene is None:
-            self._save.setEnabled(False)
             self._renderer.show()
             self._scene_status.setText("No spatial scene is registered for this room yet")
             self._attribution.clear()
             return
         self._attribution.setText(f"{scene.attribution} · {scene.license_name}")
         if not installed:
-            self._save.setEnabled(False)
             self._renderer.hide()
             self._scene_status.setText("Install this sample in Show to explore its spatial scene")
             return
         self._renderer.show()
-        self._save.setEnabled(self._loaded_scene_id == scene.asset_id)
+        self._scene_ready = self._scene_ready and self._loaded_scene_id == scene.asset_id
         self._scene_status.setText("Loading spatial scene…")
         if not self._resource_active:
             self._scene_status.setText("Open Adjust to load the spatial scene")
@@ -215,6 +236,7 @@ class AdjustPage(QWidget):
         setter = getattr(self._renderer, method_name, None)
         if callable(setter):
             if method_name == "set_scene":
+                self._scene_ready = False
                 setter(scene, self._viewpoint)
                 self._loaded_scene_id = scene.asset_id
             else:
@@ -222,82 +244,167 @@ class AdjustPage(QWidget):
 
     def _set_scene_progress(self, loaded: int, total: int) -> None:
         progress = round(loaded / total * 100)
-        self._save.setEnabled(progress == COMPLETE_PROGRESS)
+        self._scene_ready = progress == COMPLETE_PROGRESS
         message = "Scene ready" if progress == COMPLETE_PROGRESS else f"Loading scene… {progress}%"
         self._scene_status.setText(message)
+        if self._scene_ready and self._room_id in self._dirty_rooms:
+            self._autosave_timer.start(AUTOSAVE_DELAY_MS)
 
     def _set_scene_error(self, message: str) -> None:
+        pending_requests = [
+            request_id
+            for request_id, request in self._snapshot_requests.items()
+            if request[0] == self._room_id
+        ]
+        if pending_requests:
+            for request_id in pending_requests:
+                self._fail_snapshot(request_id)
+            return
         self._loaded_scene_id = ""
-        self._save.setEnabled(False)
+        self._scene_ready = False
         self._scene_status.setText(f"Scene unavailable: {message}. Re-select the room to retry.")
 
     def _accept_renderer_viewpoint(self, viewpoint: object) -> None:
         if isinstance(viewpoint, Viewpoint):
             self._viewpoint = viewpoint
-            self._drafts[self._room_id] = viewpoint
             self._sync_controls()
-            self.viewpoint_previewed.emit(viewpoint)
+            self._publish_viewpoint_change(apply_to_renderer=False)
 
     def _reset_viewpoint(self) -> None:
         self._viewpoint = self._default_viewpoint
-        self._drafts[self._room_id] = self._viewpoint
         self._sync_controls()
-        setter = getattr(self._renderer, "set_viewpoint", None)
-        if callable(setter):
-            setter(self._viewpoint)
-        self.viewpoint_previewed.emit(self._viewpoint)
+        self._publish_viewpoint_change()
         self._scene_status.setText("View reset to the safe prepared camera")
 
-    def _save_viewpoint(self) -> None:
-        if self._room_id:
-            self.viewpoint_saved.emit(self._room_id, self._viewpoint)
-            self._request_snapshot()
-
-    def _request_snapshot(self) -> None:
+    @Slot()
+    def _flush_current_autosave(self) -> None:
+        room_id = self._room_id
         scene = self._scene
-        requester = getattr(self._renderer, "request_snapshot", None)
-        if (
-            scene is None
-            or not self._installed
-            or self._loaded_scene_id != scene.asset_id
-            or not callable(requester)
-        ):
-            self._scene_status.setText("Viewpoint saved for this room")
+        if room_id not in self._dirty_rooms:
             return
-        self._snapshot_request = (self._room_id, scene.asset_id, self._viewpoint)
-        requester()
-        self._scene_status.setText("Saving the current view...")
+        if (
+            not room_id
+            or scene is None
+            or not self._installed
+            or not self._scene_ready
+            or self._loaded_scene_id != scene.asset_id
+            or not self._resource_active
+        ):
+            self._save_status.setText("Changes will save when the scene is ready")
+            return
+        viewpoint = self._viewpoint
+        self._dirty_rooms.discard(room_id)
+        self.viewpoint_saved.emit(room_id, viewpoint)
+        if room_id in self._dirty_rooms:
+            return
+        requester = getattr(self._renderer, "request_snapshot", None)
+        if not callable(requester):
+            self._retried_rooms.discard(room_id)
+            self._save_status.setText("Changes saved automatically")
+            return
+        request_id = uuid4().hex
+        self._snapshot_requests[request_id] = (room_id, scene.asset_id, viewpoint)
+        self._latest_snapshot_by_room[room_id] = request_id
+        requester(request_id)
+        self._save_status.setText("Saving changes automatically…")
 
     def _accept_renderer_snapshot(
         self,
         asset_id: str,
         _revision: int,
         kind: str,
+        request_id: str,
         payload: str,
     ) -> None:
-        request = self._snapshot_request
+        request = self._snapshot_requests.get(request_id)
         if (
             request is None
             or asset_id != request[1]
-            or request[2] != self._viewpoint
             or kind != "background"
+            or self._latest_snapshot_by_room.get(request[0]) != request_id
         ):
+            self._snapshot_requests.pop(request_id, None)
             return
         try:
             background = base64.b64decode(payload.encode("ascii"), validate=True)
         except UnicodeEncodeError, binascii.Error, ValueError:
-            self._scene_status.setText("Rendered background was invalid; save again to retry")
-            self._snapshot_request = None
+            self._fail_snapshot(request_id)
             return
         room_id, requested_asset_id, viewpoint = request
-        self._snapshot_request = None
         self.snapshot_generated.emit(
+            request_id,
             room_id,
             requested_asset_id,
             viewpoint,
             background,
         )
-        self._scene_status.setText("Settings and rendered background saved")
+        if request_id not in self._snapshot_requests:
+            return
+        self._snapshot_requests.pop(request_id, None)
+        self._latest_snapshot_by_room.pop(room_id, None)
+        self._retried_rooms.discard(room_id)
+        if room_id == self._room_id and room_id not in self._dirty_rooms:
+            self._save_status.setText("Changes saved automatically")
+
+    def report_viewpoint_save_error(self, room_id: str, viewpoint: Viewpoint) -> None:
+        """Keep a failed viewpoint write pending for automatic retry."""
+        if self._drafts.get(room_id, viewpoint) != viewpoint:
+            return
+        self._dirty_rooms.add(room_id)
+        self._latest_snapshot_by_room.pop(room_id, None)
+        self._schedule_retry(room_id)
+
+    def report_snapshot_save_error(self, request_id: str) -> None:
+        """Keep a failed derived-background write pending for automatic retry."""
+        self._fail_snapshot(request_id)
+
+    def _publish_viewpoint_change(self, *, apply_to_renderer: bool = True) -> None:
+        if not self._room_id:
+            return
+        viewpoint = self._viewpoint
+        self._drafts[self._room_id] = viewpoint
+        if apply_to_renderer:
+            setter = getattr(self._renderer, "set_viewpoint", None)
+            if callable(setter):
+                setter(viewpoint)
+        self.viewpoint_previewed.emit(viewpoint)
+        self._dirty_rooms.add(self._room_id)
+        self._retried_rooms.discard(self._room_id)
+        self._latest_snapshot_by_room.pop(self._room_id, None)
+        self._save_status.setText("Saving changes automatically…")
+        self._retry_timer.stop()
+        if self._scene_ready and self._resource_active:
+            self._autosave_timer.start(AUTOSAVE_DELAY_MS)
+
+    def _fail_snapshot(self, request_id: str) -> None:
+        request = self._snapshot_requests.pop(request_id, None)
+        if request is None:
+            return
+        room_id, _asset_id, viewpoint = request
+        if self._latest_snapshot_by_room.get(room_id) == request_id:
+            self._latest_snapshot_by_room.pop(room_id, None)
+        if self._drafts.get(room_id, viewpoint) == viewpoint:
+            self._dirty_rooms.add(room_id)
+            self._schedule_retry(room_id)
+
+    def _schedule_retry(self, room_id: str) -> None:
+        can_retry = not (
+            room_id != self._room_id
+            or not self._resource_active
+            or not self._scene_ready
+            or room_id in self._retried_rooms
+        )
+        if room_id == self._room_id:
+            message = (
+                "Couldn't save automatically; retrying…"
+                if can_retry
+                else "Couldn't save automatically; will retry later"
+            )
+            self._save_status.setText(message)
+        if not can_retry:
+            return
+        self._retried_rooms.add(room_id)
+        self._retry_timer.start(AUTOSAVE_RETRY_MS)
 
     def _apply_preset(self, name: str) -> None:
         default = self._default_viewpoint
@@ -316,12 +423,8 @@ class AdjustPage(QWidget):
         else:
             viewpoint = default.model_copy(update={"field_of_view": 90.0})
         self._viewpoint = viewpoint
-        self._drafts[self._room_id] = viewpoint
         self._sync_controls()
-        setter = getattr(self._renderer, "set_viewpoint", None)
-        if callable(setter):
-            setter(viewpoint)
-        self.viewpoint_previewed.emit(viewpoint)
+        self._publish_viewpoint_change()
 
     def _add_slider(
         self,
@@ -368,22 +471,14 @@ class AdjustPage(QWidget):
         else:
             return
         self._viewpoint = self._viewpoint.model_copy(update=update)
-        self._drafts[self._room_id] = self._viewpoint
-        setter = getattr(self._renderer, "set_viewpoint", None)
-        if callable(setter):
-            setter(self._viewpoint)
-        self.viewpoint_previewed.emit(self._viewpoint)
+        self._publish_viewpoint_change()
 
     def _aspect_changed(self, _index: int) -> None:
         self._viewpoint = self._viewpoint.model_copy(
             update={"aspect_ratio": float(self._aspect.currentData())},
         )
-        self._drafts[self._room_id] = self._viewpoint
         self._aspect_preview.set_aspect_ratio(self._viewpoint.aspect_ratio)
-        setter = getattr(self._renderer, "set_viewpoint", None)
-        if callable(setter):
-            setter(self._viewpoint)
-        self.viewpoint_previewed.emit(self._viewpoint)
+        self._publish_viewpoint_change()
 
     def _sync_controls(self) -> None:
         values = {

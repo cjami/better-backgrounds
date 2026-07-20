@@ -66112,8 +66112,8 @@ fn prepareOutputFromGamma(gammaColor: vec3f, depth: f32) -> vec3f {
 	    this.bridge.output_size_requested.connect((width, height) => {
 	      this.setOutputSize(width, height);
 	    });
-	    this.bridge.snapshot_requested.connect(() => {
-	      this.publishCurrentSnapshot();
+	    this.bridge.snapshot_requested.connect((requestId) => {
+	      this.publishCurrentSnapshot(requestId);
 	    });
 	    this.bridge.renderer_active_requested.connect((active) => {
 	      this.setRendererActive(active);
@@ -66719,11 +66719,11 @@ fn prepareOutputFromGamma(gammaColor: vec3f, depth: f32) -> vec3f {
 	    };
 	  }
 
-	  async publishSceneSnapshot(assetId, revision, kind) {
+	  async publishSceneSnapshot(assetId, revision, kind, requestId = '') {
 	    try {
 	      const blob = await this.sceneSnapshot.convertToBlob({ type: 'image/png' });
 	      const payload = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
-	      this.bridge.report_snapshot_ready(assetId, revision, kind, payload);
+	      this.bridge.report_snapshot_ready(assetId, revision, kind, requestId, payload);
 	    } catch (error) {
 	      this.bridge.report_scene_error(
 	        assetId || 'renderer',
@@ -66733,11 +66733,16 @@ fn prepareOutputFromGamma(gammaColor: vec3f, depth: f32) -> vec3f {
 	    }
 	  }
 
-	  publishCurrentSnapshot() {
+	  publishCurrentSnapshot(requestId = '') {
 	    if (!this.sceneEntity) return;
 	    try {
 	      if (!this.captureSceneFrame().hasContent) return;
-	      void this.publishSceneSnapshot(this.assetId, this.snapshotRevision, 'background');
+	      void this.publishSceneSnapshot(
+	        this.assetId,
+	        this.snapshotRevision,
+	        'background',
+	        requestId,
+	      );
 	    } catch (error) {
 	      this.bridge.report_scene_error(
 	        this.assetId || 'renderer',

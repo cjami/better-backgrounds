@@ -11,6 +11,7 @@ ViewpointMessage = Viewpoint
 MAX_CAMERA_STATUS_LENGTH = 300
 MAX_SNAPSHOT_BASE64_LENGTH = 16 * 1024 * 1024
 MAX_RENDERER_OUTPUT_SIZE = 8_192
+MAX_SNAPSHOT_REQUEST_ID_LENGTH = 128
 
 
 class SceneErrorMessage(BaseModel):
@@ -30,13 +31,13 @@ class RendererBridge(QObject):
     viewpoint_received = Signal(object)
     scene_progressed = Signal(str, int, int)
     scene_failed = Signal(object)
-    snapshot_ready = Signal(str, int, str, str)
+    snapshot_ready = Signal(str, int, str, str, str)
     scene_requested = Signal(str, str, str, bool)
     viewpoint_requested = Signal(str)
     reset_requested = Signal()
     scene_cleared = Signal()
     output_size_requested = Signal(int, int)
-    snapshot_requested = Signal()
+    snapshot_requested = Signal(str)
     renderer_active_requested = Signal(bool)
 
     @Slot()
@@ -72,12 +73,13 @@ class RendererBridge(QObject):
         self.scene_failed.emit(error)
         return True
 
-    @Slot(str, int, str, str, result=bool)
+    @Slot(str, int, str, str, str, result=bool)
     def report_snapshot_ready(
         self,
         asset_id: str,
         revision: int,
         kind: str,
+        request_id: str,
         payload: str,
     ) -> bool:
         """Publish a settled, revision-tagged renderer output."""
@@ -85,10 +87,12 @@ class RendererBridge(QObject):
             not asset_id
             or revision < 0
             or kind not in {"background", "harmonization"}
+            or len(request_id) > MAX_SNAPSHOT_REQUEST_ID_LENGTH
+            or (request_id and not request_id.isascii())
             or not 1 <= len(payload) <= MAX_SNAPSHOT_BASE64_LENGTH
         ):
             return False
-        self.snapshot_ready.emit(asset_id, revision, kind, payload)
+        self.snapshot_ready.emit(asset_id, revision, kind, request_id, payload)
         return True
 
     def request_scene(
@@ -129,9 +133,14 @@ class RendererBridge(QObject):
             raise ValueError(msg)
         self.output_size_requested.emit(width, height)
 
-    def request_snapshot(self) -> None:
+    def request_snapshot(self, request_id: str = "") -> None:
         """Capture the framebuffer currently visible in Adjust."""
-        self.snapshot_requested.emit()
+        if len(request_id) > MAX_SNAPSHOT_REQUEST_ID_LENGTH or (
+            request_id and not request_id.isascii()
+        ):
+            msg = "snapshot request identifier must be bounded ASCII"
+            raise ValueError(msg)
+        self.snapshot_requested.emit(request_id)
 
     def request_renderer_active(self, *, active: bool) -> None:
         """Suspend or resume the interactive renderer's frame loop."""

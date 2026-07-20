@@ -496,12 +496,13 @@ class NativeLivePreview(QWidget):
         if loaded == total:
             self._schedule_background_capture()
 
-    @Slot(str, int, str, str)
+    @Slot(str, int, str, str, str)
     def _snapshot_ready(
         self,
         asset_id: str,
         revision: int,
         kind: str,
+        _request_id: str,
         payload: str,
     ) -> None:
         """Publish validated framebuffer pixels directly to the live compositor."""

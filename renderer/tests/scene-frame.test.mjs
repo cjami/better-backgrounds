@@ -103,7 +103,7 @@ test('cached scene requests render on demand until a valid frame can be captured
   assert.equal(renderer.sceneFramesRemaining, 2);
 });
 
-test('interactive scene save exports the currently visible framebuffer', () => {
+test('interactive scene save exports the tagged visible framebuffer', () => {
   const published = [];
   const renderer = Object.create(SceneRenderer.prototype);
   renderer.assetId = 'room-v1';
@@ -113,9 +113,9 @@ test('interactive scene save exports the currently visible framebuffer', () => {
   renderer.publishSceneSnapshot = (...args) => published.push(args);
   renderer.bridge = { report_scene_error: () => {} };
 
-  renderer.publishCurrentSnapshot();
+  renderer.publishCurrentSnapshot('save-1');
 
-  assert.deepEqual(published, [['room-v1', 4, 'background']]);
+  assert.deepEqual(published, [['room-v1', 4, 'background', 'save-1']]);
 });
 
 test('inactive interactive renderer does not schedule hidden frames', () => {

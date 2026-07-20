@@ -243,7 +243,9 @@ wheel moves through streamed rooms or zooms around PLY scenes. Hold
 accelerates movement. While Adjust is active, live camera capture, matting, and
 hidden snapshot rendering are suspended; the settled hidden scene is retained so
 returning to a live page cannot publish a partially reloaded streamed room. Camera
-capture and matting resume on the live page. Re-importing a room resets stale saved
+capture and matting resume on the live page. Viewpoint edits and their rendered
+background save automatically after a brief pause, with pending edits flushed when
+leaving Adjust. Re-importing a room resets stale saved
 framing so the new calibrated entry viewpoint is used immediately. Streamed rooms
 also wait for their resident LOD chunks to settle before publishing a Show snapshot.
 

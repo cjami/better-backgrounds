@@ -20,7 +20,7 @@ class SnapshotRenderer(QWidget):
     """Record hidden-renderer requests and expose deterministic capture pixels."""
 
     scene_progressed = Signal(int, int)
-    snapshot_ready = Signal(str, int, str, str)
+    snapshot_ready = Signal(str, int, str, str, str)
 
     def __init__(self) -> None:
         """Create empty request logs and a non-uniform capture image."""
@@ -115,8 +115,8 @@ def test_live_snapshot_rejects_a_stale_revision() -> None:
     preview = NativeLivePreview(background_factory=lambda: renderer)
     preview._scene_asset_id = "room-v1"  # noqa: SLF001
 
-    renderer.snapshot_ready.emit("room-v1", 2, "background", renderer.payload)
-    renderer.snapshot_ready.emit("room-v1", 1, "background", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 2, "background", "", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 1, "background", "", renderer.payload)
 
     assert preview._latest_snapshot_revision == 2  # noqa: SLF001
     preview.close()
@@ -129,7 +129,7 @@ def test_live_snapshot_delivers_framebuffer_pixels_without_grabbing_the_hidden_v
     preview = NativeLivePreview(background_factory=lambda: renderer)
     preview._scene_asset_id = "room-v1"  # noqa: SLF001
 
-    renderer.snapshot_ready.emit("room-v1", 4, "background", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 4, "background", "", renderer.payload)
 
     assert preview._latest_snapshot_revision == 4  # noqa: SLF001
     assert preview._surface._background_revision == 1  # noqa: SLF001
@@ -143,12 +143,12 @@ def test_dof_snapshot_does_not_replace_the_sharp_harmonization_reference() -> No
     preview = NativeLivePreview(background_factory=lambda: renderer)
     preview._scene_asset_id = "room-v1"  # noqa: SLF001
 
-    renderer.snapshot_ready.emit("room-v1", 5, "harmonization", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 5, "harmonization", "", renderer.payload)
     assert preview._surface._harmonization_revision == 0  # noqa: SLF001
     assert preview._latest_harmonization_revision == -1  # noqa: SLF001
-    renderer.snapshot_ready.emit("room-v1", 5, "background", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 5, "background", "", renderer.payload)
     reference_revision = preview._surface._harmonization_revision  # noqa: SLF001
-    renderer.snapshot_ready.emit("room-v1", 6, "background", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 6, "background", "", renderer.payload)
 
     assert preview._latest_harmonization_revision == 5  # noqa: SLF001
     assert preview._latest_snapshot_revision == 6  # noqa: SLF001
@@ -179,15 +179,15 @@ def test_camera_viewpoint_change_discards_reference_until_matching_pair_arrives(
     renderer = SnapshotRenderer()
     preview = NativeLivePreview(background_factory=lambda: renderer)
     preview._scene_asset_id = "room-v1"  # noqa: SLF001
-    renderer.snapshot_ready.emit("room-v1", 1, "harmonization", renderer.payload)
-    renderer.snapshot_ready.emit("room-v1", 1, "background", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 1, "harmonization", "", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 1, "background", "", renderer.payload)
     assert preview._surface._harmonization_background is not None  # noqa: SLF001
 
     preview.set_viewpoint(Viewpoint(field_of_view=55))
 
     assert preview._surface._harmonization_background is None  # noqa: SLF001
-    renderer.snapshot_ready.emit("room-v1", 2, "harmonization", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 2, "harmonization", "", renderer.payload)
     assert preview._surface._harmonization_background is None  # noqa: SLF001
-    renderer.snapshot_ready.emit("room-v1", 2, "background", renderer.payload)
+    renderer.snapshot_ready.emit("room-v1", 2, "background", "", renderer.payload)
     assert preview._surface._harmonization_background is not None  # noqa: SLF001
     preview.close()

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QBuffer, QIODevice, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import (
     QApplication,
@@ -80,17 +80,18 @@ class TrackingRenderer(ScenePreview):
 class SnapshotTrackingRenderer(TrackingRenderer):
     """Expose current-frame snapshot signals for Adjust-page tests."""
 
-    snapshot_ready = Signal(str, int, str, str)
+    snapshot_ready = Signal(str, int, str, str, str)
     scene_progressed = Signal(int, int)
+    viewpoint_changed = Signal(object)
 
     def __init__(self) -> None:
         """Record requested output dimensions."""
         super().__init__()
-        self.snapshot_requests = 0
+        self.snapshot_requests: list[str] = []
 
-    def request_snapshot(self) -> None:
+    def request_snapshot(self, request_id: str) -> None:
         """Record one explicit current-frame export."""
-        self.snapshot_requests += 1
+        self.snapshot_requests.append(request_id)
 
 
 class PassiveVirtualCamera:
@@ -323,8 +324,126 @@ def test_adjust_unloads_scene_and_suspends_rendering_when_hidden() -> None:
     page.close()
 
 
-def test_adjust_saves_the_current_renderer_frame_immediately() -> None:
-    """Use the visible framebuffer as both presentation and room evidence."""
+def test_adjust_debounces_automatic_saving_and_exports_the_latest_frame() -> None:
+    """Persist only the latest viewpoint and its tagged visible framebuffer."""
+    application()
+    renderer = SnapshotTrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    saved: list[tuple[str, Viewpoint]] = []
+    generated: list[tuple[object, ...]] = []
+    page.viewpoint_saved.connect(lambda room_id, viewpoint: saved.append((room_id, viewpoint)))
+    page.snapshot_generated.connect(lambda *values: generated.append(values))
+    page.set_room(scene.asset_id, scene, installed=True)
+    renderer.scene_progressed.emit(100, 100)
+    slider = next(
+        control
+        for control in page.findChildren(QSlider)
+        if control.accessibleName() == "Field of view"
+    )
+
+    slider.setValue(50)
+    slider.setValue(55)
+
+    assert page._autosave_timer.isActive()  # noqa: SLF001
+    assert page._autosave_timer.interval() == 500  # noqa: SLF001
+    assert saved == []
+    assert renderer.snapshot_requests == []
+    page._flush_current_autosave()  # noqa: SLF001
+    request_id = renderer.snapshot_requests[0]
+    renderer.snapshot_ready.emit(
+        scene.asset_id,
+        4,
+        "background",
+        request_id,
+        base64.b64encode(b"background").decode(),
+    )
+
+    assert saved == [
+        (scene.asset_id, scene.default_viewpoint.model_copy(update={"field_of_view": 55.0})),
+    ]
+    assert generated == [
+        (
+            request_id,
+            scene.asset_id,
+            scene.asset_id,
+            scene.default_viewpoint.model_copy(update={"field_of_view": 55.0}),
+            b"background",
+        ),
+    ]
+    assert all(button.text() != "Save changes" for button in page.findChildren(QPushButton))
+    assert any(
+        label.accessibleName() == "Automatic save status" for label in page.findChildren(QLabel)
+    )
+    page.close()
+
+
+def test_adjust_queues_loading_changes_and_flushes_before_releasing_renderer() -> None:
+    """Keep the latest edit pending until it can be captured safely."""
+    application()
+    renderer = SnapshotTrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    saved: list[Viewpoint] = []
+    page.viewpoint_saved.connect(lambda _room_id, viewpoint: saved.append(viewpoint))
+    page.set_room(scene.asset_id, scene, installed=True)
+    slider = next(
+        control for control in page.findChildren(QSlider) if control.accessibleName() == "Horizon"
+    )
+
+    slider.setValue(20)
+    assert not page._autosave_timer.isActive()  # noqa: SLF001
+    assert saved == []
+
+    renderer.scene_progressed.emit(100, 100)
+    assert page._autosave_timer.isActive()  # noqa: SLF001
+    page.set_resource_active(False)
+
+    assert saved == [scene.default_viewpoint.model_copy(update={"horizon": 2.0})]
+    assert len(renderer.snapshot_requests) == 1
+    assert renderer.clears == 1
+    page.close()
+
+
+def test_adjust_routes_every_viewpoint_interaction_through_autosave() -> None:
+    """Treat renderer navigation and every Python-owned control as durable edits."""
+    application()
+    renderer = SnapshotTrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    page.set_room(scene.asset_id, scene, installed=True)
+    renderer.scene_progressed.emit(100, 100)
+    controls = {slider.accessibleName(): slider for slider in page.findChildren(QSlider)}
+    buttons = {button.text(): button for button in page.findChildren(QPushButton)}
+    aspect = next(
+        combo
+        for combo in page.findChildren(QComboBox)
+        if combo.accessibleName() == "Output aspect ratio"
+    )
+
+    def assert_scheduled() -> None:
+        assert scene.asset_id in page._dirty_rooms  # noqa: SLF001
+        assert page._autosave_timer.isActive()  # noqa: SLF001
+        page._autosave_timer.stop()  # noqa: SLF001
+        page._dirty_rooms.clear()  # noqa: SLF001
+
+    controls["Output crop"].setValue(10)
+    assert_scheduled()
+    aspect.setCurrentIndex(1)
+    assert_scheduled()
+    buttons["Wide"].click()
+    assert_scheduled()
+    buttons["Reset view"].click()
+    assert_scheduled()
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"field_of_view": 58}),
+    )
+    assert_scheduled()
+    page.close()
+
+
+def test_adjust_ignores_out_of_order_snapshot_responses() -> None:
+    """Never pair an old framebuffer with a newer persisted viewpoint."""
     application()
     renderer = SnapshotTrackingRenderer()
     page = AdjustPage(lambda: renderer)
@@ -333,23 +452,155 @@ def test_adjust_saves_the_current_renderer_frame_immediately() -> None:
     page.snapshot_generated.connect(lambda *values: generated.append(values))
     page.set_room(scene.asset_id, scene, installed=True)
     renderer.scene_progressed.emit(100, 100)
-    save = next(
-        button for button in page.findChildren(QPushButton) if button.text() == "Save changes"
+    slider = next(
+        control
+        for control in page.findChildren(QSlider)
+        if control.accessibleName() == "Field of view"
     )
 
-    save.click()
+    slider.setValue(50)
+    page._flush_current_autosave()  # noqa: SLF001
+    stale_request = renderer.snapshot_requests[-1]
+    slider.setValue(60)
+    page._flush_current_autosave()  # noqa: SLF001
+    latest_request = renderer.snapshot_requests[-1]
+    payload = base64.b64encode(b"background").decode()
+
+    renderer.snapshot_ready.emit(scene.asset_id, 1, "background", stale_request, payload)
+    renderer.snapshot_ready.emit(scene.asset_id, 2, "background", latest_request, payload)
+
+    assert len(generated) == 1
+    assert generated[0][0] == latest_request
+    assert cast("Viewpoint", generated[0][3]).field_of_view == 60
+    page.close()
+
+
+def test_adjust_retries_a_failed_snapshot_once_until_the_next_edit() -> None:
+    """Avoid losing a transient failure without entering an unbounded retry loop."""
+    application()
+    renderer = SnapshotTrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    page.snapshot_generated.connect(
+        lambda request_id, *_values: page.report_snapshot_save_error(request_id),
+    )
+    page.set_room(scene.asset_id, scene, installed=True)
+    renderer.scene_progressed.emit(100, 100)
+    slider = next(
+        control
+        for control in page.findChildren(QSlider)
+        if control.accessibleName() == "Field of view"
+    )
+    payload = base64.b64encode(b"background").decode()
+
+    slider.setValue(50)
+    page._flush_current_autosave()  # noqa: SLF001
     renderer.snapshot_ready.emit(
         scene.asset_id,
-        4,
+        1,
         "background",
-        base64.b64encode(b"background").decode(),
+        renderer.snapshot_requests[-1],
+        payload,
+    )
+    assert page._retry_timer.isActive()  # noqa: SLF001
+
+    page._retry_timer.stop()  # noqa: SLF001
+    page._flush_current_autosave()  # noqa: SLF001
+    renderer.snapshot_ready.emit(
+        scene.asset_id,
+        2,
+        "background",
+        renderer.snapshot_requests[-1],
+        payload,
+    )
+    assert not page._retry_timer.isActive()  # noqa: SLF001
+
+    slider.setValue(55)
+    assert page._autosave_timer.isActive()  # noqa: SLF001
+    page.close()
+
+
+def test_adjust_keeps_a_failed_viewpoint_write_pending() -> None:
+    """Do not publish a derived background when its durable viewpoint write failed."""
+    application()
+    renderer = SnapshotTrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    page.viewpoint_saved.connect(page.report_viewpoint_save_error)
+    page.set_room(scene.asset_id, scene, installed=True)
+    renderer.scene_progressed.emit(100, 100)
+    slider = next(
+        control
+        for control in page.findChildren(QSlider)
+        if control.accessibleName() == "Field of view"
     )
 
-    assert renderer.snapshot_requests == 1
-    assert generated == [
-        (scene.asset_id, scene.asset_id, scene.default_viewpoint, b"background"),
-    ]
+    slider.setValue(50)
+    page._flush_current_autosave()  # noqa: SLF001
+
+    assert scene.asset_id in page._dirty_rooms  # noqa: SLF001
+    assert page._retry_timer.isActive()  # noqa: SLF001
+    assert renderer.snapshot_requests == []
     page.close()
+
+
+def test_adjust_autosave_persists_viewpoint_snapshot_and_thumbnail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Publish one complete autosave through the main-window persistence boundary."""
+    application()
+    renderer = SnapshotTrackingRenderer()
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=lambda: renderer,
+        camera_source=InputCameraSource(lambda: ()),
+        scene_cache_root=tmp_path / "cache",
+        data_root=tmp_path / "data",
+    )
+    scene = load_sample_manifest().scenes[0]
+    monkeypatch.setattr(window._library.assets, "is_ready", lambda _scene: True)  # noqa: SLF001
+    window.select_room(scene.display_name)
+    window.select_tab(ADJUST_TAB)
+    renderer.scene_progressed.emit(100, 100)
+    page = window.findChild(AdjustPage)
+    assert page is not None
+    slider = next(
+        control
+        for control in page.findChildren(QSlider)
+        if control.accessibleName() == "Field of view"
+    )
+    slider.setValue(55)
+    page._flush_current_autosave()  # noqa: SLF001
+    viewpoint = scene.default_viewpoint.model_copy(update={"field_of_view": 55.0})
+    image = QImage(8, 8, QImage.Format.Format_RGB888)
+    image.fill(QColor("#202020"))
+    image.setPixelColor(0, 0, QColor("#f0f0f0"))
+    buffer = QBuffer()
+    assert buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert image.save(buffer, "PNG")  # ty: ignore[no-matching-overload]
+    encoded = cast("bytes", buffer.data().toBase64().data())
+    payload = encoded.decode("ascii")
+
+    renderer.snapshot_ready.emit(
+        scene.asset_id,
+        1,
+        "background",
+        renderer.snapshot_requests[-1],
+        payload,
+    )
+
+    assert window._library.viewpoints.load(scene.asset_id) == viewpoint  # noqa: SLF001
+    snapshot = window._library.snapshots.load(scene, viewpoint)  # noqa: SLF001
+    assert snapshot is not None
+    thumbnail = next(
+        label
+        for label in window.findChildren(QLabel)
+        if label.accessibleName() == f"{scene.display_name} thumbnail"
+    )
+    assert thumbnail.pixmap() is not None
+    assert not thumbnail.pixmap().isNull()
+    window.close()
 
 
 def test_adjust_reloads_a_reimported_scene_from_its_new_default() -> None:
@@ -579,16 +830,20 @@ def test_renderer_bridge_rejects_invalid_scene_status() -> None:
     """Keep progress and errors bounded before they reach Python UI state."""
     bridge = RendererBridge()
 
+    signature = "report_snapshot_ready(QString,int,QString,QString,QString)"
+    assert bridge.metaObject().indexOfMethod(signature) >= 0
+
     assert bridge.report_scene_progress("sample-room", 50, 100)
     assert not bridge.report_scene_progress("sample-room", 101, 100)
     assert bridge.report_scene_error("sample-room", "gpu_unavailable", "No GPU renderer")
     assert not bridge.report_scene_error("sample-room", "bad code!", "No GPU renderer")
-    assert bridge.report_snapshot_ready("sample-room", 3, "background", "cG5n")
-    assert bridge.report_snapshot_ready("sample-room", 3, "harmonization", "cG5n")
-    assert not bridge.report_snapshot_ready("sample-room", 3, "occlusion", "cG5n")
-    assert not bridge.report_snapshot_ready("sample-room", -1, "background", "cG5n")
-    assert not bridge.report_snapshot_ready("sample-room", 3, "depth", "cG5n")
-    assert not bridge.report_snapshot_ready("sample-room", 3, "background", "")
+    assert bridge.report_snapshot_ready("sample-room", 3, "background", "save-1", "cG5n")
+    assert bridge.report_snapshot_ready("sample-room", 3, "harmonization", "", "cG5n")
+    assert not bridge.report_snapshot_ready("sample-room", 3, "occlusion", "", "cG5n")
+    assert not bridge.report_snapshot_ready("sample-room", -1, "background", "", "cG5n")
+    assert not bridge.report_snapshot_ready("sample-room", 3, "depth", "", "cG5n")
+    assert not bridge.report_snapshot_ready("sample-room", 3, "background", "", "")
+    assert not bridge.report_snapshot_ready("sample-room", 3, "background", "é", "cG5n")
 
 
 def test_renderer_bridge_bounds_fixed_output_size() -> None:
@@ -602,6 +857,19 @@ def test_renderer_bridge_bounds_fixed_output_size() -> None:
     assert requested == [(1920, 1080)]
     with pytest.raises(ValueError, match="between 1 and 8192"):
         bridge.request_output_size(0, 1080)
+
+
+def test_renderer_bridge_tags_explicit_snapshot_requests() -> None:
+    """Correlate an Adjust capture with the exact save that requested it."""
+    bridge = RendererBridge()
+    requested: list[str] = []
+    bridge.snapshot_requested.connect(requested.append)
+
+    bridge.request_snapshot("save-1")
+
+    assert requested == ["save-1"]
+    with pytest.raises(ValueError, match="bounded ASCII"):
+        bridge.request_snapshot("é")
 
 
 def test_live_bridge_validates_camera_state_and_diagnostics() -> None:

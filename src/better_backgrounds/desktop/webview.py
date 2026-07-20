@@ -113,7 +113,7 @@ class SecureRendererView(QWebEngineView):
     scene_progressed = Signal(int, int)
     scene_failed = Signal(str)
     viewpoint_changed = Signal(object)
-    snapshot_ready = Signal(str, int, str, str)
+    snapshot_ready = Signal(str, int, str, str, str)
 
     def __init__(
         self,
@@ -181,7 +181,7 @@ class SecureRendererView(QWebEngineView):
         self._scene: SceneReference | None = None
         self._viewpoint = Viewpoint()
         self._output_size: tuple[int, int] | None = None
-        self._snapshot_pending = False
+        self._snapshot_pending: str | None = None
         self._resource_active = True
         self._load_placeholder()
 
@@ -191,9 +191,10 @@ class SecureRendererView(QWebEngineView):
             self._bridge.request_output_size(*self._output_size)
         self._send_pending_scene()
         self._bridge.request_renderer_active(active=self._resource_active)
-        if self._snapshot_pending:
-            self._snapshot_pending = False
-            self._bridge.request_snapshot()
+        if self._snapshot_pending is not None:
+            request_id = self._snapshot_pending
+            self._snapshot_pending = None
+            self._bridge.request_snapshot(request_id)
 
     def _forward_scene_progress(self, asset_id: str, loaded: int, total: int) -> None:
         scene = self._scene
@@ -250,12 +251,12 @@ class SecureRendererView(QWebEngineView):
         if self._renderer_ready:
             self._bridge.request_output_size(width, height)
 
-    def request_snapshot(self) -> None:
+    def request_snapshot(self, request_id: str = "") -> None:
         """Export the framebuffer currently visible in the interactive view."""
         if not self._renderer_ready:
-            self._snapshot_pending = True
+            self._snapshot_pending = request_id
             return
-        self._bridge.request_snapshot()
+        self._bridge.request_snapshot(request_id)
 
     def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
         """Suspend hidden WebGL work while presentation owns the GPU."""
