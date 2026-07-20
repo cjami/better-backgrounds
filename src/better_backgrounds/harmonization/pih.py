@@ -37,6 +37,7 @@ DEVELOPMENT_PIH_CHECKPOINT = (
     Path(__file__).resolve().parents[3] / ".tools" / "pih_bench" / "ckpt_g39.pth"
 )
 DEFAULT_CURVE_STRENGTH = 0.65
+CURVE_BLACK_LIFT_RETENTION = 0.8
 CURVE_SAMPLE_COUNT = 5
 CURVE_SAMPLE_INTERVAL_MS = 100.0
 CURVE_RECALIBRATION_INTERVAL_MS = 1_000.0
@@ -432,7 +433,10 @@ class PihAppearanceHarmonizer:
         black = curves[:, :, :1]
         white = curves[:, :, -1:]
         span = (white - black).clamp_min(torch.finfo(curves.dtype).eps)
-        return ((curves - black) * (white / span)).clamp(0.0, 1.0)
+        retained_black = black * CURVE_BLACK_LIFT_RETENTION
+        scale = (white - retained_black) / span
+        offset = retained_black - black * scale
+        return (curves * scale + offset).clamp(0.0, 1.0)
 
     @staticmethod
     def _coherent_curves(samples: torch.Tensor) -> torch.Tensor:

@@ -106,8 +106,8 @@ def test_compact_curve_renderer_matches_the_official_expanded_lut() -> None:
     assert torch.allclose(actual, expected, atol=2e-7, rtol=0.0)
 
 
-def test_pih_anchors_curve_black_without_changing_the_learned_white_point() -> None:
-    """Prevent washed-out shadows while retaining learned highlight compression."""
+def test_pih_retains_partial_curve_black_lift_without_changing_the_learned_white_point() -> None:
+    """Let a bounded shadow lift harmonize into bright scenes while stabilizing endpoints."""
     curves = torch.tensor(
         [
             [
@@ -120,9 +120,9 @@ def test_pih_anchors_curve_black_without_changing_the_learned_white_point() -> N
 
     anchored = PihAppearanceHarmonizer._anchor_curves(curves)  # noqa: SLF001
 
-    assert torch.equal(anchored[:, :, 0], torch.zeros((1, 3)))
-    assert torch.equal(anchored[:, :, -1], curves[:, :, -1])
-    assert torch.allclose(anchored[0, :, 1], torch.tensor([4 / 15, 0.45, 0.525]))
+    assert torch.allclose(anchored[:, :, 0], torch.tensor([[0.16, 0.08, 0.24]]))
+    assert torch.allclose(anchored[:, :, -1], curves[:, :, -1])
+    assert torch.allclose(anchored[0, :, 1], torch.tensor([28 / 75, 0.49, 0.585]))
 
 
 def test_pih_gain_regularizer_removes_blobs_but_preserves_directional_light() -> None:
