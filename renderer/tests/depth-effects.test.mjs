@@ -1,103 +1,212 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import * as pc from 'playcanvas';
+
 import {
   SceneRenderer,
-  buildDepthProxyGeometry,
-  buildViewDepthProxyGeometry,
-  collectDepthProxyCenters,
-  collectDepthProxySamples,
   configureGsplatStreaming,
   depthOfFieldForStrength,
+  focusDistanceAtCamera,
   harmonizationViewpointKey,
   isStreamedSceneUrl,
 } from '../src/main.mjs';
+import {
+  SPLAT_PREPASS_ALPHA_THRESHOLD,
+  configureGpuSplatDepth,
+  installSplatPrepass,
+  renderSplatPrepass,
+  repairSplatDepth,
+  smoothCircleOfConfusion,
+} from '../src/gpu-depth.mjs';
 
-const viewpoint = {
-  depth_of_field: { blur_strength: 0.5 },
-  field_of_view: 42,
-};
-
-test('streamed scenes refresh LOD detail after small camera turns and movements', () => {
+test('streamed scenes use the responsive LOD settings and GPU depth threshold', () => {
   const scene = { gsplat: {} };
 
   configureGsplatStreaming(scene);
 
   assert.equal(scene.gsplat.lodUpdateAngle, 2);
   assert.equal(scene.gsplat.lodUpdateDistance, 0.1);
+  assert.equal(scene.gsplat.alphaClip, 0.1);
   assert.equal(isStreamedSceneUrl('scene://room/lod-meta.json'), true);
   assert.equal(isStreamedSceneUrl('scene://room/scene.ply'), false);
 });
 
-test('normal depth of field stays locked to subject depth', () => {
-  const renderer = Object.create(SceneRenderer.prototype);
-  renderer.sceneEntity = {};
-  renderer.depthProxyEntity = {};
-  renderer.viewpoint = viewpoint;
-  renderer.cameraFrame = {
-    debug: null,
-    dof: {},
-    rendering: {},
-    updateCalled: false,
-    update() { this.updateCalled = true; },
-  };
+test('GPU splat depth uses the engine prepass alpha threshold', () => {
+  const scene = { gsplat: { alphaClip: 0 } };
 
-  renderer.configureNormalFrame();
+  configureGpuSplatDepth(scene);
 
-  assert.equal(renderer.cameraFrame.dof.enabled, true);
-  assert.equal(renderer.cameraFrame.dof.focusDistance, 1.5);
-  assert.ok(Math.abs(renderer.cameraFrame.dof.focusRange - 1.7) < 1e-10);
-  assert.equal(renderer.cameraFrame.dof.blurRadius, 4);
-  assert.equal(renderer.cameraFrame.dof.nearBlur, true);
-  assert.equal(renderer.cameraFrame.dof.highQuality, true);
-  assert.equal(renderer.cameraFrame.dof.blurRings, 4);
-  assert.equal(renderer.cameraFrame.dof.blurRingPoints, 5);
-  assert.equal(renderer.cameraFrame.rendering.sharpness, 0);
-  assert.equal(renderer.cameraFrame.updateCalled, true);
+  assert.equal(scene.gsplat.alphaClip, SPLAT_PREPASS_ALPHA_THRESHOLD);
 });
 
-test('depth-of-field blur opens the aperture and narrows the focus band', () => {
+test('the GPU prepass enables opaque depth state only for its draw', () => {
+  const originalBlendState = { name: 'premultiplied', clone() { return { ...this }; } };
+  const originalDepthState = { name: 'read-only', clone() { return { ...this }; } };
+  const material = {
+    blendState: originalBlendState,
+    depthState: originalDepthState,
+    depthWrite: false,
+  };
+  let rendered = false;
+
+  renderSplatPrepass([material], () => {
+    rendered = true;
+    assert.equal(material.blendState, pc.BlendState.NOBLEND);
+    assert.equal(material.depthWrite, true);
+  });
+
+  assert.equal(rendered, true);
+  assert.equal(material.blendState.name, 'premultiplied');
+  assert.equal(material.depthState.name, 'read-only');
+});
+
+test('the GPU prepass restores material state after a failed draw', () => {
+  const material = {
+    blendState: { name: 'premultiplied', clone() { return { ...this }; } },
+    depthState: { name: 'read-only', clone() { return { ...this }; } },
+    depthWrite: false,
+  };
+
+  assert.throws(
+    () => renderSplatPrepass([material], () => { throw new Error('draw failed'); }),
+    /draw failed/,
+  );
+  assert.equal(material.blendState.name, 'premultiplied');
+  assert.equal(material.depthState.name, 'read-only');
+});
+
+test('the native prepass draws the current unified splat manager', () => {
+  let draws = 0;
+  const splatMeshInstance = { material: null };
+  const material = {
+    blendState: { clone() { return { ...this }; } },
+    depthState: { clone() { return { ...this }; } },
+    depthWrite: false,
+  };
+  splatMeshInstance.material = material;
+  const camera = {};
+  const layer = {
+    id: 0,
+    enabled: true,
+    camerasSet: new Set([camera]),
+    getCulledInstances: () => ({ opaque: [], transparent: [] }),
+  };
+  const depthLayer = { id: pc.LAYERID_DEPTH };
+  const manager = { material, renderer: { meshInstance: splatMeshInstance } };
+  const prePass = {
+    camera: { camera },
+    renderTarget: {},
+    scene: {
+      layers: {
+        layerList: [layer, depthLayer, layer],
+        subLayerEnabled: [true, true, true],
+        subLayerList: [false, false, true],
+      },
+    },
+    renderer: {
+      renderForwardLayer(...args) {
+        draws += 1;
+        assert.deepEqual(args.at(-1).meshInstances, [splatMeshInstance]);
+        assert.equal(material.depthWrite, true);
+      },
+    },
+    viewBindGroups: [],
+  };
+  const cameraFrame = {
+    app: {
+      renderer: {
+        gsplatDirector: {
+          camerasMap: new Map([[camera, {
+            layersMap: new Map([[layer, { gsplatManager: manager }]]),
+          }]]),
+        },
+      },
+    },
+    cameraComponent: { camera },
+    renderPassCamera: { prePass },
+  };
+
+  assert.equal(installSplatPrepass(cameraFrame), true);
+  prePass.execute();
+
+  assert.equal(draws, 1);
+  assert.equal(material.depthWrite, false);
+  assert.equal(prePass.betterBackgroundsGpuDepth, true);
+});
+
+test('depth edge repair fills only well-supported continuous splat holes', () => {
+  const continuous = [3, 3.02, 3.01, 3, 3.03, 100, 100, 100, 100];
+  const discontinuous = [2, 2, 2, 8, 8, 8, 100, 100, 100];
+
+  assert.ok(Math.abs(repairSplatDepth(100, continuous, 100) - 3.012) < 1e-6);
+  assert.equal(repairSplatDepth(100, discontinuous, 100), 100);
+  assert.equal(repairSplatDepth(3, continuous, 100), 3);
+  assert.equal(repairSplatDepth(100, [3, 3, 3, 3], 100), 100);
+});
+
+test('circle of confusion eases continuously away from the focus band', () => {
+  const values = [1.9, 2.1, 2.3, 2.5, 2.7]
+    .map((depth) => smoothCircleOfConfusion(depth, 1.5, 0.8));
+
+  assert.equal(values[0], 0);
+  assert.ok(values[0] < values[1]);
+  assert.ok(values[1] < values[2]);
+  assert.ok(values[2] < values[3]);
+  assert.equal(values[4], 1);
+});
+
+test('depth-of-field strength retains metric focus and reaches full aperture', () => {
   const gentle = depthOfFieldForStrength(0.1);
   const strong = depthOfFieldForStrength(0.9);
+  const maximum = depthOfFieldForStrength(1, 90);
 
   assert.ok(gentle.focusRange > 6);
   assert.ok(strong.focusRange < 1);
-  assert.equal(gentle.blurRadius, 0.8);
   assert.ok(strong.blurRadius > gentle.blurRadius);
+  assert.equal(maximum.focusRange, 0.8);
+  assert.equal(maximum.blurRadius, 8);
 });
 
-test('one percent blur remains subpixel while retaining spatial depth', () => {
-  const effect = depthOfFieldForStrength(0.01, 42);
-
-  assert.ok(effect.focusRange > 7.7);
-  assert.ok(effect.blurRadius < 0.1);
+test('depth of field focuses immediately in front of the camera', () => {
+  assert.equal(focusDistanceAtCamera(0.03), 0.03);
+  assert.equal(focusDistanceAtCamera(0.05), 0.05);
+  assert.equal(focusDistanceAtCamera(Number.NaN), 0.001);
 });
 
-test('field of view adjusts the effective aperture', () => {
-  const telephoto = depthOfFieldForStrength(0.5, 24);
-  const reference = depthOfFieldForStrength(0.5, 42);
-  const wide = depthOfFieldForStrength(0.5, 90);
+test('zero blur and held navigation both use direct rendering', () => {
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.sceneEntity = {};
+  renderer.navigationInputs = new Set();
+  renderer.viewpoint = { depth_of_field: { blur_strength: 0 }, field_of_view: 42 };
+  renderer.cameraFrame = { enabled: true };
 
-  assert.ok(telephoto.blurRadius > reference.blurRadius);
-  assert.ok(telephoto.focusRange < reference.focusRange);
-  assert.ok(wide.blurRadius < reference.blurRadius);
-  assert.ok(wide.focusRange > reference.focusRange);
+  renderer.configureNormalFrame();
+  assert.equal(renderer.cameraFrame.enabled, false);
+
+  renderer.viewpoint.depth_of_field.blur_strength = 0.5;
+  renderer.navigationInputs.add('pointer:1');
+  renderer.cameraFrame.enabled = true;
+  renderer.configureNormalFrame();
+  assert.equal(renderer.cameraFrame.enabled, false);
 });
 
-test('circle of confusion grows gradually with scene distance', () => {
-  const effect = depthOfFieldForStrength(0.25, 42);
-  const farFocusEdge = 1.5 + effect.focusRange / 2;
-  const circleOfConfusion = (depth) => Math.min(
-    1,
-    Math.max(0, (depth - farFocusEdge) / effect.focusRange),
-  );
+test('a held pointer keeps DOF disabled through move-stop-rotate', () => {
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.sceneEntity = {};
+  renderer.navigationInputs = new Set();
+  renderer.viewpoint = { depth_of_field: { blur_strength: 0.5 }, field_of_view: 42 };
+  renderer.cameraFrame = { enabled: false };
+  renderer.requestSceneFrame = () => {};
 
-  assert.ok(circleOfConfusion(3.5) > 0);
-  assert.ok(circleOfConfusion(3.5) < circleOfConfusion(5));
-  assert.ok(circleOfConfusion(5) < circleOfConfusion(8));
+  renderer.beginNavigation('pointer:7');
+  renderer.beginNavigation('pointer:7');
+
+  assert.deepEqual([...renderer.navigationInputs], ['pointer:7']);
+  assert.equal(renderer.cameraFrame.enabled, false);
 });
 
-test('depth-of-field changes retain the same sharp harmonization reference', () => {
+test('depth-of-field changes retain the same harmonization reference', () => {
   const first = { field_of_view: 42, depth_of_field: { blur_strength: 0.1 } };
   const second = { field_of_view: 42, depth_of_field: { blur_strength: 0.9 } };
 
@@ -108,324 +217,14 @@ test('depth-of-field changes retain the same sharp harmonization reference', () 
   );
 });
 
-test('SHARP raster Gaussians produce a bounded depth-only proxy', () => {
-  const properties = {
-    x: new Float32Array([0, 2, 0, 2]),
-    y: new Float32Array([0, 0, 2, 2]),
-    z: new Float32Array([3, 3, 3, 3]),
-    image_size: new Uint32Array([2, 2]),
-    intrinsic: new Float32Array([1.5, 0, 0.5, 0, 1.5, 0.5, 0, 0, 1]),
-  };
-  const gsplatData = {
-    getProp(name, element = 'vertex') {
-      if (name === 'image_size' && element !== 'image_size') return undefined;
-      return properties[name];
-    },
-  };
-
-  const geometry = buildDepthProxyGeometry(gsplatData, 2);
-
-  assert.equal(geometry.columns, 2);
-  assert.equal(geometry.rows, 2);
-  assert.deepEqual(Array.from(geometry.positions), [
-    0, 0, 3,
-    2, 0, 3,
-    0, 2, 3,
-    2, 2, 3,
-  ]);
-  assert.deepEqual(Array.from(geometry.indices), [0, 2, 1, 1, 2, 3]);
-});
-
-test('generic splat centers produce a view-dependent depth proxy', () => {
-  const centers = new Float32Array([
-    -1, -1, 3,
-    1, -1, 3,
-    -1, 1, 3,
-    1, 1, 3,
-  ]);
-  const geometry = buildViewDepthProxyGeometry(
-    centers,
-    (x, y, depth) => ({ x: (x + 2) / 2, y: (y + 2) / 2, depth }),
-    (x, y, depth) => ({ x: x - 0.5, y: y - 0.5, z: depth }),
-    2,
-    2,
-    2,
-  );
-
-  assert.equal(geometry.columns, 2);
-  assert.equal(geometry.rows, 2);
-  assert.deepEqual(Array.from(geometry.indices), [0, 2, 1, 1, 2, 3]);
-});
-
-test('low-opacity Gaussian cores still cover their visible depth footprint', () => {
-  const samples = {
-    centers: new Float32Array([0, 0, 3, 0, 0, 3, 0, 0, 3]),
-    radii: new Float32Array([1, 1, 1]),
-    opacities: new Float32Array([0.05, 0.05, 0.05]),
-  };
-  const geometry = buildViewDepthProxyGeometry(
-    samples,
-    (_x, _y, depth, radius) => ({ x: 2.5, y: 2.5, depth, radius }),
-    (x, y, depth) => ({ x, y, z: depth }),
-    5,
-    5,
-    5,
-  );
-
-  assert.ok(geometry.indices.length > 0);
-  assert.equal(geometry.positions[(0 * 5 + 2) * 3 + 2], 3);
-});
-
-test('generic depth proxies close enclosed holes on one continuous surface', () => {
-  const centers = [];
-  for (let row = 0; row < 3; row += 1) {
-    for (let column = 0; column < 3; column += 1) {
-      if (row !== 1 || column !== 1) centers.push(column + 0.5, row + 0.5, 3);
-    }
-  }
-  const geometry = buildViewDepthProxyGeometry(
-    new Float32Array(centers),
-    (x, y, depth) => ({ x, y, depth }),
-    (x, y, depth) => ({ x, y, z: depth }),
-    3,
-    3,
-    3,
-  );
-
-  assert.equal(geometry.indices.length, 24);
-  assert.equal(geometry.positions[4 * 3 + 2], 3);
-  assert.equal(geometry.nearDepth, 3);
-});
-
-test('generic depth proxies leave holes across conflicting depth surfaces', () => {
-  const centers = [];
-  for (let row = 0; row < 3; row += 1) {
-    for (let column = 0; column < 3; column += 1) {
-      if (row === 1 && column === 1) continue;
-      centers.push(column + 0.5, row + 0.5, column === 0 ? 1 : 10);
-    }
-  }
-  const geometry = buildViewDepthProxyGeometry(
-    new Float32Array(centers),
-    (x, y, depth) => ({ x, y, depth }),
-    (x, y, depth) => ({ x, y, z: depth }),
-    3,
-    3,
-    3,
-  );
-
-  assert.equal(geometry.positions[4 * 3 + 2], 0);
-});
-
-test('generic PLY depth samples retain projected scale and opacity evidence', () => {
-  const properties = {
-    scale_0: new Float32Array([Math.log(2), Math.log(4)]),
-    scale_1: new Float32Array([Math.log(8), Math.log(1)]),
-    scale_2: new Float32Array([Math.log(4), Math.log(2)]),
-    opacity: new Float32Array([0, Math.log(3)]),
-  };
-  const resource = {
-    centers: new Float32Array([0, 0, 1, 1, 1, 2]),
-    gsplatData: { getProp: (name) => properties[name] },
-  };
-
-  const samples = collectDepthProxySamples(resource, 2);
-
-  assert.ok(Math.abs(samples.radii[0] - Math.sqrt(32)) < 1e-6);
-  assert.ok(Math.abs(samples.radii[1] - Math.sqrt(8)) < 1e-6);
-  assert.ok(Math.abs(samples.opacities[0] - 0.5) < 1e-6);
-  assert.ok(Math.abs(samples.opacities[1] - 0.75) < 1e-6);
-});
-
-test('streamed SOG depth sampling combines currently resident LOD chunks', () => {
-  const first = { centers: new Float32Array([0, 0, 1, 1, 0, 1]) };
-  const second = { centers: new Float32Array([0, 1, 2, 1, 1, 2]) };
-  const environment = { centers: new Float32Array([0, 2, 4]) };
-  const resource = {
-    octree: {
-      fileResources: new Map([[0, first], [1, second]]),
-      environmentResource: environment,
-    },
-  };
-
-  const centers = collectDepthProxyCenters(resource, 5);
-
-  assert.deepEqual(Array.from(centers), [
-    0, 0, 1,
-    1, 0, 1,
-    0, 1, 2,
-    1, 1, 2,
-    0, 2, 4,
-  ]);
-});
-
-test('streamed SOG depth samples decode each splat scale and opacity texture value', () => {
-  const chunk = {
-    centers: new Float32Array([0, 0, 1]),
-    gsplatData: {
-      meta: {
-        version: 2,
-        scales: { codebook: [Math.log(1), Math.log(2), Math.log(4)] },
-      },
-      scales: { _levels: [new Uint8Array([0, 1, 2, 0])] },
-      sh0: { _levels: [new Uint8Array([0, 0, 0, 64])] },
-    },
-  };
-  const resource = { octree: { fileResources: new Map([[0, chunk]]) } };
-
-  const samples = collectDepthProxySamples(resource, 1);
-
-  assert.ok(Math.abs(samples.radii[0] - Math.sqrt(8)) < 1e-6);
-  assert.ok(Math.abs(samples.opacities[0] - 64 / 255) < 1e-6);
-});
-
-test('streamed SOG scale fallback is conservative when source pixels were released', () => {
-  const codebook = Array.from({ length: 8 }, (_, index) => Math.log(index + 1));
-  const chunk = {
-    centers: new Float32Array([0, 0, 1]),
-    gsplatData: { meta: { scales: { codebook } } },
-  };
-
-  const samples = collectDepthProxySamples(chunk, 1);
-
-  assert.ok(samples.radii[0] >= 6);
-});
-
-test('generic depth proxies do not bridge large depth discontinuities', () => {
-  const centers = new Float32Array([
-    -1, -1, 1,
-    1, -1, 1,
-    -1, 1, 1,
-    1, 1, 10,
-  ]);
-  const geometry = buildViewDepthProxyGeometry(
-    centers,
-    (x, y, depth) => ({ x: (x + 2) / 2, y: (y + 2) / 2, depth }),
-    (x, y, depth) => ({ x, y, z: depth }),
-    2,
-    2,
-    2,
-  );
-
-  assert.deepEqual(Array.from(geometry.indices), [0, 2, 1]);
-});
-
-test('zero background blur keeps a stable depth pipeline with a zero radius', () => {
-  const renderer = Object.create(SceneRenderer.prototype);
-  renderer.sceneEntity = {};
-  renderer.depthProxyEntity = {};
-  renderer.viewpoint = { depth_of_field: { blur_strength: 0 } };
-  renderer.cameraFrame = { debug: null, dof: {}, rendering: {}, update() {} };
-
-  renderer.configureNormalFrame();
-
-  assert.equal(renderer.cameraFrame.dof.enabled, false);
-  assert.equal(renderer.cameraFrame.dof.blurRadius, 0);
-  assert.equal(renderer.cameraFrame.rendering.sharpness, 0);
-});
-
-test('full generic blur reaches maximum before the nearest room surface', () => {
-  const renderer = Object.create(SceneRenderer.prototype);
-  renderer.sceneEntity = {};
-  renderer.depthProxyEntity = {};
-  renderer.depthProxyUsesSceneTransform = false;
-  renderer.depthProxyNearDepth = 2;
-  renderer.viewpoint = {
-    depth_of_field: { blur_strength: 1 },
-    field_of_view: 42,
-    near_clip: 0.03,
-  };
-  renderer.camera = { camera: { nearClip: 0.03 } };
-  renderer.cameraFrame = { debug: null, dof: {}, rendering: {}, update() {} };
-
-  renderer.configureNormalFrame();
-
-  const farFocusEdge = renderer.cameraFrame.dof.focusDistance
-    + renderer.cameraFrame.dof.focusRange / 2;
-  const maximumBlurDepth = farFocusEdge + renderer.cameraFrame.dof.focusRange;
-  assert.ok(maximumBlurDepth < renderer.depthProxyNearDepth);
-  assert.equal(renderer.cameraFrame.dof.blurRadius, 8);
-});
-
-test('SHARP depth keeps the metric subject focus calibration', () => {
-  const renderer = Object.create(SceneRenderer.prototype);
-  renderer.sceneEntity = {};
-  renderer.depthProxyEntity = {};
-  renderer.depthProxyUsesSceneTransform = true;
-  renderer.depthProxyNearDepth = null;
-  renderer.viewpoint = {
-    depth_of_field: { blur_strength: 1 },
-    field_of_view: 42,
-    near_clip: 0.03,
-  };
-  renderer.camera = { camera: { nearClip: 0.03 } };
-  renderer.cameraFrame = { debug: null, dof: {}, rendering: {}, update() {} };
-
-  renderer.configureNormalFrame();
-
-  assert.equal(renderer.cameraFrame.dof.focusDistance, 1.5);
-  assert.equal(renderer.cameraFrame.dof.focusRange, 0.8);
-});
-
-test('generic depth proxy work is deferred until blur is requested', () => {
-  const renderer = Object.create(SceneRenderer.prototype);
-  renderer.app = {};
-  renderer.sceneEntity = {};
-  renderer.viewpoint = { depth_of_field: { blur_strength: 0 } };
-  let rebuilds = 0;
-  renderer.rebuildViewDepthProxy = () => { rebuilds += 1; };
-
-  renderer.createDepthProxy({ gsplatData: {} });
-  renderer.viewpoint.depth_of_field.blur_strength = 0.2;
-  renderer.createDepthProxy({ gsplatData: {} });
-
-  assert.equal(rebuilds, 1);
-});
-
 test('interactive renderer remains live when requesting a scene frame', () => {
   const renderer = Object.create(SceneRenderer.prototype);
   renderer.cacheSceneFrames = false;
+  renderer.rendererActive = true;
   renderer.app = { autoRender: false, renderNextFrame: false };
 
   renderer.requestSceneFrame();
 
   assert.equal(renderer.app.autoRender, true);
   assert.equal(renderer.app.renderNextFrame, true);
-});
-
-test('interactive depth-proxy refreshes are debounced while cached snapshots rebuild now', async () => {
-  const interactive = Object.create(SceneRenderer.prototype);
-  interactive.cacheSceneFrames = false;
-  interactive.depthProxyRefreshTimer = null;
-  const interactiveCalls = [];
-  interactive.rebuildViewDepthProxy = (force) => interactiveCalls.push(force);
-
-  interactive.refreshViewDepthProxy(false);
-  interactive.refreshViewDepthProxy(true);
-  await new Promise((resolve) => setTimeout(resolve, 140));
-
-  assert.deepEqual(interactiveCalls, [true]);
-
-  const cached = Object.create(SceneRenderer.prototype);
-  cached.cacheSceneFrames = true;
-  const cachedCalls = [];
-  cached.rebuildViewDepthProxy = (force) => cachedCalls.push(force);
-  cached.refreshViewDepthProxy(true);
-  assert.deepEqual(cachedCalls, [true]);
-});
-
-test('streamed frame-ready events cannot starve an interactive depth refresh', async () => {
-  const renderer = Object.create(SceneRenderer.prototype);
-  renderer.cacheSceneFrames = false;
-  renderer.depthProxyRefreshTimer = null;
-  renderer.depthProxyRefreshForce = false;
-  let rebuilds = 0;
-  renderer.rebuildViewDepthProxy = () => { rebuilds += 1; };
-
-  renderer.refreshViewDepthProxy();
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  renderer.refreshViewDepthProxy();
-  await new Promise((resolve) => setTimeout(resolve, 80));
-
-  assert.equal(rebuilds, 1);
 });

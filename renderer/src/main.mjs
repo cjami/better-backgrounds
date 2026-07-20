@@ -9,31 +9,35 @@ import {
   translateViewpoint,
   zoomPosition,
 } from './viewpoint.mjs';
+import {
+  configureGpuDepthPipeline,
+  configureGpuSplatDepth,
+} from './gpu-depth.mjs';
 
 const MAX_SCENE_CAPTURE_ATTEMPTS = 12;
 const STREAMED_LOD_UPDATE_ANGLE = 2;
 const STREAMED_LOD_UPDATE_DISTANCE = 0.1;
-const SUBJECT_FOCUS_DISTANCE = 1.5;
+const MIN_DOF_FOCUS_DISTANCE = 0.001;
 const MIN_SUBJECT_FOCUS_RANGE = 0.8;
 const MAX_SUBJECT_FOCUS_RANGE = 8;
 const MAX_DOF_BLUR_RADIUS = 8;
 const REFERENCE_FIELD_OF_VIEW = 42;
 const MIN_PERSPECTIVE_SCALE = 0.75;
 const MAX_PERSPECTIVE_SCALE = 1.25;
-const DEPTH_PROXY_COLUMNS = 384;
-const DEPTH_PROXY_SAMPLE_RANK = 3;
-const GENERIC_DEPTH_PROXY_SAMPLE_RANK = 2;
-const DEPTH_PROXY_MAX_RELATIVE_STEP = 0.2;
-const DEPTH_PROXY_MIN_STEP_METRES = 0.5;
-const DEPTH_PROXY_MAX_CENTERS = 1_000_000;
-const DEPTH_PROXY_REFRESH_DELAY_MS = 120;
-const DEPTH_PROXY_ALPHA_THRESHOLD = 1 / 255;
-const DEPTH_PROXY_MIN_FOOTPRINT_CELLS = 0.65;
-const DEPTH_PROXY_MAX_FOOTPRINT_CELLS = 6;
-const DEPTH_PROXY_HOLE_FILL_PASSES = 2;
-const DEPTH_PROXY_HOLE_FILL_NEIGHBORS = 5;
-const GENERIC_DEPTH_PROXY_NEAR_QUANTILE = 0.01;
-const GENERIC_MIN_FOCUS_RANGE = 0.001;
+const CAMERA_FRAME_GSPLAT_OUTPUT_GLSL = `
+vec3 prepareOutputFromGamma(vec3 gammaColor, float depth) {
+  return gammaColor;
+}
+`;
+const CAMERA_FRAME_GSPLAT_OUTPUT_WGSL = `
+fn prepareOutputFromGamma(gammaColor: vec3f, depth: f32) -> vec3f {
+  return gammaColor;
+}
+`;
+const focusDistanceAtCamera = (nearClip) => Math.max(
+  MIN_DOF_FOCUS_DISTANCE,
+  Number.isFinite(nearClip) ? nearClip : MIN_DOF_FOCUS_DISTANCE,
+);
 
 const depthOfFieldForStrength = (strength, fieldOfView = REFERENCE_FIELD_OF_VIEW) => {
   const blurStrength = Math.min(1, Math.max(0, strength));
@@ -46,7 +50,9 @@ const depthOfFieldForStrength = (strength, fieldOfView = REFERENCE_FIELD_OF_VIEW
         / Math.tan(safeFieldOfView * Math.PI / 360),
     ),
   );
-  const aperture = Math.min(1, blurStrength * perspectiveScale);
+  const scaledAperture = blurStrength * perspectiveScale;
+  const apertureDenominator = 1 - blurStrength + scaledAperture;
+  const aperture = apertureDenominator > 0 ? scaledAperture / apertureDenominator : 0;
   const focusFalloff = (1 - aperture) ** 3;
   return {
     blurRadius: aperture * MAX_DOF_BLUR_RADIUS,
@@ -59,482 +65,6 @@ const harmonizationViewpointKey = (viewpoint) => {
   const reference = structuredClone(viewpoint);
   delete reference.depth_of_field;
   return JSON.stringify(reference);
-};
-
-const buildDepthProxyGeometry = (gsplatData, requestedColumns = DEPTH_PROXY_COLUMNS) => {
-  const x = gsplatData?.getProp?.('x');
-  const y = gsplatData?.getProp?.('y');
-  const z = gsplatData?.getProp?.('z');
-  const imageSize = gsplatData?.getProp?.('image_size', 'image_size');
-  const intrinsic = gsplatData?.getProp?.('intrinsic', 'intrinsic');
-  const sourceWidth = Math.trunc(imageSize?.[0] ?? 0);
-  const sourceHeight = Math.trunc(imageSize?.[1] ?? 0);
-  const focalX = intrinsic?.[0];
-  const focalY = intrinsic?.[4];
-  const principalX = intrinsic?.[2];
-  const principalY = intrinsic?.[5];
-  if (
-    sourceWidth < 2
-    || sourceHeight < 2
-    || !x
-    || !y
-    || !z
-    || y.length !== x.length
-    || z.length !== x.length
-    || !Number.isFinite(focalX)
-    || !Number.isFinite(focalY)
-    || focalX <= 0
-    || focalY <= 0
-    || !Number.isFinite(principalX)
-    || !Number.isFinite(principalY)
-  ) return null;
-
-  const columns = Math.max(2, Math.min(sourceWidth, Math.trunc(requestedColumns)));
-  const rows = Math.max(2, Math.min(
-    sourceHeight,
-    Math.round((sourceHeight / sourceWidth) * columns),
-  ));
-  const positions = new Float32Array(columns * rows * 3);
-  const valid = new Uint8Array(columns * rows);
-  const depths = new Float32Array(columns * rows);
-  const rankedDepths = Array.from(
-    { length: DEPTH_PROXY_SAMPLE_RANK },
-    () => new Float32Array(columns * rows).fill(Number.POSITIVE_INFINITY),
-  );
-
-  for (let sourceIndex = 0; sourceIndex < z.length; sourceIndex += 1) {
-    const depth = z[sourceIndex];
-    if (
-      !Number.isFinite(x[sourceIndex])
-      || !Number.isFinite(y[sourceIndex])
-      || !Number.isFinite(depth)
-      || depth <= 0
-    ) continue;
-    const pixelX = focalX * x[sourceIndex] / depth + principalX;
-    const pixelY = focalY * y[sourceIndex] / depth + principalY;
-    const column = Math.floor(pixelX * columns / sourceWidth);
-    const row = Math.floor(pixelY * rows / sourceHeight);
-    if (column < 0 || column >= columns || row < 0 || row >= rows) continue;
-    const targetIndex = row * columns + column;
-    for (let rank = 0; rank < DEPTH_PROXY_SAMPLE_RANK; rank += 1) {
-      if (depth >= rankedDepths[rank][targetIndex]) continue;
-      for (let move = DEPTH_PROXY_SAMPLE_RANK - 1; move > rank; move -= 1) {
-        rankedDepths[move][targetIndex] = rankedDepths[move - 1][targetIndex];
-      }
-      rankedDepths[rank][targetIndex] = depth;
-      break;
-    }
-  }
-
-  for (let row = 0; row < rows; row += 1) {
-    const pixelY = (row + 0.5) * sourceHeight / rows;
-    for (let column = 0; column < columns; column += 1) {
-      const targetIndex = row * columns + column;
-      const rankedDepth = rankedDepths[DEPTH_PROXY_SAMPLE_RANK - 1][targetIndex];
-      const depth = Number.isFinite(rankedDepth) ? rankedDepth : rankedDepths[0][targetIndex];
-      if (!Number.isFinite(depth)) continue;
-      const pixelX = (column + 0.5) * sourceWidth / columns;
-      const positionOffset = targetIndex * 3;
-      positions[positionOffset] = (pixelX - principalX) * depth / focalX;
-      positions[positionOffset + 1] = (pixelY - principalY) * depth / focalY;
-      positions[positionOffset + 2] = depth;
-      depths[targetIndex] = depth;
-      valid[targetIndex] = 1;
-    }
-  }
-
-  const indices = [];
-  const addTriangle = (first, second, third) => {
-    if (!valid[first] || !valid[second] || !valid[third]) return;
-    const nearest = Math.min(depths[first], depths[second], depths[third]);
-    const farthest = Math.max(depths[first], depths[second], depths[third]);
-    const maximumStep = Math.max(
-      DEPTH_PROXY_MIN_STEP_METRES,
-      nearest * DEPTH_PROXY_MAX_RELATIVE_STEP,
-    );
-    if (farthest - nearest <= maximumStep) indices.push(first, second, third);
-  };
-  for (let row = 0; row < rows - 1; row += 1) {
-    for (let column = 0; column < columns - 1; column += 1) {
-      const topLeft = row * columns + column;
-      const topRight = topLeft + 1;
-      const bottomLeft = topLeft + columns;
-      const bottomRight = bottomLeft + 1;
-      addTriangle(topLeft, bottomLeft, topRight);
-      addTriangle(topRight, bottomLeft, bottomRight);
-    }
-  }
-  if (!indices.length) return null;
-  return { columns, rows, positions, indices: new Uint32Array(indices) };
-};
-
-const buildViewDepthProxyGeometry = (
-  samples,
-  projectCenter,
-  unprojectDepth,
-  viewportWidth,
-  viewportHeight,
-  requestedColumns = DEPTH_PROXY_COLUMNS,
-) => {
-  const centers = samples?.centers ?? samples;
-  const radii = samples?.radii ?? null;
-  const opacities = samples?.opacities ?? null;
-  if (!centers || centers.length < 9 || viewportWidth < 2 || viewportHeight < 2) return null;
-  const columns = Math.max(2, Math.min(viewportWidth, Math.trunc(requestedColumns)));
-  const rows = Math.max(2, Math.min(
-    viewportHeight,
-    Math.round((viewportHeight / viewportWidth) * columns),
-  ));
-  const depths = new Float32Array(columns * rows);
-  const valid = new Uint8Array(columns * rows);
-  const positions = new Float32Array(columns * rows * 3);
-  const rankedDepths = Array.from(
-    { length: GENERIC_DEPTH_PROXY_SAMPLE_RANK },
-    () => new Float32Array(columns * rows).fill(Number.POSITIVE_INFINITY),
-  );
-  const insertDepth = (column, row, depth) => {
-    if (column < 0 || column >= columns || row < 0 || row >= rows) return;
-    const targetIndex = row * columns + column;
-    for (let rank = 0; rank < GENERIC_DEPTH_PROXY_SAMPLE_RANK; rank += 1) {
-      if (depth >= rankedDepths[rank][targetIndex]) continue;
-      for (let move = GENERIC_DEPTH_PROXY_SAMPLE_RANK - 1; move > rank; move -= 1) {
-        rankedDepths[move][targetIndex] = rankedDepths[move - 1][targetIndex];
-      }
-      rankedDepths[rank][targetIndex] = depth;
-      break;
-    }
-  };
-  const centerCount = Math.floor(centers.length / 3);
-  const stride = Math.max(1, Math.ceil(centerCount / DEPTH_PROXY_MAX_CENTERS));
-  for (let centerIndex = 0; centerIndex < centerCount; centerIndex += stride) {
-    const offset = centerIndex * 3;
-    const projected = projectCenter(
-      centers[offset],
-      centers[offset + 1],
-      centers[offset + 2],
-      radii?.[centerIndex] ?? 0,
-    );
-    if (
-      !projected
-      || !Number.isFinite(projected.x)
-      || !Number.isFinite(projected.y)
-      || !Number.isFinite(projected.depth)
-      || projected.depth <= 0
-    ) continue;
-    const centerColumn = projected.x * columns / viewportWidth;
-    const centerRow = projected.y * rows / viewportHeight;
-    const opacity = Math.min(1, Math.max(0, opacities?.[centerIndex] ?? 1));
-    const alphaScale = Math.max(
-      1,
-      opacity > DEPTH_PROXY_ALPHA_THRESHOLD
-        ? Math.sqrt(2 * Math.log(opacity / DEPTH_PROXY_ALPHA_THRESHOLD))
-        : 0,
-    );
-    const projectedRadius = Math.max(0, projected.radius ?? 0) * alphaScale;
-    const radiusColumns = projectedRadius > 0
-      ? Math.min(
-        DEPTH_PROXY_MAX_FOOTPRINT_CELLS,
-        Math.max(DEPTH_PROXY_MIN_FOOTPRINT_CELLS, projectedRadius * columns / viewportWidth),
-      )
-      : 0;
-    const radiusRows = projectedRadius > 0
-      ? Math.min(
-        DEPTH_PROXY_MAX_FOOTPRINT_CELLS,
-        Math.max(DEPTH_PROXY_MIN_FOOTPRINT_CELLS, projectedRadius * rows / viewportHeight),
-      )
-      : 0;
-    if (radiusColumns === 0 || radiusRows === 0) {
-      insertDepth(Math.floor(centerColumn), Math.floor(centerRow), projected.depth);
-      continue;
-    }
-    const minimumColumn = Math.floor(centerColumn - radiusColumns);
-    const maximumColumn = Math.floor(centerColumn + radiusColumns);
-    const minimumRow = Math.floor(centerRow - radiusRows);
-    const maximumRow = Math.floor(centerRow + radiusRows);
-    for (let row = minimumRow; row <= maximumRow; row += 1) {
-      for (let column = minimumColumn; column <= maximumColumn; column += 1) {
-        const dx = (column + 0.5 - centerColumn) / radiusColumns;
-        const dy = (row + 0.5 - centerRow) / radiusRows;
-        if (dx * dx + dy * dy <= 1) insertDepth(column, row, projected.depth);
-      }
-    }
-  }
-  const surfaceDepths = new Float32Array(columns * rows).fill(Number.POSITIVE_INFINITY);
-  for (let index = 0; index < surfaceDepths.length; index += 1) {
-    const rankedDepth = rankedDepths[GENERIC_DEPTH_PROXY_SAMPLE_RANK - 1][index];
-    surfaceDepths[index] = Number.isFinite(rankedDepth) ? rankedDepth : rankedDepths[0][index];
-  }
-  for (let pass = 0; pass < DEPTH_PROXY_HOLE_FILL_PASSES; pass += 1) {
-    const filled = surfaceDepths.slice();
-    let changed = false;
-    for (let row = 1; row < rows - 1; row += 1) {
-      for (let column = 1; column < columns - 1; column += 1) {
-        const targetIndex = row * columns + column;
-        if (Number.isFinite(surfaceDepths[targetIndex])) continue;
-        const neighbors = [];
-        for (let dy = -1; dy <= 1; dy += 1) {
-          for (let dx = -1; dx <= 1; dx += 1) {
-            if (dx === 0 && dy === 0) continue;
-            const depth = surfaceDepths[(row + dy) * columns + column + dx];
-            if (Number.isFinite(depth)) neighbors.push(depth);
-          }
-        }
-        if (neighbors.length < DEPTH_PROXY_HOLE_FILL_NEIGHBORS) continue;
-        neighbors.sort((left, right) => left - right);
-        const nearest = neighbors[0];
-        const farthest = neighbors[neighbors.length - 1];
-        const maximumStep = Math.max(
-          DEPTH_PROXY_MIN_STEP_METRES,
-          nearest * DEPTH_PROXY_MAX_RELATIVE_STEP,
-        );
-        if (farthest - nearest > maximumStep) continue;
-        filled[targetIndex] = neighbors[Math.floor(neighbors.length / 2)];
-        changed = true;
-      }
-    }
-    surfaceDepths.set(filled);
-    if (!changed) break;
-  }
-  for (let row = 0; row < rows; row += 1) {
-    for (let column = 0; column < columns; column += 1) {
-      const targetIndex = row * columns + column;
-      const depth = surfaceDepths[targetIndex];
-      if (!Number.isFinite(depth)) continue;
-      const point = unprojectDepth(
-        (column + 0.5) * viewportWidth / columns,
-        (row + 0.5) * viewportHeight / rows,
-        depth,
-      );
-      if (!point) continue;
-      const positionOffset = targetIndex * 3;
-      positions[positionOffset] = point.x;
-      positions[positionOffset + 1] = point.y;
-      positions[positionOffset + 2] = point.z;
-      depths[targetIndex] = depth;
-      valid[targetIndex] = 1;
-    }
-  }
-  const indices = [];
-  const addTriangle = (first, second, third) => {
-    if (!valid[first] || !valid[second] || !valid[third]) return;
-    const nearest = Math.min(depths[first], depths[second], depths[third]);
-    const farthest = Math.max(depths[first], depths[second], depths[third]);
-    const maximumStep = Math.max(
-      DEPTH_PROXY_MIN_STEP_METRES,
-      nearest * DEPTH_PROXY_MAX_RELATIVE_STEP,
-    );
-    if (farthest - nearest <= maximumStep) indices.push(first, second, third);
-  };
-  for (let row = 0; row < rows - 1; row += 1) {
-    for (let column = 0; column < columns - 1; column += 1) {
-      const topLeft = row * columns + column;
-      const topRight = topLeft + 1;
-      const bottomLeft = topLeft + columns;
-      const bottomRight = bottomLeft + 1;
-      addTriangle(topLeft, bottomLeft, topRight);
-      addTriangle(topRight, bottomLeft, bottomRight);
-    }
-  }
-  if (!indices.length) return null;
-  const finiteDepths = Array.from(surfaceDepths)
-    .filter((depth) => Number.isFinite(depth))
-    .sort((left, right) => left - right);
-  const nearDepth = finiteDepths[
-    Math.floor((finiteDepths.length - 1) * GENERIC_DEPTH_PROXY_NEAR_QUANTILE)
-  ];
-  return { columns, rows, positions, indices: new Uint32Array(indices), nearDepth };
-};
-
-const collectDepthProxyCenters = (
-  resource,
-  maximumCenters = DEPTH_PROXY_MAX_CENTERS,
-) => {
-  if (!resource || maximumCenters < 1) return null;
-  const resources = [];
-  if (resource.centers) resources.push(resource);
-  const octree = resource.octree;
-  if (octree) {
-    for (const loaded of octree.fileResources?.values?.() ?? []) {
-      if (loaded?.centers) resources.push(loaded);
-    }
-    if (octree.environmentResource?.centers) resources.push(octree.environmentResource);
-  }
-  const unique = [...new Set(resources)];
-  const arrays = unique.map((item) => item.centers).filter((centers) => centers?.length >= 3);
-  if (!arrays.length) return null;
-  const totalCenters = arrays.reduce((total, centers) => total + Math.floor(centers.length / 3), 0);
-  if (arrays.length === 1 && totalCenters <= maximumCenters) return arrays[0];
-
-  const sampled = new Float32Array(Math.min(totalCenters, maximumCenters) * 3);
-  let outputCenter = 0;
-  for (const centers of arrays) {
-    const centerCount = Math.floor(centers.length / 3);
-    const quota = Math.max(1, Math.floor(maximumCenters * centerCount / totalCenters));
-    const stride = Math.max(1, centerCount / quota);
-    for (let sample = 0; sample < quota && outputCenter < maximumCenters; sample += 1) {
-      const sourceCenter = Math.min(centerCount - 1, Math.floor(sample * stride));
-      sampled.set(
-        centers.subarray(sourceCenter * 3, sourceCenter * 3 + 3),
-        outputCenter * 3,
-      );
-      outputCenter += 1;
-    }
-  }
-  return outputCenter === sampled.length / 3
-    ? sampled
-    : sampled.slice(0, outputCenter * 3);
-};
-
-const sogDepthEvidenceCache = new WeakMap();
-
-const textureSourceBytes = (texture) => {
-  const source = texture?.getSource?.() ?? texture?._levels?.[0];
-  if (ArrayBuffer.isView(source)) {
-    return new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
-  }
-  if (ArrayBuffer.isView(source?.data)) {
-    return new Uint8Array(source.data.buffer, source.data.byteOffset, source.data.byteLength);
-  }
-  if (
-    typeof OffscreenCanvas !== 'undefined'
-    && source
-    && Number.isFinite(texture.width)
-    && Number.isFinite(texture.height)
-  ) {
-    try {
-      const canvas = new OffscreenCanvas(texture.width, texture.height);
-      const context = canvas.getContext('2d', { willReadFrequently: true });
-      context.drawImage(source, 0, 0);
-      return context.getImageData(0, 0, texture.width, texture.height).data;
-    } catch (_error) {
-      return null;
-    }
-  }
-  return null;
-};
-
-const sogDepthEvidence = (data) => {
-  if (!data?.meta?.scales || !data.scales) return null;
-  if (sogDepthEvidenceCache.has(data)) return sogDepthEvidenceCache.get(data);
-  const scales = textureSourceBytes(data.scales);
-  if (!scales) {
-    sogDepthEvidenceCache.set(data, null);
-    return null;
-  }
-  const evidence = {
-    scales,
-    colors: textureSourceBytes(data.sh0),
-    meta: data.meta,
-  };
-  sogDepthEvidenceCache.set(data, evidence);
-  return evidence;
-};
-
-const depthProxyRadiusSource = (resource) => {
-  const data = resource?.gsplatData;
-  const scaleX = data?.getProp?.('scale_0');
-  const scaleY = data?.getProp?.('scale_1');
-  const scaleZ = data?.getProp?.('scale_2');
-  const opacity = data?.getProp?.('opacity');
-  if (scaleX && scaleY && scaleZ) return { scaleX, scaleY, scaleZ, opacity };
-  const sog = sogDepthEvidence(data);
-  if (sog) return { sog };
-  const codebook = data?.meta?.scales?.codebook;
-  const finite = Array.isArray(codebook)
-    ? codebook.filter((value) => Number.isFinite(value)).sort((left, right) => left - right)
-    : [];
-  const logRadius = finite.length ? finite[Math.floor(finite.length * 0.75)] : null;
-  return { logRadius };
-};
-
-const collectDepthProxySamples = (
-  resource,
-  maximumCenters = DEPTH_PROXY_MAX_CENTERS,
-) => {
-  if (!resource || maximumCenters < 1) return null;
-  const resources = [];
-  if (resource.centers) resources.push(resource);
-  const octree = resource.octree;
-  if (octree) {
-    for (const loaded of octree.fileResources?.values?.() ?? []) {
-      if (loaded?.centers) resources.push(loaded);
-    }
-    if (octree.environmentResource?.centers) resources.push(octree.environmentResource);
-  }
-  const unique = [...new Set(resources)];
-  const descriptors = unique
-    .filter((item) => item.centers?.length >= 3)
-    .map((item) => ({ item, source: depthProxyRadiusSource(item) }));
-  if (!descriptors.length) return null;
-  const totalCenters = descriptors.reduce(
-    (total, descriptor) => total + Math.floor(descriptor.item.centers.length / 3),
-    0,
-  );
-  const sampleCount = Math.min(totalCenters, maximumCenters);
-  const centers = new Float32Array(sampleCount * 3);
-  const radii = new Float32Array(sampleCount);
-  const opacities = new Float32Array(sampleCount).fill(1);
-  let outputCenter = 0;
-  for (const descriptor of descriptors) {
-    const sourceCenters = descriptor.item.centers;
-    const centerCount = Math.floor(sourceCenters.length / 3);
-    const quota = Math.max(1, Math.floor(maximumCenters * centerCount / totalCenters));
-    const stride = Math.max(1, centerCount / quota);
-    for (let sample = 0; sample < quota && outputCenter < sampleCount; sample += 1) {
-      const sourceCenter = Math.min(centerCount - 1, Math.floor(sample * stride));
-      centers.set(
-        sourceCenters.subarray(sourceCenter * 3, sourceCenter * 3 + 3),
-        outputCenter * 3,
-      );
-      const source = descriptor.source;
-      if (source.scaleX) {
-        const logScales = [
-          source.scaleX[sourceCenter],
-          source.scaleY[sourceCenter],
-          source.scaleZ[sourceCenter],
-        ].sort((left, right) => right - left);
-        radii[outputCenter] = Math.exp((logScales[0] + logScales[1]) / 2);
-        const logit = source.opacity?.[sourceCenter];
-        if (Number.isFinite(logit)) opacities[outputCenter] = 1 / (1 + Math.exp(-logit));
-      } else if (source.sog) {
-        const byteOffset = sourceCenter * 4;
-        const scaleBytes = source.sog.scales;
-        const meta = source.sog.meta;
-        const logScales = meta.version === 2
-          ? [
-            meta.scales.codebook[scaleBytes[byteOffset]],
-            meta.scales.codebook[scaleBytes[byteOffset + 1]],
-            meta.scales.codebook[scaleBytes[byteOffset + 2]],
-          ]
-          : [0, 1, 2].map((axis) => (
-            meta.scales.mins[axis]
-            + (meta.scales.maxs[axis] - meta.scales.mins[axis])
-              * scaleBytes[byteOffset + axis] / 255
-          ));
-        logScales.sort((left, right) => right - left);
-        radii[outputCenter] = Math.exp((logScales[0] + logScales[1]) / 2);
-        const colorBytes = source.sog.colors;
-        if (colorBytes) {
-          if (meta.version === 2) {
-            opacities[outputCenter] = colorBytes[byteOffset + 3] / 255;
-          } else {
-            const logit = meta.sh0.mins[3]
-              + (meta.sh0.maxs[3] - meta.sh0.mins[3]) * colorBytes[byteOffset + 3] / 255;
-            opacities[outputCenter] = 1 / (1 + Math.exp(-logit));
-          }
-        }
-      } else if (Number.isFinite(source.logRadius)) {
-        radii[outputCenter] = Math.exp(source.logRadius);
-      }
-      outputCenter += 1;
-    }
-  }
-  if (outputCenter === sampleCount) return { centers, radii, opacities };
-  return {
-    centers: centers.slice(0, outputCenter * 3),
-    radii: radii.slice(0, outputCenter),
-    opacities: opacities.slice(0, outputCenter),
-  };
 };
 
 const bytesToBase64 = (bytes) => {
@@ -575,6 +105,7 @@ const hasPixelVariation = (pixels) => {
 const configureGsplatStreaming = (scene) => {
   scene.gsplat.lodUpdateAngle = STREAMED_LOD_UPDATE_ANGLE;
   scene.gsplat.lodUpdateDistance = STREAMED_LOD_UPDATE_DISTANCE;
+  configureGpuSplatDepth(scene);
 };
 
 const isStreamedSceneUrl = (url) => /(?:^|\/)lod-meta\.json(?:[?#]|$)/i.test(url);
@@ -587,18 +118,9 @@ class SceneRenderer {
     this.app = null;
     this.camera = null;
     this.cameraFrame = null;
+    this.cameraFrameColorPipeline = null;
     this.sceneEntity = null;
     this.sceneAsset = null;
-    this.sceneResource = null;
-    this.depthProxyEntity = null;
-    this.depthProxyMesh = null;
-    this.depthProxyMaterial = null;
-    this.depthProxyUsesSceneTransform = false;
-    this.depthProxyNearDepth = null;
-    this.gsplatData = null;
-    this.depthProxyViewpointKey = '';
-    this.depthProxyRefreshTimer = null;
-    this.depthProxyRefreshForce = false;
     this.sceneTransformKey = '';
     this.assetId = '';
     this.viewpoint = null;
@@ -606,6 +128,8 @@ class SceneRenderer {
     this.drag = null;
     this.flightKeys = new Set();
     this.flightDirty = false;
+    this.navigationInputs = new Set();
+    this.wheelIdleTimer = null;
     this.firstPersonNavigation = false;
     this.sceneFramePending = false;
     this.sceneFramesRemaining = 0;
@@ -656,7 +180,7 @@ class SceneRenderer {
       });
       this.app.root.addChild(this.camera);
       this.cameraFrame = new pc.CameraFrame(this.app, this.camera.camera);
-      this.cameraFrame.update();
+      this.cameraFrame.enabled = false;
       this.app.start();
       this.app.on('update', (deltaTime) => this.updateFlight(deltaTime));
       this.app.autoRender = !this.cacheSceneFrames;
@@ -667,14 +191,12 @@ class SceneRenderer {
       this.bindInput(canvas);
       window.addEventListener('resize', () => {
         this.app?.resizeCanvas();
-        this.refreshViewDepthProxy(true);
         this.requestSceneFrame();
       });
       this.connectBridge();
       this.app.systems.gsplat.on('frame:ready', (_camera, _layer, ready, loadingCount) => {
         this.sceneSettled = ready && loadingCount === 0;
         if (this.sceneSettled) {
-          this.refreshViewDepthProxy();
           if (this.pendingSnapshotKind) this.requestSceneFrame(1);
         }
       });
@@ -718,7 +240,6 @@ class SceneRenderer {
     if (canvas.width === width && canvas.height === height) return;
     this.app.setCanvasResolution(pc.RESOLUTION_FIXED, width, height);
     this.snapshotRevision += 1;
-    this.refreshViewDepthProxy(true);
     if (this.sceneEntity) this.queueSnapshotRefresh(true);
     else this.requestSceneFrame();
   }
@@ -740,6 +261,7 @@ class SceneRenderer {
     this.assetId = assetId;
     this.removeScene();
     this.sceneSettled = false;
+    this.snapshotRequiresSettlement = true;
     this.firstPersonNavigation = isStreamedSceneUrl(url);
     this.applyViewpoint(payload, true);
     this.setLoading(true, 'Loading spatial scene…');
@@ -753,12 +275,9 @@ class SceneRenderer {
       const entity = new pc.Entity(assetId);
       entity.addComponent('gsplat', { asset: loadedAsset, unified: true });
       this.sceneEntity = entity;
-      this.sceneResource = loadedAsset.resource ?? null;
-      this.gsplatData = this.sceneResource?.gsplatData ?? null;
       this.sceneCaptureAttempts = 0;
       this.app.root.addChild(entity);
       this.applySceneTransform();
-      this.createDepthProxy(this.sceneResource);
       this.configureNormalFrame();
       if (this.cacheSceneFrames) this.queueSnapshotRefresh(true);
       else this.requestSceneFrame();
@@ -774,20 +293,10 @@ class SceneRenderer {
   }
 
   removeScene() {
-    this.depthProxyEntity?.destroy();
-    this.depthProxyMesh?.destroy();
-    this.depthProxyMaterial?.destroy();
-    this.depthProxyEntity = null;
-    this.depthProxyMesh = null;
-    this.depthProxyMaterial = null;
-    this.depthProxyUsesSceneTransform = false;
-    this.depthProxyNearDepth = null;
-    this.gsplatData = null;
-    this.sceneResource = null;
-    this.depthProxyViewpointKey = '';
-    if (this.depthProxyRefreshTimer) clearTimeout(this.depthProxyRefreshTimer);
-    this.depthProxyRefreshTimer = null;
-    this.depthProxyRefreshForce = false;
+    this.navigationInputs.clear();
+    if (this.wheelIdleTimer) clearTimeout(this.wheelIdleTimer);
+    this.wheelIdleTimer = null;
+    this.disableCameraFrame();
     this.sceneEntity?.destroy();
     this.sceneEntity = null;
     if (this.sceneAsset && this.app) {
@@ -803,125 +312,66 @@ class SceneRenderer {
     this.harmonizationViewpointKey = '';
   }
 
-  createDepthProxy(resource) {
-    if (!this.app || !this.sceneEntity) return;
-    const intrinsicGeometry = buildDepthProxyGeometry(resource?.gsplatData);
-    this.snapshotRequiresSettlement = this.firstPersonNavigation || !intrinsicGeometry;
-    if (intrinsicGeometry) {
-      this.installDepthProxy(intrinsicGeometry, true);
-      return;
-    }
-    if ((this.viewpoint?.depth_of_field?.blur_strength ?? 0) > 0) {
-      this.rebuildViewDepthProxy(true);
+  activeGsplatManagers() {
+    const director = this.app?.renderer?.gsplatDirector;
+    const camera = this.camera?.camera?.camera;
+    const cameraData = director?.camerasMap?.get(camera);
+    if (!cameraData) return [];
+    return [...cameraData.layersMap.values()]
+      .map((layerData) => layerData.gsplatManager)
+      .filter(Boolean);
+  }
+
+  invalidateGsplatMaterials() {
+    this.app?.scene?.gsplat?.material?.update?.();
+    for (const manager of this.activeGsplatManagers()) {
+      manager.renderer.forceCopyMaterial = true;
+      manager.material?.update?.();
     }
   }
 
-  installDepthProxy(geometry, usesSceneTransform) {
-    this.depthProxyEntity?.destroy();
-    this.depthProxyMesh?.destroy();
-    this.depthProxyMaterial?.destroy();
-
-    const mesh = new pc.Mesh(this.app.graphicsDevice);
-    mesh.setPositions(geometry.positions);
-    mesh.setIndices(geometry.indices);
-    mesh.update(pc.PRIMITIVE_TRIANGLES);
-
-    const material = new pc.StandardMaterial();
-    material.cull = pc.CULLFACE_NONE;
-    material.depthWrite = true;
-    material.update();
-
-    const entity = new pc.Entity('splat-depth-proxy');
-    const meshInstance = new pc.MeshInstance(mesh, material, entity);
-    meshInstance.shaderPassMask &= ~(1 << pc.SHADER_FORWARD);
-    entity.addComponent('render', { meshInstances: [meshInstance] });
-    this.depthProxyEntity = entity;
-    this.depthProxyMesh = mesh;
-    this.depthProxyMaterial = material;
-    this.depthProxyUsesSceneTransform = usesSceneTransform;
-    this.depthProxyNearDepth = Number.isFinite(geometry.nearDepth) ? geometry.nearDepth : null;
-    this.app.root.addChild(entity);
-    if (usesSceneTransform) this.applySceneTransform(true);
-    this.configureNormalFrame();
-  }
-
-  rebuildViewDepthProxy(force = false) {
-    if (!this.sceneResource || !this.sceneEntity || !this.camera || !this.app) return;
-    if ((this.viewpoint?.depth_of_field?.blur_strength ?? 0) <= 0) {
-      if (this.depthProxyEntity && !this.depthProxyUsesSceneTransform) {
-        this.depthProxyEntity.destroy();
-        this.depthProxyMesh?.destroy();
-        this.depthProxyMaterial?.destroy();
-        this.depthProxyEntity = null;
-        this.depthProxyMesh = null;
-        this.depthProxyMaterial = null;
-        this.depthProxyNearDepth = null;
-        this.depthProxyViewpointKey = '';
-        this.configureNormalFrame();
-      }
-      return;
-    }
-    const octree = this.sceneResource.octree;
-    const sourceKey = octree
-      ? `${[...(octree.fileResources?.keys?.() ?? [])].sort((a, b) => a - b).join(',')}:${Boolean(octree.environmentResource)}`
-      : `single:${this.sceneResource.centersVersion ?? 0}`;
-    const key = `${harmonizationViewpointKey(this.viewpoint)}:${sourceKey}`;
-    if (!force && key === this.depthProxyViewpointKey) return;
-    this.depthProxyViewpointKey = key;
-    const samples = collectDepthProxySamples(this.sceneResource);
-    if (!samples) return;
-    const worldTransform = this.sceneEntity.getWorldTransform();
-    const cameraPosition = this.camera.getPosition();
-    const cameraForward = this.camera.forward;
-    const local = new pc.Vec3();
-    const world = new pc.Vec3();
-    const delta = new pc.Vec3();
-    const screen = new pc.Vec3();
-    const radiusPoint = new pc.Vec3();
-    const radiusScreen = new pc.Vec3();
-    const output = new pc.Vec3();
+  installCameraFrameColorPipeline() {
+    if (this.cameraFrameColorPipeline || !this.app) return;
     const device = this.app.graphicsDevice;
-    const width = device.clientRect.width;
-    const height = device.clientRect.height;
-    const geometry = buildViewDepthProxyGeometry(
-      samples,
-      (x, y, z, radius) => {
-        local.set(x, y, z);
-        worldTransform.transformPoint(local, world);
-        delta.sub2(world, cameraPosition);
-        if (delta.dot(cameraForward) <= 0) return null;
-        this.camera.camera.worldToScreen(world, screen);
-        let screenRadius = 0;
-        if (Number.isFinite(radius) && radius > 0) {
-          radiusPoint.copy(this.camera.right).mulScalar(
-            radius * this.viewpoint.scene_transform.scale,
-          ).add(world);
-          this.camera.camera.worldToScreen(radiusPoint, radiusScreen);
-          screenRadius = Math.hypot(radiusScreen.x - screen.x, radiusScreen.y - screen.y);
-        }
-        return { x: screen.x, y: screen.y, depth: delta.length(), radius: screenRadius };
-      },
-      (x, y, depth) => this.camera.camera.screenToWorld(x, y, depth, output),
-      width,
-      height,
-    );
-    if (geometry) this.installDepthProxy(geometry, false);
+    const glslChunks = pc.ShaderChunks.get(device, pc.SHADERLANGUAGE_GLSL);
+    const wgslChunks = pc.ShaderChunks.get(device, pc.SHADERLANGUAGE_WGSL);
+    const originalGlsl = glslChunks.get('gsplatOutputVS');
+    const originalWgsl = wgslChunks.get('gsplatOutputVS');
+    glslChunks.set('gsplatOutputVS', CAMERA_FRAME_GSPLAT_OUTPUT_GLSL);
+    wgslChunks.set('gsplatOutputVS', CAMERA_FRAME_GSPLAT_OUTPUT_WGSL);
+
+    const backBuffer = device.backBuffer;
+    const originalIsColorBufferSrgb = backBuffer.isColorBufferSrgb;
+    const patchedIsColorBufferSrgb = () => true;
+    backBuffer.isColorBufferSrgb = patchedIsColorBufferSrgb;
+    this.cameraFrameColorPipeline = {
+      backBuffer,
+      glslChunks,
+      wgslChunks,
+      originalGlsl,
+      originalWgsl,
+      originalIsColorBufferSrgb,
+      patchedIsColorBufferSrgb,
+    };
+    this.invalidateGsplatMaterials();
   }
 
-  refreshViewDepthProxy(force = false) {
-    if (this.depthProxyUsesSceneTransform) return;
-    if (this.cacheSceneFrames) {
-      this.rebuildViewDepthProxy(force);
-      return;
+  restoreCameraFrameColorPipeline() {
+    const pipeline = this.cameraFrameColorPipeline;
+    if (!pipeline) return;
+    pipeline.glslChunks.set('gsplatOutputVS', pipeline.originalGlsl);
+    pipeline.wgslChunks.set('gsplatOutputVS', pipeline.originalWgsl);
+    if (pipeline.backBuffer.isColorBufferSrgb === pipeline.patchedIsColorBufferSrgb) {
+      pipeline.backBuffer.isColorBufferSrgb = pipeline.originalIsColorBufferSrgb;
     }
-    this.depthProxyRefreshForce ||= force;
-    if (this.depthProxyRefreshTimer) return;
-    this.depthProxyRefreshTimer = setTimeout(() => {
-      this.depthProxyRefreshTimer = null;
-      const refreshForce = this.depthProxyRefreshForce;
-      this.depthProxyRefreshForce = false;
-      this.rebuildViewDepthProxy(refreshForce);
-    }, DEPTH_PROXY_REFRESH_DELAY_MS);
+    this.cameraFrameColorPipeline = null;
+    this.invalidateGsplatMaterials();
+  }
+
+  disableCameraFrame() {
+    if (!this.cameraFrame) return;
+    this.cameraFrame.enabled = false;
+    this.restoreCameraFrameColorPipeline();
   }
 
   applyViewpoint(payload, rememberAsReset = false) {
@@ -951,7 +401,6 @@ class SceneRenderer {
         crop.bottom - crop.top,
       );
       this.applySceneTransform();
-      this.refreshViewDepthProxy();
       this.updateSubjectGuide();
       this.snapshotRevision += 1;
       const nextReferenceKey = harmonizationViewpointKey(current);
@@ -968,16 +417,35 @@ class SceneRenderer {
     }
   }
 
+  beginNavigation(input) {
+    if (this.navigationInputs.has(input)) return;
+    this.navigationInputs.add(input);
+    this.configureNormalFrame();
+    this.requestSceneFrame();
+  }
+
+  endNavigation(input) {
+    if (!this.navigationInputs.delete(input) || this.navigationInputs.size) return;
+    this.configureNormalFrame();
+    this.requestSceneFrame(2);
+  }
+
   bindInput(canvas) {
     canvas.addEventListener('contextmenu', (event) => event.preventDefault());
     canvas.addEventListener('pointerdown', (event) => {
       canvas.focus();
       canvas.setPointerCapture(event.pointerId);
       this.drag = { x: event.clientX, y: event.clientY, pan: event.button === 2 || event.shiftKey };
+      this.beginNavigation(`pointer:${event.pointerId}`);
     });
-    canvas.addEventListener('pointerup', () => {
+    canvas.addEventListener('pointerup', (event) => {
       this.drag = null;
+      this.endNavigation(`pointer:${event.pointerId}`);
       this.publishViewpoint();
+    });
+    canvas.addEventListener('pointercancel', (event) => {
+      this.drag = null;
+      this.endNavigation(`pointer:${event.pointerId}`);
     });
     canvas.addEventListener('pointermove', (event) => {
       if (!this.drag || !this.viewpoint) return;
@@ -994,6 +462,12 @@ class SceneRenderer {
       (event) => {
         event.preventDefault();
         if (!this.viewpoint) return;
+        this.beginNavigation('wheel');
+        if (this.wheelIdleTimer) clearTimeout(this.wheelIdleTimer);
+        this.wheelIdleTimer = setTimeout(() => {
+          this.wheelIdleTimer = null;
+          this.endNavigation('wheel');
+        }, 120);
         if (this.firstPersonNavigation) this.dolly(event.deltaY);
         else {
           const position = zoomPosition(
@@ -1013,6 +487,7 @@ class SceneRenderer {
       if ('wasdqe'.includes(key) || key === 'shift') {
         event.preventDefault();
         this.flightKeys.add(key);
+        this.beginNavigation('flight');
         return;
       }
       const orbitKeys = { ArrowLeft: [-12, 0], ArrowRight: [12, 0], ArrowUp: [0, -12], ArrowDown: [0, 12] };
@@ -1029,10 +504,15 @@ class SceneRenderer {
       if (!this.flightKeys.delete(key)) return;
       event.preventDefault();
       this.finishFlight();
+      if (!this.flightKeys.size) this.endNavigation('flight');
     });
     const stopFlight = () => {
       this.flightKeys.clear();
       this.finishFlight();
+      this.endNavigation('flight');
+      for (const input of [...this.navigationInputs]) {
+        if (input.startsWith('pointer:')) this.endNavigation(input);
+      }
     };
     canvas.addEventListener('blur', stopFlight);
     window.addEventListener('blur', stopFlight);
@@ -1176,7 +656,6 @@ class SceneRenderer {
     const rotation = this.camera.getRotation();
     this.viewpoint.orientation = { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w };
     this.bridge.submit_viewpoint(JSON.stringify(this.viewpoint));
-    this.refreshViewDepthProxy();
   }
 
   updateSubjectGuide() {
@@ -1196,32 +675,28 @@ class SceneRenderer {
     const requestedStrength = blurStrengthOverride ?? settings.blur_strength;
     const blurStrength = Math.min(1, Math.max(0, requestedStrength));
     const effect = depthOfFieldForStrength(blurStrength, this.viewpoint.field_of_view);
-    const enabled = Boolean(this.sceneEntity && this.depthProxyEntity);
-    const genericNearDepth = !this.depthProxyUsesSceneTransform
-      && Number.isFinite(this.depthProxyNearDepth)
-      && this.depthProxyNearDepth > 0
-      ? this.depthProxyNearDepth
-      : null;
-    const focusDistance = genericNearDepth === null
-      ? SUBJECT_FOCUS_DISTANCE
-      : Math.max(this.viewpoint.near_clip, this.camera.camera.nearClip);
-    const focusRange = genericNearDepth === null
-      ? effect.focusRange
-      : Math.max(
-        GENERIC_MIN_FOCUS_RANGE,
-        genericNearDepth * effect.focusRange / MAX_SUBJECT_FOCUS_RANGE,
-      );
+    const enabled = Boolean(this.sceneEntity && blurStrength > 0 && !this.navigationInputs?.size);
+    if (!enabled) {
+      this.disableCameraFrame();
+      return;
+    }
+    this.installCameraFrameColorPipeline();
+    this.cameraFrame.enabled = true;
     this.cameraFrame.debug = null;
-    this.cameraFrame.dof.enabled = enabled && blurStrength > 0;
+    this.cameraFrame.dof.enabled = true;
     this.cameraFrame.dof.nearBlur = true;
     this.cameraFrame.dof.highQuality = true;
-    this.cameraFrame.dof.focusDistance = focusDistance;
-    this.cameraFrame.dof.focusRange = focusRange;
+    this.cameraFrame.dof.focusDistance = focusDistanceAtCamera(this.camera.camera.nearClip);
+    this.cameraFrame.dof.focusRange = effect.focusRange;
     this.cameraFrame.dof.blurRadius = effect.blurRadius;
     this.cameraFrame.dof.blurRings = 4;
     this.cameraFrame.dof.blurRingPoints = 5;
+    this.cameraFrame.rendering.renderFormats = [pc.PIXELFORMAT_RGBA8];
     this.cameraFrame.rendering.sharpness = 0;
     this.cameraFrame.update();
+    if (!configureGpuDepthPipeline(this.cameraFrame)) {
+      throw new Error('GPU splat depth prepass could not be created');
+    }
   }
 
   queueSnapshotRefresh(referenceChanged) {
@@ -1246,19 +721,14 @@ class SceneRenderer {
     if (!force && key === this.sceneTransformKey) return;
     const translation = transform.translation;
     const orientation = transform.orientation;
-    const entities = [this.sceneEntity];
-    if (this.depthProxyUsesSceneTransform) entities.push(this.depthProxyEntity);
-    for (const entity of entities) {
-      if (!entity) continue;
-      entity.setLocalPosition(translation.x, translation.y, translation.z);
-      entity.setLocalRotation(
-        orientation.x,
-        orientation.y,
-        orientation.z,
-        orientation.w,
-      );
-      entity.setLocalScale(transform.scale, transform.scale, transform.scale);
-    }
+    this.sceneEntity.setLocalPosition(translation.x, translation.y, translation.z);
+    this.sceneEntity.setLocalRotation(
+      orientation.x,
+      orientation.y,
+      orientation.z,
+      orientation.w,
+    );
+    this.sceneEntity.setLocalScale(transform.scale, transform.scale, transform.scale);
     this.sceneTransformKey = key;
   }
 
@@ -1397,13 +867,10 @@ const start = async (bridge, options = {}) => {
 
 export {
   SceneRenderer,
-  buildDepthProxyGeometry,
-  buildViewDepthProxyGeometry,
-  collectDepthProxyCenters,
-  collectDepthProxySamples,
   configureGsplatStreaming,
   bytesToBase64,
   depthOfFieldForStrength,
+  focusDistanceAtCamera,
   harmonizationViewpointKey,
   flipPixelRows,
   hasPixelVariation,

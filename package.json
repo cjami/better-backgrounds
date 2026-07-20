@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "rollup --config renderer/rollup.config.mjs",
-    "test": "node --test renderer/tests"
+    "test": "node renderer/tests/run.mjs"
   },
   "dependencies": {
     "playcanvas": "2.20.6"
