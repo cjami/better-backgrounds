@@ -131,6 +131,9 @@ class MainWindow(QMainWindow):
             sharp_prepare_command_factory,
             checkpoint,
             lambda: self.select_tab(1),
+            source,
+            lambda: self._live_controller.selected_camera_id,
+            cache_root / "captures",
             splat_factory=splat_command_factory,
         )
         self._connect_views()
@@ -181,6 +184,7 @@ class MainWindow(QMainWindow):
         self._compare_page.wipe_changed.connect(self._live_controller.set_compare_wipe)
         self._live_controller.input_camera_changed.connect(self.input_camera_changed)
         self._build_controller.scene_completed.connect(self._scene_completed)
+        self._build_controller.capture_active.connect(self._room_capture_active)
 
     @property
     def build_session(self):  # noqa: ANN201
@@ -355,6 +359,14 @@ class MainWindow(QMainWindow):
         setter = getattr(self._live_preview, "set_scene_snapshot", None)
         if callable(setter):
             setter(snapshot.background)
+
+    @Slot(bool)
+    def _room_capture_active(self, active: bool) -> None:  # noqa: FBT001
+        """Release the shared webcam for room capture, then restore live preview."""
+        if active:
+            self._live_controller.set_resource_active(False)
+        else:
+            self._live_controller.set_resource_active(self.active_tab != ADJUST_TAB)
 
     @Slot(str, str)
     def _scene_completed(self, scene_id: str, room_name: str) -> None:

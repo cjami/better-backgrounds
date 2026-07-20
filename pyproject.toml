@@ -117,6 +117,9 @@ ignore = [
 "src/better_backgrounds/desktop/main_window/*.py" = [
     "PLR0913", # Constructor injection keeps native services replaceable in tests.
 ]
+"src/better_backgrounds/desktop/camera/room_capture.py" = [
+    "PLR0913", # Capture controller injects camera, page, and storage boundaries explicitly.
+]
 "src/better_backgrounds/desktop/live_preview/preview.py" = [
     "PLR0915", # Retained Qt resource setup stays visible in one session constructor.
 ]

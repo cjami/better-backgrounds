@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, Signal, SignalInstance, Slot
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 
+from better_backgrounds.desktop.camera import RoomCaptureController
+from better_backgrounds.desktop.pages.build import SPLAT_EXTENSIONS
 from better_backgrounds.jobs.build_session import (
     BuildSession,
     CompletedBuild,
@@ -38,6 +40,7 @@ from better_backgrounds.reconstruction.sharp import (
 )
 
 if TYPE_CHECKING:
+    from better_backgrounds.desktop.camera import InputCameraSource
     from better_backgrounds.desktop.pages import BuildPage
     from better_backgrounds.scene import SceneLibrary
 
@@ -68,9 +71,12 @@ class BuildController(QObject):
         prepare_factory: SharpPrepareCommandFactory | None,
         checkpoint: SharpCheckpointInstaller,
         open_build_tab: Callable[[], None],
+        camera_source: InputCameraSource,
+        selected_camera_id: Callable[[], str | None],
+        capture_root: Path,
         splat_factory: SplatCommandFactory | None = None,
     ) -> None:
-        """Connect a build page to its reconstruction services."""
+        """Connect a build page to its reconstruction and camera-capture services."""
         super().__init__(parent)
         self._parent = parent
         self._page = page
@@ -89,12 +95,25 @@ class BuildController(QObject):
         self._pending_device = "auto"
         self._image_diagnostics: SceneImageDiagnostics | None = None
         self._splat_diagnostics: SplatDiagnostics | None = None
-        page.image_requested.connect(self._choose_image)
-        page.splat_requested.connect(self._choose_splat)
+        self._capture = RoomCaptureController(
+            page,
+            camera_source,
+            selected_camera_id,
+            capture_root,
+            parent=self,
+        )
+        self._capture.captured.connect(self._accept_capture)
+        page.file_requested.connect(self._choose_file)
+        page.file_dropped.connect(self._accept_dropped_path)
         page.build_requested.connect(self._start_build)
         page.cancel_requested.connect(self._cancel_build)
         page.retry_requested.connect(self._retry_build)
         page.set_model_ready(ready=checkpoint.is_ready())
+
+    @property
+    def capture_active(self) -> SignalInstance:
+        """Expose the camera-capture active signal for live-preview coordination."""
+        return self._capture.active
 
     @property
     def session(self) -> BuildSession:
@@ -112,7 +131,8 @@ class BuildController(QObject):
         self._start_build("auto")
 
     def shutdown(self) -> None:
-        """Close the active worker process tree."""
+        """Close the active worker process tree and release the capture camera."""
+        self._capture.shutdown()
         if self._runner is not None:
             self._runner.close()
 
@@ -123,29 +143,42 @@ class BuildController(QObject):
         self._open_build_tab()
 
     @Slot()
-    def _choose_image(self) -> None:
+    def _choose_file(self) -> None:
         path, _selected_filter = QFileDialog.getOpenFileName(
             self._parent,
-            "Choose a room photo",
+            "Choose a room photo or Gaussian splat",
             "",
-            "Room images (*.jpg *.jpeg *.png *.webp);;All files (*)",
+            "Room sources (*.jpg *.jpeg *.png *.webp *.ply *.ssog *.zip);;All files (*)",
         )
         if path:
-            self._select_image(
-                SceneImageSelection(display_name=Path(path).name, source_path=Path(path)),
-            )
+            self._dispatch_path(Path(path))
 
-    @Slot()
-    def _choose_splat(self) -> None:
-        path, _selected_filter = QFileDialog.getOpenFileName(
-            self._parent,
-            "Import a Gaussian splat",
-            "",
-            "Gaussian scenes (*.ply *.ssog *.zip);;"
-            "PLY files (*.ply);;Streamed SOG (*.ssog *.zip);;All files (*)",
+    @Slot(str)
+    def _accept_dropped_path(self, path: str) -> None:
+        self._open_build_tab()
+        self._dispatch_path(Path(path))
+
+    def _dispatch_path(self, path: Path) -> None:
+        """Route one selected file to image build or splat import by extension."""
+        suffix = path.suffix.lower()
+        if suffix in SPLAT_EXTENSIONS:
+            self._select_splat(SplatSelection(path.name, path))
+            return
+        # Images and unknown types fall through to image validation, which
+        # produces the friendly "Choose a JPEG, PNG, or WebP…" error for
+        # anything that is not a supported room photo.
+        self._select_image(
+            SceneImageSelection(display_name=path.name, source_path=path, source_kind="upload"),
         )
-        if path:
-            self._select_splat(SplatSelection(Path(path).name, Path(path)))
+
+    @Slot(object)
+    def _accept_capture(self, path: object) -> None:
+        if not isinstance(path, Path):
+            return
+        self._open_build_tab()
+        self._select_image(
+            SceneImageSelection(display_name=path.name, source_path=path, source_kind="camera"),
+        )
 
     def _select_image(self, selection: SceneImageSelection) -> None:
         self._session.select_source(selection)

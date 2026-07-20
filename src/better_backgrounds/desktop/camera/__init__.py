@@ -6,6 +6,7 @@ from better_backgrounds.desktop.camera.devices import (
     InputCameraSelectionStore,
     InputCameraSource,
 )
+from better_backgrounds.desktop.camera.room_capture import RoomCaptureController
 
 __all__ = [
     "CaptureProfile",
@@ -13,4 +14,5 @@ __all__ = [
     "InputCameraSelectionStore",
     "InputCameraSource",
     "OutputGeometry",
+    "RoomCaptureController",
 ]

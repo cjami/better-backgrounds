@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from PIL import Image, ImageOps
 from PIL.ImageQt import ImageQt
@@ -25,8 +25,21 @@ from better_backgrounds.desktop.pages.common import card as _card
 from better_backgrounds.desktop.pages.common import label as _label
 
 if TYPE_CHECKING:
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QImage
+
     from better_backgrounds.reconstruction import SplatDiagnostics, SplatSelection
     from better_backgrounds.reconstruction.sharp import SceneImageDiagnostics, SceneImageSelection
+
+
+IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+SPLAT_EXTENSIONS = frozenset({".ply", ".ssog", ".zip"})
+SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | SPLAT_EXTENSIONS
+
+
+class _MimeEvent(Protocol):
+    def mimeData(self) -> QMimeData:  # noqa: N802
+        """Return the event's mime payload."""
 
 
 STAGE_ORDER = (
@@ -44,21 +57,31 @@ COMPLETE_PROGRESS = 100
 class BuildPage(QWidget):
     """Build from one room image or import one Gaussian scene."""
 
-    image_requested = Signal()
-    splat_requested = Signal()
+    file_requested = Signal()
+    file_dropped = Signal(str)
+    capture_requested = Signal()
+    capture_now_requested = Signal()
+    capture_cancelled = Signal()
     build_requested = Signal(str)
     cancel_requested = Signal()
     retry_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        """Create upload, review, and processing states."""
+        """Create upload, capture, review, and processing states."""
         super().__init__(parent)
+        # Paint an opaque backdrop so the stacked live preview never shows
+        # through and the Build tab reads as a solid page, not an overlay.
+        self.setObjectName("buildPage")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)  # noqa: FBT003
+        self.setAcceptDrops(True)
         root = QVBoxLayout(self)
         root.setContentsMargins(52, 32, 52, 32)
         self._content = QStackedWidget()
         self._content.setObjectName("buildContent")
         root.addWidget(self._content)
+        self._drop_card: QFrame | None = None
         self._create_upload()
+        self._create_capture()
         self._create_review()
         self._create_progress()
         self._active_stage_order = STAGE_ORDER
@@ -78,8 +101,8 @@ class BuildPage(QWidget):
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         subtitle = _label(
-            "Build locally from one room photo, or import an existing Gaussian splat "
-            "directly into your room library.",
+            "Drop a room photo or Gaussian splat anywhere on this page, or capture the room "
+            "your webcam already sees.",
             object_name="subtitle",
             word_wrap=True,
         )
@@ -90,8 +113,10 @@ class BuildPage(QWidget):
         layout.addSpacing(10)
         drop = QFrame()
         drop.setObjectName("dropCard")
-        drop.setMinimumSize(620, 180)
+        drop.setProperty("dragActive", False)  # noqa: FBT003
+        drop.setMinimumSize(620, 200)
         drop.setMaximumWidth(760)
+        self._drop_card = drop
         drop_layout = QVBoxLayout(drop)
         drop_layout.setContentsMargins(38, 28, 38, 28)
         drop_layout.setSpacing(8)
@@ -99,19 +124,61 @@ class BuildPage(QWidget):
             _label("↑", object_name="uploadIcon"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
-        choose = QPushButton("Choose a room photo")
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addStretch()
+        choose = QPushButton("Choose a file")
         choose.setObjectName("dropAction")
-        choose.clicked.connect(self.image_requested)
-        drop_layout.addWidget(choose, alignment=Qt.AlignmentFlag.AlignHCenter)
-        import_splat = QPushButton("Import Gaussian splat")
-        import_splat.setObjectName("quietAction")
-        import_splat.clicked.connect(self.splat_requested)
-        drop_layout.addWidget(import_splat, alignment=Qt.AlignmentFlag.AlignHCenter)
+        choose.clicked.connect(self.file_requested)
+        actions.addWidget(choose)
+        capture = QPushButton("Capture from camera")
+        capture.setObjectName("quietAction")
+        capture.clicked.connect(self.capture_requested)
+        actions.addWidget(capture)
+        actions.addStretch()
+        drop_layout.addLayout(actions)
         drop_layout.addWidget(
             _label("JPEG  /  PNG  /  WEBP  /  PLY  /  STREAMED SOG", object_name="feedMeta"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         layout.addWidget(drop, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch()
+        self._content.addWidget(page)
+
+    def _create_capture(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addStretch()
+        card, card_layout = _card()
+        card.setMaximumWidth(780)
+        card_layout.addWidget(_label("Capture the empty room", object_name="title"))
+        self._capture_instruction = _label(
+            "Step out of frame — we'll photograph the room your webcam sees.",
+            object_name="subtitle",
+            word_wrap=True,
+        )
+        card_layout.addWidget(self._capture_instruction)
+        self._capture_preview = QLabel()
+        self._capture_preview.setObjectName("capturePreview")
+        self._capture_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._capture_preview.setFixedSize(720, 405)
+        self._capture_preview.setAccessibleName("Room capture camera preview")
+        card_layout.addWidget(self._capture_preview)
+        self._countdown = _label("", object_name="countdown")
+        self._countdown.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self._countdown)
+        footer = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("quiet")
+        cancel.clicked.connect(self.capture_cancelled)
+        footer.addWidget(cancel)
+        footer.addStretch()
+        self._capture_now = QPushButton("Capture now")
+        self._capture_now.setObjectName("primary")
+        self._capture_now.clicked.connect(self.capture_now_requested)
+        footer.addWidget(self._capture_now)
+        card_layout.addLayout(footer)
+        layout.addWidget(card, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch()
         self._content.addWidget(page)
 
@@ -247,6 +314,80 @@ class BuildPage(QWidget):
         """Show the upload surface."""
         self._content.setCurrentIndex(0)
 
+    def show_capture(self) -> None:
+        """Show the live webcam preview and countdown before capture."""
+        self._capture_preview.clear()
+        self._capture_preview.setText("Requesting camera…")
+        self._countdown.setText("")
+        self._capture_instruction.setText(
+            "Step out of frame — we'll photograph the room your webcam sees.",
+        )
+        self._capture_now.setEnabled(True)
+        self._content.setCurrentIndex(1)
+
+    def set_capture_frame(self, image: QImage) -> None:
+        """Paint one live camera frame into the capture preview."""
+        if image.isNull():
+            return
+        pixmap = QPixmap.fromImage(image)
+        self._capture_preview.setPixmap(
+            pixmap.scaled(
+                self._capture_preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def set_countdown(self, seconds: int) -> None:
+        """Show the remaining seconds before the automatic capture."""
+        self._countdown.setText(str(seconds) if seconds > 0 else "")
+
+    def set_capture_error(self, message: str) -> None:
+        """Explain why the room could not be captured from the camera."""
+        self._capture_instruction.setText(message)
+        self._capture_preview.clear()
+        self._capture_preview.setText("Camera unavailable")
+        self._countdown.setText("")
+        self._capture_now.setEnabled(False)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+        """Accept a drag only when it carries one supported local file."""
+        if _first_supported_path(event) is not None:
+            self._set_drag_active(active=True)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:  # noqa: N802
+        """Keep accepting a valid drag as the pointer moves across the page."""
+        if _first_supported_path(event) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:  # noqa: N802
+        """Clear the drop highlight when the drag leaves the page."""
+        self._set_drag_active(active=False)
+        event.accept()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        """Emit the first supported dropped path for controller dispatch."""
+        self._set_drag_active(active=False)
+        path = _first_supported_path(event)
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.file_dropped.emit(path)
+
+    def _set_drag_active(self, *, active: bool) -> None:
+        card = self._drop_card
+        if card is None or bool(card.property("dragActive")) == active:
+            return
+        card.setProperty("dragActive", active)
+        card.style().unpolish(card)
+        card.style().polish(card)
+
     def show_review(
         self,
         selection: SceneImageSelection,
@@ -255,7 +396,7 @@ class BuildPage(QWidget):
         """Show the oriented image, dimensions, and pre-inference warnings."""
         self._set_review_mode(importing=False)
         self._selection_name.setText(selection.display_name)
-        self._content.setCurrentIndex(1)
+        self._content.setCurrentIndex(2)
         if selection.source_path is None or diagnostics is None:
             self._image_preview.clear()
             self._readiness.setText("PREPARED SMOKE INPUT")
@@ -305,7 +446,7 @@ class BuildPage(QWidget):
         """Show direct-import scene metadata without decoding a pixel preview."""
         self._set_review_mode(importing=True)
         self._selection_name.setText(selection.display_name)
-        self._content.setCurrentIndex(1)
+        self._content.setCurrentIndex(2)
         self._image_preview.clear()
         self._image_preview.setText("Gaussian splat ready for managed import")
         self._readiness.setText("READY" if diagnostics is not None else "SPLAT UNAVAILABLE")
@@ -361,7 +502,7 @@ class BuildPage(QWidget):
             if importing
             else STAGE_ORDER
         )
-        self._content.setCurrentIndex(2)
+        self._content.setCurrentIndex(3)
         self._status.setText("Preparing the build")
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
@@ -456,3 +597,18 @@ class BuildPage(QWidget):
         label.setObjectName(object_name)
         label.style().unpolish(label)
         label.style().polish(label)
+
+
+def _first_supported_path(event: _MimeEvent) -> str | None:
+    """Return the first dragged local file with a supported extension."""
+    mime = event.mimeData()
+    if not mime.hasUrls():
+        return None
+    for url in mime.urls():
+        if not url.isLocalFile():
+            continue
+        local = url.toLocalFile()
+        suffix = local[local.rfind(".") :].lower() if "." in local else ""
+        if suffix in SUPPORTED_EXTENSIONS:
+            return local
+    return None

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication, QWidget
 
+from better_backgrounds.desktop.camera import InputCameraSource
 from better_backgrounds.desktop.main_window.build_controller import BuildController
 from better_backgrounds.jobs.build_session import ReviewBuild
 from better_backgrounds.jobs.events import CancelledEvent, ErrorEvent, ResultEvent
@@ -24,8 +25,11 @@ if TYPE_CHECKING:
 class FakeBuildPage(QObject):
     """Provide the BuildPage signal and update boundary without widgets."""
 
-    image_requested = Signal()
-    splat_requested = Signal()
+    file_requested = Signal()
+    file_dropped = Signal(str)
+    capture_requested = Signal()
+    capture_now_requested = Signal()
+    capture_cancelled = Signal()
     build_requested = Signal(str)
     cancel_requested = Signal()
     retry_requested = Signal()
@@ -43,6 +47,18 @@ class FakeBuildPage(QObject):
 
     def show_upload(self) -> None:
         """Accept navigation to upload state."""
+
+    def show_capture(self) -> None:
+        """Accept navigation to the camera-capture state."""
+
+    def set_capture_frame(self, _image: object) -> None:
+        """Accept live capture-preview frames."""
+
+    def set_countdown(self, _seconds: int) -> None:
+        """Accept countdown updates."""
+
+    def set_capture_error(self, _message: str) -> None:
+        """Accept capture failures."""
 
     def show_review(self, selection: SceneImageSelection, _diagnostics: object = None) -> None:
         """Record restored retry context."""
@@ -116,6 +132,9 @@ def create_controller() -> tuple[BuildController, FakeBuildPage]:
         None,
         cast("SharpCheckpointInstaller", FakeCheckpoint()),
         lambda: None,
+        InputCameraSource(provider=tuple),
+        lambda: None,
+        Path("captures"),
     )
     return controller, page
 
@@ -173,6 +192,37 @@ def test_build_controller_completion_retry_cancellation_and_checkpoint_continuat
 def tmp_source() -> Path:
     """Return a source path; checkpoint continuation does not read it."""
     return Path("source.jpg")
+
+
+def test_dispatch_path_routes_by_extension(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route photos to SHARP image selection and splats to managed import."""
+    controller, _page = create_controller()
+    images: list[SceneImageSelection] = []
+    splats: list[SplatSelection] = []
+    monkeypatch.setattr(controller, "_select_image", images.append)
+    monkeypatch.setattr(controller, "_select_splat", splats.append)
+
+    controller._dispatch_path(Path("lounge.JPG"))  # noqa: SLF001
+    controller._dispatch_path(Path("scene.ply"))  # noqa: SLF001
+    controller._dispatch_path(Path("museum.ssog"))  # noqa: SLF001
+
+    assert [selection.source_kind for selection in images] == ["upload"]
+    assert images[0].source_path == Path("lounge.JPG")
+    assert [selection.display_name for selection in splats] == ["scene.ply", "museum.ssog"]
+
+
+def test_captured_room_selects_camera_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Feed a captured empty-room frame through image selection as a camera source."""
+    controller, _page = create_controller()
+    selections: list[SceneImageSelection] = []
+    monkeypatch.setattr(controller, "_select_image", selections.append)
+    monkeypatch.setattr(controller, "_open_build_tab", lambda: None)
+
+    controller._accept_capture(Path("captures/room.png"))  # noqa: SLF001
+
+    assert len(selections) == 1
+    assert selections[0].source_kind == "camera"
+    assert selections[0].source_path == Path("captures/room.png")
 
 
 def test_splat_build_bypasses_checkpoint_and_uses_import_worker(

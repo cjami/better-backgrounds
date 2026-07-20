@@ -2,19 +2,62 @@
 
 from pathlib import Path
 
+from PySide6.QtCore import QMimeData, QUrl
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from better_backgrounds.desktop.pages import BuildPage
+from better_backgrounds.desktop.pages.build import _first_supported_path
 from better_backgrounds.reconstruction import SplatDiagnostics, SplatSelection
+
+
+class _DragStub:
+    """Provide the minimal drag-event surface used by drop dispatch."""
+
+    def __init__(self, mime: QMimeData) -> None:
+        self._mime = mime
+
+    def mimeData(self) -> QMimeData:  # noqa: N802
+        """Return the carried mime payload."""
+        return self._mime
+
+
+def _mime_for(*local_paths: str) -> QMimeData:
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(path) for path in local_paths])
+    return mime
+
+
+def test_build_page_offers_unified_upload_and_camera_capture() -> None:
+    """Replace the two source buttons with a unified file picker and capture."""
+    QApplication.instance() or QApplication([])
+    page = BuildPage()
+    buttons = {button.text(): button for button in page.findChildren(QPushButton)}
+    assert "Choose a file" in buttons
+    assert "Capture from camera" in buttons
+    assert "Choose a room photo" not in buttons
+    assert "Import Gaussian splat" not in buttons
+    assert page.acceptDrops()
+    page.close()
+
+
+def test_build_page_accepts_supported_drops_and_rejects_others() -> None:
+    """Recognize supported photo and splat drops while ignoring other files."""
+    QApplication.instance() or QApplication([])
+    photo = "C:/rooms/lounge.JPG"
+    splat = "C:/rooms/scene.ply"
+    other = "C:/rooms/notes.txt"
+    assert _first_supported_path(_DragStub(_mime_for(photo))) == photo
+    assert _first_supported_path(_DragStub(_mime_for(splat))) == splat
+    assert _first_supported_path(_DragStub(_mime_for(other))) is None
+    assert _first_supported_path(_DragStub(QMimeData())) is None
+    mixed = _first_supported_path(_DragStub(_mime_for(other, "C:/rooms/b.webp")))
+    assert mixed == "C:/rooms/b.webp"
 
 
 def test_build_page_offers_and_reviews_direct_splat_imports() -> None:
     """Switch review controls from SHARP inference to managed PLY import."""
     QApplication.instance() or QApplication([])
     page = BuildPage()
-    buttons = {button.text(): button for button in page.findChildren(QPushButton)}
-    assert "Choose a room photo" in buttons
-    assert "Import Gaussian splat" in buttons
 
     page.show_splat_review(
         SplatSelection("meeting_room.ply", Path("meeting_room.ply")),

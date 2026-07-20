@@ -29,12 +29,21 @@ QFrame#card {{
     border: 1px solid #292b31;
     border-radius: 14px;
 }}
+QWidget#buildPage {{ background: {BACKGROUND}; }}
 QFrame#dropCard {{
     background: #171616;
     border: 1px dashed #5b5c61;
     border-radius: 14px;
 }}
 QFrame#dropCard:hover {{ border-color: {ACCENT}; background: #1b1916; }}
+QFrame#dropCard[dragActive="true"] {{ border: 2px solid {ACCENT}; background: #221d13; }}
+QLabel#capturePreview {{
+    background: #090a0c;
+    border: 1px solid #292b31;
+    border-radius: 12px;
+    color: {MUTED};
+}}
+QLabel#countdown {{ color: {ACCENT}; font-size: 44px; font-weight: 700; }}
 QFrame#inspector {{
     background: #111216;
     border: none;
