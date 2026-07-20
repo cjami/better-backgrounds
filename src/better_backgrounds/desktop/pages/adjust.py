@@ -494,6 +494,7 @@ class AdjustPage(QWidget):
             slider.blockSignals(True)  # noqa: FBT003
             slider.setValue(value)
             slider.blockSignals(False)  # noqa: FBT003
+            self._slider_labels[title].setText(self._format_slider(title, value))
         index = min(
             range(self._aspect.count()),
             key=lambda item: abs(float(self._aspect.itemData(item)) - self._viewpoint.aspect_ratio),

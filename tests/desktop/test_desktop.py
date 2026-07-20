@@ -666,6 +666,27 @@ def test_adjust_enables_depth_of_field_for_every_spatial_scene() -> None:
     page.close()
 
 
+def test_adjust_restores_the_saved_depth_of_field_percentage() -> None:
+    """Keep the displayed percentage synchronized when signals are blocked during restore."""
+    application()
+    renderer = TrackingRenderer()
+    page = AdjustPage(lambda: renderer)
+    scene = load_sample_manifest().scenes[0]
+    depth_of_field = scene.default_viewpoint.depth_of_field.model_copy(
+        update={"blur_strength": 0.65},
+    )
+    viewpoint = scene.default_viewpoint.model_copy(
+        update={"depth_of_field": depth_of_field},
+    )
+    sliders = {slider.accessibleName(): slider for slider in page.findChildren(QSlider)}
+
+    page.set_room(scene.asset_id, scene, installed=True, viewpoint=viewpoint)
+
+    assert sliders["Background blur"].value() == 65
+    assert page._slider_labels["Background blur"].text() == "65%"  # noqa: SLF001
+    page.close()
+
+
 def test_adjust_and_show_follow_the_same_output_aspect(tmp_path: Path) -> None:
     """Keep room framing identical while moving between adjustment and presentation."""
     window = MainWindow(
