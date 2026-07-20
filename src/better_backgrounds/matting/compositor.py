@@ -50,7 +50,6 @@ class LiveComposite:
     source: NDArray[np.uint8]
     alpha: NDArray[np.uint8]
     image: NDArray[np.uint8]
-    standard_image: NDArray[np.uint8]
     background_revision: int
     harmonized: bool
     harmonization_ms: float = 0.0
@@ -81,7 +80,6 @@ def compose_live_frame(
     foreground: NDArray[np.uint8] | None = None,
     harmonizer: LiveHarmonizer | None = None,
     harmonization_background: NDArray[np.uint8] | None = None,
-    retain_standard: bool = True,
 ) -> LiveComposite:
     """Blend one matching source/matte pair against an immutable background."""
     _validate_frame_identity(packet, matte)
@@ -127,19 +125,13 @@ def compose_live_frame(
         harmonization_ms = result.processing_ms
         harmonization_degraded = result.degraded_components
         harmonized = result.applied
-    standard_image = (
-        _standard_composite(render_source, alpha, background)
-        if image is None or retain_standard
-        else image
-    )
     if image is None:
-        image = standard_image
+        image = _standard_composite(render_source, alpha, background)
     return LiveComposite(
         frame_id=packet.frame_id,
         source=source,
         alpha=alpha,
         image=image,
-        standard_image=standard_image,
         background_revision=revision,
         harmonized=harmonized,
         harmonization_ms=harmonization_ms,
@@ -192,5 +184,5 @@ def _standard_composite(
     alpha: NDArray[np.uint8],
     background: NDArray[np.uint8],
 ) -> NDArray[np.uint8]:
-    """Blend the baseline only when display or Compare needs it."""
+    """Blend the plain composite used as output when harmonization is unavailable."""
     return compose_linear_light(source, alpha, background)

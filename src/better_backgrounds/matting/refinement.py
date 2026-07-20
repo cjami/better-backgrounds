@@ -84,7 +84,7 @@ class TemporalAlphaStabilizer:
             or elapsed <= 0
             or elapsed > MAXIMUM_STABILIZATION_GAP_MS
         ):
-            return self._remember(alpha, captured_at=captured_at)
+            return self._remember(alpha.copy(), captured_at=captured_at)
 
         difference = cv2.absdiff(alpha, previous)
         boundary = cv2.bitwise_or(
@@ -119,10 +119,10 @@ class TemporalAlphaStabilizer:
         *,
         captured_at: float,
     ) -> NDArray[np.uint8]:
-        remembered = alpha.copy()
-        self._previous = remembered
+        """Retain an owned matte as history; callers pass a private array."""
+        self._previous = alpha
         self._captured_at = captured_at
-        return remembered
+        return alpha
 
 
 def decontaminate_foreground(

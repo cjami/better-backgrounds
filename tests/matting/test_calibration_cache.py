@@ -80,7 +80,7 @@ def test_first_calibration_stops_at_the_highest_passing_size(
         capabilities=MattingCapabilities(device_type="cuda", accelerated=True),
         calibration_device_identity=lambda: ("Test GPU", "2.9", "13.0"),
     )
-    descriptor = FrameRingDescriptor("f", "a", "p", "s", 1280, 720, 1280, 720)
+    descriptor = FrameRingDescriptor("f", "a", "p", 1280, 720, 1280, 720)
     store = CalibrationProfileStore(tmp_path / "matting-calibration-v1.json")
     events = multiprocessing.get_context("spawn").Queue()
 

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from better_backgrounds.matting.seed import PersonCandidate
 
 ALPHA_MIDPOINT = 128
+DIAGNOSTICS_UPDATE_INTERVAL_SECONDS = 1.0
 
 
 def rgb_to_qimage(pixels: NDArray[np.uint8]) -> QImage:
@@ -71,7 +72,6 @@ class PreparedComposite:
     source: NDArray[np.uint8]
     alpha: NDArray[np.uint8]
     composite: LiveComposite
-    compare_mode: bool
     queue_ms: float = 0.0
     normalization_ms: float = 0.0
     post_processing_ms: float = 0.0
@@ -79,7 +79,7 @@ class PreparedComposite:
 
 
 class NativeCompositeSurface(QWidget):
-    """Paint the current exact-frame composite and comparison wipe."""
+    """Paint the current exact-frame composite."""
 
     frame_painted = Signal(float)
     composite_presented = Signal(object, float)
@@ -105,21 +105,18 @@ class NativeCompositeSurface(QWidget):
         self._alpha: NDArray[np.uint8] | None = None
         self._source_image = QImage()
         self._composite_image = QImage()
-        self._standard_composite_image = QImage()
         self._seed_image = QImage()
         self._candidate_masks: dict[int, NDArray[np.uint8]] = {}
         self._mask_image = QImage()
         self._mask_label = ""
-        self._mode = "show"
-        self._wipe = 52
         self._mirrored = True
         self._diagnostics = "Waiting for camera"
+        self._diagnostics_updated_at: float | None = None
         self._last_composite: LiveComposite | None = None
         self._harmonizer = create_appearance_harmonizer()
         self._cuda_engine = CudaLiveEngine() if CudaLiveEngine.available() else None
         self._real_time_error: str | None = None
         self._composite_pixels: NDArray[np.uint8] | None = None
-        self._standard_composite_pixels: NDArray[np.uint8] | None = None
         self._mask_pixels: NDArray[np.uint8] | None = None
         self._pending_capture_at: float | None = None
 
@@ -146,13 +143,6 @@ class NativeCompositeSurface(QWidget):
     def prepare_harmonization(self) -> None:
         """Load the external model outside the live frame callback."""
         self._harmonizer.prepare()
-
-    @property
-    def comparison_frames(self) -> tuple[QImage, QImage] | None:
-        """Return retained standard and enhanced frames without repainting the widget."""
-        if self._standard_composite_image.isNull() or self._composite_image.isNull():
-            return None
-        return self._standard_composite_image, self._composite_image
 
     def set_background(
         self,
@@ -356,7 +346,6 @@ class NativeCompositeSurface(QWidget):
                 source,
                 self._resized_harmonization_backgrounds,
             )
-        compare_mode = self._mode == "compare"
         normalization_ms = (time.perf_counter() - normalization_started) * 1_000.0
         post_started = time.perf_counter()
         readback_ms = 0.0
@@ -371,7 +360,6 @@ class NativeCompositeSurface(QWidget):
                         captured_at=packet.captured_at,
                         harmonizer=self._harmonizer,
                         reference_background=harmonization_background,
-                        retain_standard=compare_mode,
                     ),
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as error:
@@ -383,7 +371,6 @@ class NativeCompositeSurface(QWidget):
                     source=source,
                     alpha=alpha,
                     image=accelerated.image,
-                    standard_image=accelerated.standard_image,
                     background_revision=revision,
                     harmonized=accelerated.harmonized,
                     harmonization_ms=accelerated.harmonization_ms,
@@ -394,7 +381,6 @@ class NativeCompositeSurface(QWidget):
                     source=source,
                     alpha=alpha,
                     composite=composite,
-                    compare_mode=compare_mode,
                     queue_ms=queue_ms,
                     normalization_ms=normalization_ms,
                     post_processing_ms=accelerated.post_processing_ms,
@@ -411,7 +397,6 @@ class NativeCompositeSurface(QWidget):
             foreground=foreground,
             harmonizer=self._harmonizer,
             harmonization_background=harmonization_background,
-            retain_standard=compare_mode,
         )
         post_processing_ms = (time.perf_counter() - post_started) * 1_000.0
         return PreparedComposite(
@@ -419,7 +404,6 @@ class NativeCompositeSurface(QWidget):
             source=source,
             alpha=alpha,
             composite=composite,
-            compare_mode=compare_mode,
             queue_ms=queue_ms,
             normalization_ms=normalization_ms,
             post_processing_ms=post_processing_ms,
@@ -439,13 +423,6 @@ class NativeCompositeSurface(QWidget):
         self._mask_label = "LIVE MATTE"
         self._source_image = QImage()
         self._composite_pixels, self._composite_image = self._retained_rgb_image(composite.image)
-        self._standard_composite_image = (
-            self._retained_standard_image(composite.standard_image)
-            if prepared.compare_mode
-            else QImage()
-        )
-        if not prepared.compare_mode:
-            self._standard_composite_pixels = None
         self._mask_pixels, self._mask_image = self._retained_gray_image(prepared.alpha)
         self._last_composite = composite
         self._pending_capture_at = prepared.completed.packet.captured_at
@@ -471,13 +448,6 @@ class NativeCompositeSurface(QWidget):
         self._composite_pixels, self._composite_image = self._retained_rgb_image(
             processed.primary,
         )
-        if processed.standard is None:
-            self._standard_composite_pixels = None
-            self._standard_composite_image = QImage()
-        else:
-            self._standard_composite_image = self._retained_standard_image(
-                processed.standard,
-            )
         self._mask_pixels, self._mask_image = self._retained_gray_image(
             processed.mask_preview,
         )
@@ -485,17 +455,6 @@ class NativeCompositeSurface(QWidget):
         self.update()
         self.composite_presented.emit(self._composite_pixels, processed.packet.captured_at)
         return True
-
-    def set_presentation(self, mode: str, wipe: int) -> None:
-        """Switch presentation without duplicating camera or inference work."""
-        changed = mode in {"show", "compare"} and mode != self._mode
-        if mode in {"show", "compare"}:
-            self._mode = mode
-        self._wipe = min(100, max(0, wipe))
-        if changed and self._packet is not None:
-            self._recompose()
-        else:
-            self.update()
 
     def set_mirroring(self, *, mirrored: bool) -> None:
         """Mirror source and alpha together while keeping the room unchanged."""
@@ -506,7 +465,14 @@ class NativeCompositeSurface(QWidget):
             self.set_raw_frame(self._raw_source)
 
     def set_diagnostics(self, diagnostics: LiveDiagnostics) -> None:
-        """Paint local performance evidence without adding product controls."""
+        """Refresh readable performance evidence at a stable one-second cadence."""
+        now = time.monotonic()
+        if (
+            self._diagnostics_updated_at is not None
+            and now - self._diagnostics_updated_at < DIAGNOSTICS_UPDATE_INTERVAL_SECONDS
+        ):
+            return
+        self._diagnostics_updated_at = now
         self._diagnostics = (
             f"{diagnostics.capture_fps:.0f} camera · {diagnostics.display_fps:.0f} output fps · "
             f"{diagnostics.mask_age_ms:.0f} ms · "
@@ -538,7 +504,6 @@ class NativeCompositeSurface(QWidget):
         self._matte = None
         self._alpha = None
         self._composite_image = QImage()
-        self._standard_composite_image = QImage()
         self._mask_image = QImage()
         self._mask_label = ""
         self._candidate_masks.clear()
@@ -585,7 +550,7 @@ class NativeCompositeSurface(QWidget):
         )
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: ARG002, N802
-        """Draw one image path and an optional comparison clip."""
+        """Draw the current composite with its mask inset and diagnostics overlay."""
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("#090a0c"))
         primary = self._seed_image if not self._seed_image.isNull() else self._composite_image
@@ -593,18 +558,6 @@ class NativeCompositeSurface(QWidget):
             primary = self._source_image
         if not primary.isNull():
             self._draw_cover(painter, primary)
-        if (
-            self._mode == "compare"
-            and not self._standard_composite_image.isNull()
-            and not self._composite_image.isNull()
-        ):
-            split = round(self.width() * self._wipe / 100)
-            painter.save()
-            painter.setClipRect(QRect(0, 0, split, self.height()))
-            self._draw_cover(painter, self._standard_composite_image)
-            painter.restore()
-            painter.setPen(QPen(QColor("#e0a34a"), 2))
-            painter.drawLine(split, 0, split, self.height())
         if not self._mask_image.isNull():
             box = QRect(16, self.height() - 106, 144, 81)
             painter.setPen(QColor(235, 236, 239, 190))
@@ -705,11 +658,6 @@ class NativeCompositeSurface(QWidget):
             QImage.Format.Format_RGB888,
         )
         return retained, image
-
-    def _retained_standard_image(self, pixels: NDArray[np.uint8]) -> QImage:
-        retained, image = self._retained_rgb_image(pixels)
-        self._standard_composite_pixels = retained
-        return image
 
     @staticmethod
     def _retained_gray_image(

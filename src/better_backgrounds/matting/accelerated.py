@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
@@ -51,7 +50,6 @@ class CudaCompositeResult:
     """Return final host pixels after one synchronized CUDA readback."""
 
     image: NDArray[np.uint8]
-    standard_image: NDArray[np.uint8]
     harmonized: bool
     harmonization_ms: float
     harmonization_degraded: tuple[str, ...]
@@ -66,7 +64,6 @@ class CudaCompositionOptions:
     captured_at: float
     harmonizer: LiveHarmonizer | None
     reference_background: NDArray[np.uint8] | None
-    retain_standard: bool
 
 
 @dataclass(slots=True)
@@ -94,7 +91,7 @@ class TensorAlphaStabilizer:
             or elapsed <= 0
             or elapsed > MAXIMUM_STABILIZATION_GAP_MS
         ):
-            return self._remember(alpha, captured_at=captured_at)
+            return self._remember(alpha.clone(), captured_at=captured_at)
         difference = torch.abs(alpha.to(torch.int16) - previous.to(torch.int16))
         boundary = ((alpha >= BOUNDARY_ALPHA_MINIMUM) & (alpha <= BOUNDARY_ALPHA_MAXIMUM)) | (
             (previous >= BOUNDARY_ALPHA_MINIMUM) & (previous <= BOUNDARY_ALPHA_MAXIMUM)
@@ -117,10 +114,10 @@ class TensorAlphaStabilizer:
         )
 
     def _remember(self, alpha: torch.Tensor, *, captured_at: float) -> torch.Tensor:
-        remembered = alpha.clone()
-        self._previous = remembered
+        """Retain an owned alpha tensor as history; callers pass a private tensor."""
+        self._previous = alpha
         self._captured_at = captured_at
-        return remembered
+        return alpha
 
 
 class CudaLiveEngine:
@@ -186,23 +183,21 @@ class CudaLiveEngine:
         if source_u8.device != self._device or alpha_u8.device != self._device:
             msg = "live tensors must be on the CUDA engine device"
             raise ValueError(msg)
-        torch.cuda.synchronize(self._device)
-        started = time.perf_counter()
+        # Stage timing uses stream-ordered CUDA events, not host synchronize() calls:
+        # the readback below drains the stream, so the events are read once at the end.
+        compose_start = torch.cuda.Event(enable_timing=True)
+        compose_done = torch.cuda.Event(enable_timing=True)
+        readback_done = torch.cuda.Event(enable_timing=True)
+        compose_start.record()
         background_float, background_linear, wrapped_light = self._background_tensor(background)
         source_float = source_u8.to(torch.float32).div_(255.0)
         alpha_float = alpha_u8.to(torch.float32).div_(255.0)
         foreground_float = self._decontaminate(source_float, alpha_float)
-        standard = self._standard_composite(
-            foreground_float,
-            alpha_float,
-            background_linear,
-            wrapped_light,
-        )
-        primary = standard
         harmonizer = options.harmonizer
         harmonized = harmonizer is not None and harmonizer.active
         harmonization_ms = 0.0
         degraded: tuple[str, ...] = ()
+        primary: torch.Tensor | None = None
         if harmonized and isinstance(harmonizer, PihAppearanceHarmonizer):
             reference_float = (
                 background_float
@@ -226,15 +221,21 @@ class CudaLiveEngine:
                     .round()
                     .to(torch.uint8)
                 )
-        torch.cuda.synchronize(self._device)
-        post_processing_ms = (time.perf_counter() - started) * 1_000.0
-        readback_started = time.perf_counter()
+        if primary is None:
+            primary = self._standard_composite(
+                foreground_float,
+                alpha_float,
+                background_linear,
+                wrapped_light,
+            )
+        compose_done.record()
         image = self._rgb_array(primary)
-        standard_image = self._rgb_array(standard) if options.retain_standard else image
-        readback_ms = (time.perf_counter() - readback_started) * 1_000.0
+        readback_done.record()
+        readback_done.synchronize()
+        post_processing_ms = compose_start.elapsed_time(compose_done)
+        readback_ms = compose_done.elapsed_time(readback_done)
         return CudaCompositeResult(
             image=image,
-            standard_image=standard_image,
             harmonized=harmonized,
             harmonization_ms=harmonization_ms,
             harmonization_degraded=degraded,
@@ -289,11 +290,11 @@ class CudaLiveEngine:
 
     @staticmethod
     def _decontaminate(source: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+        # No host-side any() gate: torch.where already no-ops the empty case, so
+        # detecting it would only add a per-frame device sync that stalls the pipeline.
         uncertain = (alpha >= BOUNDARY_ALPHA_MINIMUM / 255.0) & (
             alpha <= BOUNDARY_ALPHA_MAXIMUM / 255.0
         )
-        if not bool(uncertain.any()):
-            return source
         height, width = alpha.shape[-2:]
         estimate_size = (
             max(1, round(height * BACKGROUND_ESTIMATE_SCALE)),

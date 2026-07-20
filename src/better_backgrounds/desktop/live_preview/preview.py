@@ -76,7 +76,6 @@ class NativeLivePreview(QWidget):
 
     camera_state_changed = Signal(str, str)
     diagnostics_changed = Signal(object)
-    comparison_frame = Signal(object)
     harmonization_status_changed = Signal(str)
     person_candidates_changed = Signal(int)
     composite_frame_ready = Signal(object, float)
@@ -151,9 +150,7 @@ class NativeLivePreview(QWidget):
         self._next_seed_attempt_at = 0.0
         self._state = "idle"
         self._mirrored = True
-        self._mode = "show"
         self._pipeline_revision = 0
-        self._wipe = 52
         self._invalid_matte_count = 0
         self._active_device = "cpu"
         self._internal_size = 360
@@ -445,20 +442,6 @@ class NativeLivePreview(QWidget):
         """Apply cached-room geometry without requesting a spatial rerender."""
         self._set_output_aspect_ratio(aspect_ratio)
 
-    def set_presentation(self, mode: str, wipe: int = 52) -> None:
-        """Reuse this session in Show and Compare without duplicate work."""
-        if mode != self._mode:
-            self._pipeline_revision += 1
-        self._mode = mode
-        self._wipe = wipe
-        self._surface.set_presentation(mode, wipe)
-        if self._engine is not None:
-            self._engine.configure_presentation(
-                mirrored=self._mirrored,
-                retain_standard=mode == "compare",
-                revision=self._pipeline_revision,
-            )
-
     def set_mirroring(self, *, mirrored: bool) -> None:
         """Mirror source and alpha together, never the room snapshot."""
         if mirrored != self._mirrored:
@@ -468,7 +451,6 @@ class NativeLivePreview(QWidget):
         if self._engine is not None:
             self._engine.configure_presentation(
                 mirrored=mirrored,
-                retain_standard=self._mode == "compare",
                 revision=self._pipeline_revision,
             )
 
@@ -682,7 +664,6 @@ class NativeLivePreview(QWidget):
             output_height=geometry.height,
             aspect_ratio=geometry.aspect_ratio,
             mirrored=self._mirrored,
-            retain_standard=self._mode == "compare",
             revision=self._pipeline_revision,
         )
 
@@ -885,10 +866,6 @@ class NativeLivePreview(QWidget):
         self._latest_diagnostics = diagnostics
         self._surface.set_diagnostics(diagnostics)
         self.diagnostics_changed.emit(diagnostics)
-        if self._mode == "compare":
-            comparison = self._surface.comparison_frames
-            if comparison is not None:
-                self.comparison_frame.emit(comparison)
 
     def _start_result_pump(self, engine: ProcessMattingEngine) -> None:
         wait_for_events = getattr(engine, "wait", None)
@@ -1008,10 +985,6 @@ class NativeLivePreview(QWidget):
         self._latest_diagnostics = diagnostics
         self._surface.set_diagnostics(diagnostics)
         self.diagnostics_changed.emit(diagnostics)
-        if self._mode == "compare":
-            comparison = self._surface.comparison_frames
-            if comparison is not None:
-                self.comparison_frame.emit(comparison)
 
     def _record_first_matte(self) -> None:
         started_at = self._tracking_started_at

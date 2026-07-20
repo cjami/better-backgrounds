@@ -166,7 +166,6 @@ class LiveRendererBridge(RendererBridge):
 
     camera_start_requested = Signal(str, bool)
     camera_stop_requested = Signal()
-    presentation_requested = Signal(str, int)
     mirroring_requested = Signal(bool)
     matting_settings_requested = Signal(str)
     camera_state_changed = Signal(str, str)
@@ -210,11 +209,6 @@ class LiveRendererBridge(RendererBridge):
     def request_camera_stop(self) -> None:
         """Stop capture and release the browser stream."""
         self.camera_stop_requested.emit()
-
-    def request_presentation(self, mode: str, wipe: int) -> None:
-        """Switch the retained output between Show and Compare presentation."""
-        if mode in {"show", "compare"}:
-            self.presentation_requested.emit(mode, min(100, max(0, wipe)))
 
     def request_mirroring(self, *, mirrored: bool) -> None:
         """Mirror only the webcam foreground, never the spatial room."""

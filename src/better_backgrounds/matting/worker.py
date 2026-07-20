@@ -148,7 +148,6 @@ class ConfigurePresentation:
     """Update cheap session presentation choices without reseeding."""
 
     mirrored: bool
-    retain_standard: bool
     revision: int
 
 
@@ -280,7 +279,6 @@ def matting_worker_main(  # noqa: PLR0912
         fitted_backgrounds = None
         background_revision = 0
         mirrored = True
-        retain_standard = False
         pipeline_revision = 0
         while True:
             try:
@@ -373,9 +371,6 @@ def matting_worker_main(  # noqa: PLR0912
                 )
                 background_revision = 0
                 mirrored = True if pipeline_config is None else pipeline_config.mirrored
-                retain_standard = (
-                    False if pipeline_config is None else pipeline_config.retain_standard
-                )
                 pipeline_revision = 0 if pipeline_config is None else pipeline_config.revision
                 events.put(
                     WorkerReady(
@@ -402,7 +397,6 @@ def matting_worker_main(  # noqa: PLR0912
                 continue
             if isinstance(command, ConfigurePresentation):
                 mirrored = command.mirrored
-                retain_standard = command.retain_standard
                 pipeline_revision = command.revision
                 continue
             if isinstance(command, ConfigureHarmonization):
@@ -444,15 +438,17 @@ def matting_worker_main(  # noqa: PLR0912
                     and tensor_stabilizer is not None
                     and pipeline_config is not None
                 ):
+                    matting_start = torch.cuda.Event(enable_timing=True)
+                    matting_done = torch.cuda.Event(enable_timing=True)
+                    normalization_done = torch.cuda.Event(enable_timing=True)
+                    matting_start.record()
                     source_tensor = cuda_engine.upload_frame(source_frame)
                     alpha_tensor = runtime.step_uploaded(source_tensor)
                     alpha_tensor = tensor_stabilizer.apply(
                         alpha_tensor.unsqueeze(0).unsqueeze(0),
                         captured_at=packet.captured_at,
                     )
-                    runtime.synchronize()
-                    matting_ms = (time.perf_counter() - inference_started) * 1_000.0
-                    normalization_started = time.perf_counter()
+                    matting_done.record()
                     fitted_source, fitted_alpha = _fit_output_tensors(
                         source_tensor,
                         alpha_tensor,
@@ -460,7 +456,7 @@ def matting_worker_main(  # noqa: PLR0912
                         mirrored=mirrored,
                     )
                     room, room_reference = _require_fitted_backgrounds(fitted_backgrounds)
-                    normalization_ms = (time.perf_counter() - normalization_started) * 1_000.0
+                    normalization_done.record()
                     accelerated = cuda_engine.compose_uploaded(
                         fitted_source,
                         fitted_alpha,
@@ -469,15 +465,13 @@ def matting_worker_main(  # noqa: PLR0912
                             captured_at=packet.captured_at,
                             harmonizer=harmonizer,
                             reference_background=room_reference,
-                            retain_standard=retain_standard,
                         ),
                     )
+                    # compose_uploaded's readback drained the stream, so these events are
+                    # complete and measurable here without a mid-frame host synchronize().
+                    matting_ms = matting_start.elapsed_time(matting_done)
+                    normalization_ms = matting_done.elapsed_time(normalization_done)
                     ring.write_output(packet.shared_slot, accelerated.image)
-                    ring.write_output(
-                        packet.shared_slot,
-                        accelerated.standard_image,
-                        standard=True,
-                    )
                     diagnostic_started = time.perf_counter()
                     preview_width = min(160, pipeline_config.output_width)
                     preview_height = max(
@@ -496,7 +490,7 @@ def matting_worker_main(  # noqa: PLR0912
                         .numpy()
                     )
                     occupancy = float(
-                        (fitted_alpha >= ALPHA_MIDPOINT).to(torch.float32).mean().item(),
+                        np.count_nonzero(mask_preview >= ALPHA_MIDPOINT) / mask_preview.size,
                     )
                     diagnostic_readback_ms = (time.perf_counter() - diagnostic_started) * 1_000.0
                     events.put(
@@ -520,7 +514,6 @@ def matting_worker_main(  # noqa: PLR0912
                                     post_processing_ms=accelerated.post_processing_ms,
                                     readback_ms=(accelerated.readback_ms + diagnostic_readback_ms),
                                 ),
-                                standard_retained=retain_standard,
                                 pipeline_revision=pipeline_revision,
                                 harmonized=accelerated.harmonized,
                                 harmonization_ms=accelerated.harmonization_ms,

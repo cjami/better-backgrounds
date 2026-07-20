@@ -108,6 +108,17 @@ class ShowPage(QWidget):
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         overlay_layout.addStretch()
+        self._camera_status = _label("", object_name="muted")
+        self._camera_status.setAccessibleName("Virtual camera status")
+        self._camera_status.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self._camera_status.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._camera_status.setWordWrap(True)
+        self._camera_status.hide()
+        overlay_layout.addWidget(self._camera_status)
+        overlay_layout.addSpacing(24)
         self._overlay = overlay
         self._feed_stack.addWidget(overlay)
         self._feed_stack.setCurrentWidget(overlay)
@@ -121,11 +132,6 @@ class ShowPage(QWidget):
         self._camera.setAccessibleName("Start virtual camera")
         self._camera.clicked.connect(self._toggle_camera)
         feed_layout.addWidget(self._camera)
-        self._camera_status = _label("", object_name="muted")
-        self._camera_status.setAccessibleName("Virtual camera status")
-        self._camera_status.setWordWrap(True)
-        self._camera_status.hide()
-        feed_layout.addWidget(self._camera_status)
         root.addWidget(feed_column, 1)
 
         sidebar = QFrame()

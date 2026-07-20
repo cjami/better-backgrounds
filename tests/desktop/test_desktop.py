@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from PySide6.QtCore import QSize, QUrl, Signal
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import (
     QApplication,
@@ -15,9 +15,11 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QStackedLayout,
     QStackedWidget,
+    QWidget,
 )
 
 from better_backgrounds.desktop.app import (
@@ -451,12 +453,24 @@ def test_show_tab_has_a_clear_camera_toggle() -> None:
         virtual_camera_sink_factory=lambda _profile: PassiveVirtualCamera(),
     )
     camera = window.findChild(QPushButton, "cameraToggle")
+    status = next(
+        label
+        for label in window.findChildren(QLabel)
+        if label.accessibleName() == "Virtual camera status"
+    )
+    overlay = window.findChild(QWidget, "feedOverlay")
 
     assert camera is not None
+    assert overlay is not None
+    assert overlay.isAncestorOf(status)
+    assert status.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding
+    assert status.alignment() == Qt.AlignmentFlag.AlignRight
     assert camera.text() == "Start virtual camera"
     camera.click()
     wait_until(lambda: camera.text() == "Stop virtual camera")
     assert camera.text() == "Stop virtual camera"
+    assert status.text() == "Publishing 1080p via OBS Virtual Camera"
+    assert not status.isHidden()
     camera.click()
     wait_until(lambda: camera.text() == "Start virtual camera")
     assert camera.text() == "Start virtual camera"

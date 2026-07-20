@@ -14,17 +14,14 @@ def test_frame_ring_round_trips_rgb_and_alpha_by_slot() -> None:
     source = np.arange(36, dtype=np.uint8).reshape(3, 4, 3)
     alpha = np.arange(12, dtype=np.uint8).reshape(3, 4)
     primary = np.flip(source, axis=1).copy()
-    standard = np.flip(source, axis=0).copy()
     try:
         ring.write_frame(1, source)
         ring.write_alpha(1, alpha)
         ring.write_output(1, primary)
-        ring.write_output(1, standard, standard=True)
 
         assert np.array_equal(ring.read_frame(1), source)
         assert np.array_equal(ring.read_alpha(1), alpha)
         assert np.array_equal(ring.read_output(1), primary)
-        assert np.array_equal(ring.read_output(1, standard=True), standard)
     finally:
         ring.close(unlink=True)
 

@@ -31,7 +31,6 @@ class RecordingSurface:
             pixels,
             alpha,
             cast("LiveComposite", object()),
-            compare_mode=False,
         )
 
 
@@ -90,5 +89,4 @@ def _prepared(completed: CompletedMatte) -> PreparedComposite:
         pixels,
         alpha,
         cast("LiveComposite", object()),
-        compare_mode=False,
     )

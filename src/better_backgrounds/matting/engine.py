@@ -345,18 +345,16 @@ class ProcessMattingEngine:
         self,
         *,
         mirrored: bool,
-        retain_standard: bool,
         revision: int,
     ) -> None:
-        """Update mirroring and Compare output without disturbing temporal identity."""
+        """Update mirroring without disturbing temporal identity."""
         if self._commands is not None:
-            self._commands.put(ConfigurePresentation(mirrored, retain_standard, revision))
+            self._commands.put(ConfigurePresentation(mirrored, revision))
         config = self._pipeline_config
         if config is not None:
             self._pipeline_config = config.model_copy(
                 update={
                     "mirrored": mirrored,
-                    "retain_standard": retain_standard,
                     "revision": revision,
                 },
             )
@@ -580,16 +578,6 @@ class ProcessMattingEngine:
             width=result.output_width,
             height=result.output_height,
         )
-        standard = (
-            ring.read_output(
-                completion.completed.shared_slot,
-                width=result.output_width,
-                height=result.output_height,
-                standard=True,
-            )
-            if result.standard_retained
-            else None
-        )
         packet = replace(
             completion.completed,
             width=result.output_width,
@@ -601,7 +589,6 @@ class ProcessMattingEngine:
         return ProcessedFrame(
             packet=packet,
             primary=primary,
-            standard=standard,
             mask_preview=result.mask_preview,
             background_revision=result.background_revision,
             occupancy=result.occupancy,

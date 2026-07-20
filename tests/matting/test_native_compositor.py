@@ -9,6 +9,7 @@ import pytest
 import torch
 from PySide6.QtWidgets import QApplication, QWidget
 
+import better_backgrounds.desktop.live_preview.surface as surface_module
 from better_backgrounds.desktop.camera.capture import capture_profile
 from better_backgrounds.desktop.live_preview import (
     NativeCompositeSurface,
@@ -25,6 +26,7 @@ from better_backgrounds.matting.compositor import (
 )
 from better_backgrounds.matting.contracts import (
     FramePacket,
+    LiveDiagnostics,
     MatteResult,
     MattingCapabilities,
     ProcessedFrame,
@@ -87,6 +89,24 @@ def application() -> QApplication:
         instance = QApplication.instance()
         _APPLICATION = instance if isinstance(instance, QApplication) else QApplication([])
     return _APPLICATION
+
+
+def _diagnostics(capture_fps: float) -> LiveDiagnostics:
+    return LiveDiagnostics(
+        capture_fps=capture_fps,
+        display_fps=capture_fps,
+        mask_fps=capture_fps,
+        mask_age_ms=10.0,
+        dropped_frames=0,
+        worker_time_ms=5.0,
+        capture_width=1280,
+        capture_height=720,
+        processing_width=960,
+        processing_height=540,
+        device_type="cuda",
+        output_width=1280,
+        output_height=720,
+    )
 
 
 def test_compositor_uses_exact_source_alpha_and_background() -> None:
@@ -291,6 +311,28 @@ def test_surface_retains_last_room_when_renderer_grab_is_blank() -> None:
     surface.close()
 
 
+def test_surface_updates_frame_information_at_readable_intervals(monkeypatch) -> None:  # noqa: ANN001
+    """Keep rapidly changing diagnostics readable while measurements continue."""
+    application()
+    now = [10.0]
+    monkeypatch.setattr(surface_module.time, "monotonic", lambda: now[0])
+    surface = NativeCompositeSurface()
+
+    surface.set_diagnostics(_diagnostics(20.0))
+    initial = surface._diagnostics  # noqa: SLF001
+    now[0] += 0.5
+    surface.set_diagnostics(_diagnostics(60.0))
+
+    assert surface._diagnostics == initial  # noqa: SLF001
+
+    now[0] += 0.5
+    surface.set_diagnostics(_diagnostics(60.0))
+
+    assert surface._diagnostics != initial  # noqa: SLF001
+    assert surface._diagnostics.startswith("60 camera")  # noqa: SLF001
+    surface.close()
+
+
 def test_surface_retains_restored_room_during_camera_geometry_negotiation() -> None:
     """Keep the startup snapshot when the webcam reports its native profile."""
     application()
@@ -310,8 +352,8 @@ def test_surface_retains_restored_room_during_camera_geometry_negotiation() -> N
     surface.close()
 
 
-def test_compositor_retains_standard_baseline_when_harmonization_is_enabled() -> None:
-    """Compare the same exact-frame composite with and without appearance matching."""
+def test_compositor_returns_the_harmonized_image_when_harmonization_is_enabled() -> None:
+    """Publish the appearance-matched composite instead of the plain blend."""
     source = np.full((8, 8, 3), [40, 60, 90], dtype=np.uint8)
     background = np.full((8, 8, 3), [160, 120, 80], dtype=np.uint8)
     background[0, 0] = 20
@@ -330,9 +372,8 @@ def test_compositor_retains_standard_baseline_when_harmonization_is_enabled() ->
         harmonizer=harmonizer,
     )
 
-    assert np.array_equal(composite.standard_image, source)
-    assert not np.array_equal(composite.image, composite.standard_image)
     assert composite.harmonized
+    assert not np.array_equal(composite.image, source)
 
 
 def test_harmonizer_preparation_waits_for_matanyone_calibration(
@@ -375,7 +416,6 @@ def test_live_preview_emits_every_composite_accepted_by_the_show_surface() -> No
         ProcessedFrame(
             packet=first_packet,
             primary=primary,
-            standard=None,
             mask_preview=mask,
             background_revision=0,
             occupancy=0.5,
@@ -393,7 +433,6 @@ def test_live_preview_emits_every_composite_accepted_by_the_show_surface() -> No
         source=primary,
         alpha=mask,
         image=composed,
-        standard_image=composed,
         background_revision=0,
         harmonized=False,
     )
@@ -402,7 +441,6 @@ def test_live_preview_emits_every_composite_accepted_by_the_show_surface() -> No
         source=primary,
         alpha=mask,
         composite=composite,
-        compare_mode=False,
     )
     preview._present_pending_matte()  # noqa: SLF001
 

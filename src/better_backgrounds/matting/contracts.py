@@ -53,7 +53,6 @@ class LivePipelineConfig(BaseModel):
     aspect_ratio: float = Field(gt=0, le=8.0, allow_inf_nan=False)
     prefer_cuda: bool = True
     mirrored: bool = True
-    retain_standard: bool = False
     revision: int = Field(default=0, ge=0)
 
 
@@ -63,7 +62,6 @@ class ProcessedFrame:
 
     packet: FramePacket
     primary: NDArray
-    standard: NDArray | None
     mask_preview: NDArray
     background_revision: int
     occupancy: float
@@ -87,11 +85,6 @@ class ProcessedFrame:
         expected = (self.packet.height, self.packet.width, 3)
         if self.primary.dtype.name != "uint8" or self.primary.shape != expected:
             msg = f"primary output must be {expected} uint8 RGB"
-            raise ValueError(msg)
-        if self.standard is not None and (
-            self.standard.dtype.name != "uint8" or self.standard.shape != expected
-        ):
-            msg = f"standard output must be {expected} uint8 RGB"
             raise ValueError(msg)
         if self.mask_preview.dtype.name != "uint8" or self.mask_preview.ndim != MASK_DIMENSIONS:
             msg = "mask preview must be two-dimensional uint8"
@@ -178,7 +171,6 @@ class ProcessedResult:
     occupancy: float
     mask_preview: NDArray
     timings: StageTimings
-    standard_retained: bool = False
     pipeline_revision: int = 0
     harmonized: bool = False
     harmonization_ms: float = 0.0
