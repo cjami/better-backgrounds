@@ -517,6 +517,11 @@ class ProcessMattingEngine:
                 process.join(timeout=1.0)
         for queue in (self._commands, self._events):
             if queue is not None:
+                # cancel_join_thread() so close()/join_thread() can never block the
+                # Qt GUI thread on the queue's feeder flushing to a wedged or dead
+                # worker. The graceful StopWorker/join above already had its chance;
+                # any undelivered buffered commands are safe to drop during teardown.
+                queue.cancel_join_thread()
                 queue.close()
                 queue.join_thread()
         self._commands = None

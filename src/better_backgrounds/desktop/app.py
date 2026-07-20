@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import sys
 from functools import partial
 from pathlib import Path
@@ -194,6 +195,11 @@ def _run_packaged_splat(arguments: Sequence[str]) -> int:
 
 def main() -> int:
     """Run the desktop shell or its packaged fake-worker mode."""
+    # Dump native + Python tracebacks of all threads on a fatal signal so a hard
+    # crash is diagnosable. For a pure GUI hang (no signal), attach externally with
+    # `py-spy dump --pid <pid>`. enable() is effectively free and never fires in
+    # normal operation.
+    faulthandler.enable()
     arguments = sys.argv[1:]
     if "--sharp-worker" in arguments:
         return _run_packaged_sharp(arguments)

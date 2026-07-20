@@ -80,7 +80,12 @@ class CompositionCoordinator(QObject):
         def completed_future(result: Future[PreparedComposite]) -> None:
             try:
                 prepared = result.result()
-            except (OSError, RuntimeError, TypeError, ValueError) as error:
+            except Exception as error:  # noqa: BLE001
+                # Any compose failure (including cv2.error / MemoryError, which are
+                # not OSError/RuntimeError/TypeError/ValueError) must still reset
+                # _inflight via _reject. If it escaped here it would be swallowed by
+                # the executor's done-callback machinery, leaving _inflight True
+                # forever and silently freezing the live composite.
                 self._preparation_failed.emit(revision, str(error)[:240])
             else:
                 self._prepared.emit(revision, prepared)
