@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from better_backgrounds.desktop.camera import InputCamera, InputCameraSource
 from better_backgrounds.desktop.main_window import LivePreviewController
-from better_backgrounds.desktop.pages import ComparePage, ShowPage
+from better_backgrounds.desktop.pages import ShowPage
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -51,7 +51,6 @@ def test_live_controller_restores_hotplug_selection_preferences_and_shutdown(
     controller = LivePreviewController(
         parent,
         show,
-        ComparePage(),
         preview,
         source,
         tmp_path,
@@ -81,7 +80,6 @@ def test_live_controller_restores_hotplug_selection_preferences_and_shutdown(
     restored = LivePreviewController(
         restored_parent,
         ShowPage([], lambda: restored_preview),
-        ComparePage(),
         restored_preview,
         source,
         tmp_path,

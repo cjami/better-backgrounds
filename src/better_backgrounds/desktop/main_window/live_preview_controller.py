@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from PySide6.QtWidgets import QWidget
 
-    from better_backgrounds.desktop.pages import ComparePage, ShowPage
+    from better_backgrounds.desktop.pages import ShowPage
 
 
 class LivePreviewController(QObject):
@@ -31,7 +31,6 @@ class LivePreviewController(QObject):
         self,
         parent: QWidget,
         show_page: ShowPage,
-        compare_page: ComparePage,
         live_preview: QWidget,
         camera_source: InputCameraSource,
         data_root: Path,
@@ -39,7 +38,6 @@ class LivePreviewController(QObject):
         """Connect retained preview services to their desktop controls."""
         super().__init__(parent)
         self._show_page = show_page
-        self._compare_page = compare_page
         self._live_preview = live_preview
         self._camera_source = camera_source
         self._input_camera_selection = InputCameraSelectionStore(
@@ -67,12 +65,6 @@ class LivePreviewController(QObject):
         diagnostics = getattr(live_preview, "diagnostics_changed", None)
         if diagnostics is not None:
             diagnostics.connect(self._record_diagnostics)
-        comparison_frame = getattr(live_preview, "comparison_frame", None)
-        if comparison_frame is not None:
-            comparison_frame.connect(compare_page.set_live_frame)
-        status = getattr(live_preview, "harmonization_status_changed", None)
-        if status is not None:
-            status.connect(compare_page.set_harmonization_status)
         candidates = getattr(live_preview, "person_candidates_changed", None)
         if candidates is not None:
             candidates.connect(show_page.set_person_candidates)
@@ -97,12 +89,6 @@ class LivePreviewController(QObject):
             preparer()
         self._refresh_input_cameras()
         self._start_preview()
-
-    def set_presentation(self, mode: str, wipe: int) -> None:
-        """Change presentation without restarting capture or matting."""
-        setter = getattr(self._live_preview, "set_presentation", None)
-        if callable(setter):
-            setter(mode, wipe)
 
     def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
         """Suspend hidden live work while Adjust owns the graphics device."""
@@ -244,13 +230,6 @@ class LivePreviewController(QObject):
         setter = getattr(self._live_preview, "set_harmonization", None)
         if callable(setter):
             setter(settings)
-
-    @Slot(int)
-    def set_compare_wipe(self, value: int) -> None:
-        """Apply the Compare page's presentation wipe."""
-        setter = getattr(self._live_preview, "set_presentation", None)
-        if callable(setter):
-            setter("compare", value)
 
     @Slot(object)
     def _record_diagnostics(self, diagnostics: object) -> None:

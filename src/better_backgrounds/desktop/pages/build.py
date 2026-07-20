@@ -97,12 +97,11 @@ class BuildPage(QWidget):
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         layout.addWidget(
-            _label("Add a spatial room", object_name="heroTitle"),
+            _label("Add a room", object_name="heroTitle"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         subtitle = _label(
-            "Drop a room photo or Gaussian splat anywhere on this page, or capture the room "
-            "your webcam already sees.",
+            "Choose an empty room photo, import an existing 3D room, or use your webcam.",
             object_name="subtitle",
             word_wrap=True,
         )
@@ -138,7 +137,7 @@ class BuildPage(QWidget):
         actions.addStretch()
         drop_layout.addLayout(actions)
         drop_layout.addWidget(
-            _label("JPEG  /  PNG  /  WEBP  /  PLY  /  STREAMED SOG", object_name="feedMeta"),
+            _label("ROOM PHOTO  ·  3D ROOM", object_name="feedMeta"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         layout.addWidget(drop, alignment=Qt.AlignmentFlag.AlignHCenter)
@@ -196,7 +195,7 @@ class BuildPage(QWidget):
         header.addWidget(self._readiness)
         card_layout.addLayout(header)
         self._review_summary = _label(
-            "Review the oriented source before SHARP inference.",
+            "Check the source before building your room.",
             object_name="subtitle",
             word_wrap=True,
         )
@@ -233,14 +232,14 @@ class BuildPage(QWidget):
         back.clicked.connect(self.show_upload)
         footer.addWidget(back)
         footer.addStretch()
-        self._model_status = _label("SHARP model status pending", object_name="muted")
+        self._model_status = _label("Checking room builder…", object_name="muted")
         footer.addWidget(self._model_status)
         footer.addStretch()
         self._device_label = _label("Device", object_name="muted")
         footer.addWidget(self._device_label)
         self._device = QComboBox()
         self._device.setObjectName("sharpDevice")
-        self._device.setAccessibleName("SHARP inference device")
+        self._device.setAccessibleName("Room build device")
         self._device.addItem("Automatic", "auto")
         self._device.addItem("CUDA", "cuda")
         self._device.addItem("Apple MPS", "mps")
@@ -432,9 +431,7 @@ class BuildPage(QWidget):
         self._readiness.setText("READY")
         self._set_label_style(self._readiness, "success")
         self._review_summary.setText(
-            diagnostics.warnings[0]
-            if diagnostics.warnings
-            else "The image is ready for local SHARP inference."
+            diagnostics.warnings[0] if diagnostics.warnings else "The image is ready to build."
         )
         self._build_action.setEnabled(True)
 
@@ -448,8 +445,8 @@ class BuildPage(QWidget):
         self._selection_name.setText(selection.display_name)
         self._content.setCurrentIndex(2)
         self._image_preview.clear()
-        self._image_preview.setText("Gaussian splat ready for managed import")
-        self._readiness.setText("READY" if diagnostics is not None else "SPLAT UNAVAILABLE")
+        self._image_preview.setText("3D room ready to import")
+        self._readiness.setText("READY" if diagnostics is not None else "ROOM UNAVAILABLE")
         self._set_label_style(
             self._readiness,
             "success" if diagnostics is not None else "danger",
@@ -480,16 +477,14 @@ class BuildPage(QWidget):
 
     def set_image_error(self, message: str) -> None:
         """Show an actionable decode or validation failure."""
-        self._readiness.setText("SPLAT UNAVAILABLE" if self._importing else "IMAGE UNAVAILABLE")
+        self._readiness.setText("ROOM UNAVAILABLE" if self._importing else "IMAGE UNAVAILABLE")
         self._set_label_style(self._readiness, "danger")
         self._review_summary.setText(message)
         self._build_action.setEnabled(False)
 
     def set_model_ready(self, *, ready: bool) -> None:
         """Describe whether the research checkpoint is cached for offline use."""
-        self._model_status.setText(
-            "SHARP model ready offline" if ready else "SHARP model needs preparation"
-        )
+        self._model_status.setText("Room builder ready" if ready else "Room builder setup required")
 
     def reset_progress(self, *, importing: bool = False) -> None:
         """Prepare the progress surface for a new job."""
@@ -558,7 +553,7 @@ class BuildPage(QWidget):
         self._progress.setRange(0, 100)
         self._progress.setValue(100)
         self._status.setText("Room ready")
-        self._message.setText(f"{room_name} is now selected in Show, Adjust, and Compare.")
+        self._message.setText(f"{room_name} is now selected in Show and Adjust.")
         self._set_label_style(self._message, "success")
         self._message.show()
         self._cancel.hide()

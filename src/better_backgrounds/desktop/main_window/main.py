@@ -22,7 +22,7 @@ from better_backgrounds.desktop.camera import InputCameraSource
 from better_backgrounds.desktop.main_window.build_controller import BuildController
 from better_backgrounds.desktop.main_window.header import TabHeader
 from better_backgrounds.desktop.main_window.live_preview_controller import LivePreviewController
-from better_backgrounds.desktop.pages import AdjustPage, BuildPage, ComparePage, ShowPage
+from better_backgrounds.desktop.pages import AdjustPage, BuildPage, ShowPage
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.reconstruction.sharp import SharpCheckpointInstaller
 from better_backgrounds.scene import SceneLibrary, Viewpoint
@@ -36,9 +36,7 @@ SharpPrepareCommandFactory = Callable[[str], Sequence[str]]
 SplatCommandFactory = Callable[[str, Path], Sequence[str]]
 RendererFactory = Callable[[], QWidget]
 
-COMPARE_TAB = 3
 ADJUST_TAB = 2
-DEFAULT_WIPE = 52
 
 
 class AssetSignals(QObject):
@@ -100,15 +98,14 @@ class MainWindow(QMainWindow):
             )
         self._live_preview = actual_live_factory()
         self._show_page = ShowPage(self._rooms, lambda: self._live_preview)
+        self._show_page.set_room_thumbnails(self._initial_room_thumbnails())
         self._build_page = BuildPage()
         self._adjust_page = AdjustPage(actual_renderer_factory)
         self._adjust_page.set_resource_active(False)
-        self._compare_page = ComparePage()
         for page in (
             self._show_page,
             self._build_page,
             self._adjust_page,
-            self._compare_page,
         ):
             self._tabs.addWidget(page)
 
@@ -116,7 +113,6 @@ class MainWindow(QMainWindow):
         self._live_controller = LivePreviewController(
             self,
             self._show_page,
-            self._compare_page,
             self._live_preview,
             source,
             actual_data_root,
@@ -143,7 +139,7 @@ class MainWindow(QMainWindow):
             attribution=self._library.sample_scene.attribution,
             installed=self._library.assets.is_ready(self._library.sample_scene),
         )
-        self._adjust_page.set_live_preferences(mirrored=self._live_controller.mirrored)
+        self._show_page.set_live_preferences(mirrored=self._live_controller.mirrored)
         self.select_room(self._selected_room)
         self.select_tab(0)
         self._live_controller.start()
@@ -177,11 +173,10 @@ class MainWindow(QMainWindow):
         self._adjust_page.viewpoint_saved.connect(self._save_viewpoint)
         self._adjust_page.viewpoint_previewed.connect(self._preview_viewpoint)
         self._adjust_page.snapshot_generated.connect(self._save_snapshot)
-        self._adjust_page.mirroring_changed.connect(self._live_controller.change_mirroring)
-        self._adjust_page.harmonization_changed.connect(
+        self._show_page.mirroring_changed.connect(self._live_controller.change_mirroring)
+        self._show_page.harmonization_changed.connect(
             self._live_controller.change_harmonization,
         )
-        self._compare_page.wipe_changed.connect(self._live_controller.set_compare_wipe)
         self._live_controller.input_camera_changed.connect(self.input_camera_changed)
         self._build_controller.scene_completed.connect(self._scene_completed)
         self._build_controller.capture_active.connect(self._room_capture_active)
@@ -193,7 +188,7 @@ class MainWindow(QMainWindow):
 
     @property
     def selected_room(self) -> str:
-        """Return the room shared by Show, Adjust, and Compare."""
+        """Return the room shared by Show and Adjust."""
         return self._selected_room
 
     @property
@@ -233,6 +228,29 @@ class MainWindow(QMainWindow):
         except ImportError:
             return ScenePreview()
 
+    def _initial_room_thumbnails(self) -> dict[str, Path | None]:
+        thumbnails: dict[str, Path | None] = {}
+        for room in self._rooms:
+            scene = self._library.scene_for_room(room)
+            if scene is None or not self._library.assets.is_ready(scene):
+                thumbnails[room] = None
+                continue
+            viewpoint = self._library.viewpoints.load(self._room_ids[room])
+            thumbnail_viewpoint = (viewpoint or scene.default_viewpoint).model_copy(
+                update={"scene_transform": scene.default_viewpoint.scene_transform},
+            )
+            snapshot = self._library.snapshots.load(
+                scene,
+                thumbnail_viewpoint,
+            )
+            if snapshot is not None:
+                thumbnails[room] = snapshot.background
+            elif scene.preview is not None:
+                thumbnails[room] = self._library.assets.resource_path(scene, scene.preview)
+            else:
+                thumbnails[room] = None
+        return thumbnails
+
     @Slot(int)
     def select_tab(self, index: int) -> None:
         """Open any product tab without workflow gating."""
@@ -241,8 +259,6 @@ class MainWindow(QMainWindow):
             self._header.set_active_tab(index)
             self._adjust_page.set_resource_active(index == ADJUST_TAB)
             self._live_controller.set_resource_active(index != ADJUST_TAB)
-            mode = "compare" if index == COMPARE_TAB else "show"
-            self._live_controller.set_presentation(mode, DEFAULT_WIPE)
 
     @Slot(str)
     def select_room(self, room: str) -> None:
@@ -284,7 +300,10 @@ class MainWindow(QMainWindow):
         if installed and scene is not None and scene.preview is not None:
             preview = self._library.assets.resource_path(scene, scene.preview)
         self._show_page.set_preview_image(preview if cached is None else None)
-        self._compare_page.set_room(room)
+        self._show_page.set_room_thumbnail(
+            room,
+            cached.background if cached is not None else preview,
+        )
 
     @Slot()
     def _install_sample(self) -> None:
@@ -359,6 +378,7 @@ class MainWindow(QMainWindow):
         setter = getattr(self._live_preview, "set_scene_snapshot", None)
         if callable(setter):
             setter(snapshot.background)
+        self._show_page.set_room_thumbnail(self._selected_room, snapshot.background)
 
     @Slot(bool)
     def _room_capture_active(self, active: bool) -> None:  # noqa: FBT001

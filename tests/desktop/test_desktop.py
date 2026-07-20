@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import QSize, QUrl, Signal
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QLabel,
     QPushButton,
     QSlider,
     QStackedLayout,
@@ -26,7 +28,7 @@ from better_backgrounds.desktop.bridge import LiveRendererBridge, RendererBridge
 from better_backgrounds.desktop.camera import InputCamera, InputCameraSource
 from better_backgrounds.desktop.icon import application_icon
 from better_backgrounds.desktop.main_window import MainWindow
-from better_backgrounds.desktop.pages import AdjustPage
+from better_backgrounds.desktop.pages import AdjustPage, ShowPage
 from better_backgrounds.desktop.pages.common import AspectRatioContainer
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.desktop.webview import navigation_is_allowed
@@ -39,9 +41,9 @@ from better_backgrounds.scene import (
     load_sample_manifest,
 )
 
-TAB_COUNT = 4
+TAB_COUNT = 3
 BUILD_TAB = 1
-COMPARE_TAB = 3
+ADJUST_TAB = 2
 
 
 class TrackingRenderer(ScenePreview):
@@ -94,7 +96,7 @@ def application() -> QApplication:
     return existing or QApplication([])
 
 
-def test_main_window_contains_four_independent_product_tabs() -> None:
+def test_main_window_contains_three_independent_product_tabs() -> None:
     """Construct the complete tabbed shell without native media behavior."""
     app = application()
     window = MainWindow(
@@ -111,7 +113,7 @@ def test_main_window_contains_four_independent_product_tabs() -> None:
     layout = stack.layout()
     assert isinstance(layout, QStackedLayout)
     assert layout.stackingMode() is QStackedLayout.StackingMode.StackAll
-    assert [tab.text() for tab in tabs] == ["Show", "Build", "Adjust", "Compare"]
+    assert [tab.text() for tab in tabs] == ["Show", "Build", "Adjust"]
     assert all(tab.isEnabled() for tab in tabs)
     assert window.active_tab == 0
     assert isinstance(window.build_session.state, IdleBuild)
@@ -128,12 +130,34 @@ def test_application_icon_loads_from_package_data() -> None:
     assert not application_icon().isNull()
 
 
+def test_show_room_picker_displays_a_provided_thumbnail(tmp_path: Path) -> None:
+    """Use the room's verified preview instead of a decorative placeholder."""
+    application()
+    preview_path = tmp_path / "room.png"
+    image = QImage(32, 24, QImage.Format.Format_RGB32)
+    image.fill(QColor("#4f7399"))
+    assert image.save(str(preview_path))
+    page = ShowPage(["My room"], ScenePreview)
+
+    page.set_room_thumbnail("My room", preview_path)
+
+    thumbnail = next(
+        label
+        for label in page.findChildren(QLabel)
+        if label.accessibleName() == "My room thumbnail"
+    )
+    assert thumbnail.pixmap() is not None
+    assert not thumbnail.pixmap().isNull()
+    assert thumbnail.pixmap().size() == QSize(70, 48)
+    page.close()
+
+
 def test_tabs_can_be_opened_in_any_order() -> None:
     """Keep navigation separate from build-session state."""
     window = MainWindow(command_factory=lambda _job_id, _outcome: [], renderer_factory=ScenePreview)
 
-    window.select_tab(COMPARE_TAB)
-    assert window.active_tab == COMPARE_TAB
+    window.select_tab(ADJUST_TAB)
+    assert window.active_tab == ADJUST_TAB
     window.select_tab(BUILD_TAB)
     assert window.active_tab == BUILD_TAB
     assert isinstance(window.build_session.state, IdleBuild)
@@ -232,7 +256,7 @@ def test_adjust_reuses_scene_and_keeps_its_room_draft() -> None:
 
 
 def test_adjust_defers_spatial_scene_load_until_the_tab_is_active() -> None:
-    """Room selection alone must not load a splat for Show or Compare."""
+    """Room selection alone must not load a splat for Show."""
     application()
     renderer = TrackingRenderer()
     page = AdjustPage(lambda: renderer)
@@ -280,9 +304,7 @@ def test_adjust_saves_the_current_renderer_frame_immediately() -> None:
     page.set_room(scene.asset_id, scene, installed=True)
     renderer.scene_progressed.emit(100, 100)
     save = next(
-        button
-        for button in page.findChildren(QPushButton)
-        if button.text() == "Save view & background"
+        button for button in page.findChildren(QPushButton) if button.text() == "Save changes"
     )
 
     save.click()
@@ -350,15 +372,15 @@ def test_adjust_enables_depth_of_field_for_every_spatial_scene() -> None:
 
     page.set_room(sample.asset_id, sample, installed=True)
 
-    assert sliders["Depth-of-field blur"].isEnabled()
-    assert sliders["Depth-of-field blur"].value() == 0
+    assert sliders["Background blur"].isEnabled()
+    assert sliders["Background blur"].value() == 0
     assert "Depth of field" not in checkboxes
     assert "Depth in scene" not in sliders
     assert "Focus band" not in sliders
     assert "Depth-aware occlusion" not in checkboxes
     assert "Subject size" not in sliders
 
-    sliders["Depth-of-field blur"].setValue(70)
+    sliders["Background blur"].setValue(70)
     assert renderer.viewpoints[-1].depth_of_field.blur_strength == 0.7
     page.close()
 
@@ -402,11 +424,11 @@ def test_show_tab_has_a_clear_camera_toggle() -> None:
     camera = window.findChild(QPushButton, "cameraToggle")
 
     assert camera is not None
-    assert camera.text() == "●  Start virtual camera"
+    assert camera.text() == "Start virtual camera"
     camera.click()
-    assert camera.text() == "■  Stop virtual camera"
+    assert camera.text() == "Stop virtual camera"
     camera.click()
-    assert camera.text() == "●  Start virtual camera"
+    assert camera.text() == "Start virtual camera"
     window.close()
 
 

@@ -6,7 +6,9 @@ from collections import Counter
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -23,9 +25,11 @@ from PySide6.QtWidgets import (
 
 from better_backgrounds.desktop.pages.common import AspectRatioContainer
 from better_backgrounds.desktop.pages.common import label as _label
+from better_backgrounds.harmonization import HarmonizationSettings
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
+    from pathlib import Path
 
     from better_backgrounds.desktop.camera import InputCamera
 
@@ -43,6 +47,8 @@ class ShowPage(QWidget):
     seed_retry_requested = Signal()
     reseed_requested = Signal()
     person_candidate_selected = Signal(int)
+    mirroring_changed = Signal(bool)
+    harmonization_changed = Signal(object)
 
     def __init__(
         self,
@@ -55,6 +61,11 @@ class ShowPage(QWidget):
         self._camera_active = False
         self._preview_active = False
         self._sample_room = ""
+        self._room_id = ""
+        self._harmonization_drafts: dict[str, HarmonizationSettings] = {}
+        self._harmonization = HarmonizationSettings(global_harmonization=True)
+        self._thumbnail_paths: dict[str, Path] = {}
+        self._room_thumbnails: dict[str, QLabel] = {}
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -78,14 +89,6 @@ class ShowPage(QWidget):
         overlay_layout = QVBoxLayout(overlay)
         overlay_layout.setContentsMargins(18, 18, 18, 18)
         overlay_layout.setSpacing(6)
-        feed_header = QHBoxLayout()
-        self._feed_title = _label("", object_name="feedBadge")
-        feed_header.addWidget(self._feed_title)
-        feed_header.addStretch()
-        self._feed_status = _label("●  IDLE", object_name="feedBadge")
-        self._feed_status.setAccessibleName("Webcam composite status")
-        feed_header.addWidget(self._feed_status)
-        overlay_layout.addLayout(feed_header)
         overlay_layout.addStretch()
         self._preview_note = _label(
             "Camera is off",
@@ -96,7 +99,7 @@ class ShowPage(QWidget):
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         self._preview_hint = _label(
-            "Start the camera to create a local standard-matting composite",
+            "Choose a camera to begin",
             object_name="muted",
         )
         overlay_layout.addWidget(
@@ -104,20 +107,15 @@ class ShowPage(QWidget):
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         overlay_layout.addStretch()
-        overlay_layout.addWidget(
-            _label(
-                "LOCAL ONLY  ·  MATANYONE 2  ·  NOT YET HARMONISED",
-                object_name="feedMeta",
-            ),
-        )
         self._overlay = overlay
         self._feed_stack.addWidget(overlay)
         self._feed_stack.setCurrentWidget(overlay)
         self._aspect_preview = AspectRatioContainer(feed_surface)
         self._aspect_preview.setObjectName("showAspectPreview")
         feed_layout.addWidget(self._aspect_preview, 1)
-        self._camera = QPushButton("●  Start virtual camera")
+        self._camera = QPushButton("Start virtual camera")
         self._camera.setObjectName("cameraToggle")
+        self._camera.setCheckable(True)
         self._camera.setProperty("active", False)  # noqa: FBT003
         self._camera.setAccessibleName("Start virtual camera")
         self._camera.clicked.connect(self._toggle_camera)
@@ -130,17 +128,37 @@ class ShowPage(QWidget):
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(16, 20, 16, 20)
         sidebar_layout.setSpacing(12)
-        sidebar_layout.addWidget(_label("Input camera", object_name="section"))
+        camera_header = QHBoxLayout()
+        camera_header.addWidget(_label("Camera", object_name="section"))
+        camera_header.addStretch()
+        restart_preview = QPushButton("Restart")
+        restart_preview.setObjectName("railAction")
+        restart_preview.setToolTip("Restart the webcam preview")
+        restart_preview.clicked.connect(self.preview_restart_requested)
+        camera_header.addWidget(restart_preview)
+        sidebar_layout.addLayout(camera_header)
         self._input_camera = QComboBox()
         self._input_camera.setObjectName("inputCameraSelector")
         self._input_camera.setAccessibleName("Input camera feed")
         self._input_camera.setToolTip("Camera used as the foreground video input")
         self._input_camera.currentIndexChanged.connect(self._emit_input_camera)
         sidebar_layout.addWidget(self._input_camera)
-        restart_preview = QPushButton("Restart preview")
-        restart_preview.setObjectName("quietAction")
-        restart_preview.clicked.connect(self.preview_restart_requested)
-        sidebar_layout.addWidget(restart_preview)
+
+        self._mirrored = QCheckBox("Mirror webcam")
+        self._mirrored.setObjectName("mirrorWebcam")
+        self._mirrored.setChecked(True)
+        self._mirrored.setToolTip("Mirror only your webcam image; the room stays unchanged")
+        self._mirrored.toggled.connect(self.mirroring_changed)
+        sidebar_layout.addWidget(self._mirrored)
+
+        self._harmonise_subject = QCheckBox("Harmonise subject")
+        self._harmonise_subject.setObjectName("harmonization-global-harmonization")
+        self._harmonise_subject.setChecked(True)
+        self._harmonise_subject.setToolTip(
+            "Match your webcam lighting and colour to the selected room",
+        )
+        self._harmonise_subject.toggled.connect(self._harmonization_control_changed)
+        sidebar_layout.addWidget(self._harmonise_subject)
         self._seed_controls = QWidget()
         seed_layout = QHBoxLayout(self._seed_controls)
         seed_layout.setContentsMargins(0, 0, 0, 0)
@@ -178,14 +196,10 @@ class ShowPage(QWidget):
         self._reselect_person.clicked.connect(self.reseed_requested)
         self._reselect_person.hide()
         sidebar_layout.addWidget(self._reselect_person)
-        sidebar_layout.addWidget(
-            _label(
-                "Select the webcam that will provide the foreground feed.",
-                object_name="muted",
-                word_wrap=True,
-            ),
-        )
-        sidebar_layout.addSpacing(4)
+        divider = QFrame()
+        divider.setObjectName("settingsDivider")
+        divider.setFixedHeight(1)
+        sidebar_layout.addWidget(divider)
         sidebar_header = QHBoxLayout()
         sidebar_header.addWidget(_label("Rooms", object_name="section"))
         sidebar_header.addStretch()
@@ -276,15 +290,28 @@ class ShowPage(QWidget):
         target = selected or self.current_room
         self._rooms.blockSignals(True)  # noqa: FBT003
         self._rooms.clear()
+        self._room_thumbnails.clear()
         for room in rooms:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, room)
-            item.setToolTip("Ready to use")
-            item.setSizeHint(QSize(0, 82))
+            item.setSizeHint(QSize(0, 66))
             self._rooms.addItem(item)
             self._rooms.setItemWidget(item, self._room_card(room))
         self._rooms.blockSignals(False)  # noqa: FBT003
         self.set_room(target or (rooms[0] if rooms else ""))
+
+    def set_room_thumbnails(self, thumbnails: Mapping[str, Path | None]) -> None:
+        """Show verified room images in the room picker."""
+        for room, path in thumbnails.items():
+            self.set_room_thumbnail(room, path)
+
+    def set_room_thumbnail(self, room: str, path: Path | None) -> None:
+        """Update one room card when its preview or saved view becomes available."""
+        if path is None:
+            self._thumbnail_paths.pop(room, None)
+        else:
+            self._thumbnail_paths[room] = path
+        self._apply_room_thumbnail(room)
 
     def set_output_aspect_ratio(self, aspect_ratio: float) -> None:
         """Match the visible feed viewport to the selected room output."""
@@ -304,15 +331,15 @@ class ShowPage(QWidget):
                 self._rooms.blockSignals(True)  # noqa: FBT003
                 self._rooms.setCurrentItem(item)
                 self._rooms.blockSignals(False)  # noqa: FBT003
-                self._feed_title.setText(f"STANDARD COMPOSITE  ·  {room}")
                 self._update_sample_panel(room)
+                self._set_live_room(room)
                 return
 
     def _emit_room(self, current: QListWidgetItem | None) -> None:
         if current is not None:
             room = str(current.data(Qt.ItemDataRole.UserRole))
-            self._feed_title.setText(f"STANDARD COMPOSITE  ·  {room}")
             self._update_sample_panel(room)
+            self._set_live_room(room)
             self.room_selected.emit(room)
 
     def _emit_input_camera(self, _index: int) -> None:
@@ -377,21 +404,9 @@ class ShowPage(QWidget):
             "live",
             "lost",
         }
-        labels = {
-            "starting": "●  PREVIEW STARTING",
-            "preparing": "●  PREPARING",
-            "seeding": "●  FINDING PERSON",
-            "seed-error": "●  SEED FAILED",
-            "seed-ready": "●  CONFIRM PERSON",
-            "choose-person": "●  CHOOSE PERSON",
-            "initializing": "●  MATTING STARTING",
-            "live": "●  PREVIEW LIVE",
-            "lost": "●  LOST",
-            "error": "●  ERROR",
-            "idle": "●  IDLE",
-        }
-        self._feed_status.setText(labels.get(state, "●  IDLE"))
         self._preview_note.setText("" if state == "live" else message)
+        self._preview_note.setVisible(state != "live")
+        self._preview_hint.setVisible(state != "live")
         self._seed_controls.setVisible(state in {"seed-ready", "seed-error"})
         self._confirm_seed.setVisible(state == "seed-ready")
         self._candidate_controls.setVisible(state == "choose-person")
@@ -400,17 +415,17 @@ class ShowPage(QWidget):
             "Find person again" if state == "lost" else "Re-select person",
         )
         if state == "live":
-            self._preview_hint.setText("MatAnyone 2 · local preview")
+            self._preview_hint.clear()
         elif state in {"preparing", "seeding", "seed-ready", "choose-person", "initializing"}:
-            self._preview_hint.setText("One-time target selection · webcam frames stay local")
+            self._preview_hint.setText("Webcam frames stay on this device")
         elif state == "seed-error":
             self._preview_hint.setText("Move into a clearer position, then retry person selection")
         elif state == "lost":
-            self._preview_hint.setText("Tracking is paused · choose the person again to continue")
+            self._preview_hint.setText("Choose yourself again to continue")
         elif state == "error":
             self._preview_hint.setText("Check permission or device availability, then restart")
         else:
-            self._preview_hint.setText("Frames remain on this device")
+            self._preview_hint.setText("Choose a camera to begin")
 
     def set_person_candidates(self, count: int) -> None:
         """Expose accessible alternatives to selecting an outlined person."""
@@ -421,10 +436,10 @@ class ShowPage(QWidget):
         self._sample_panel.setVisible(bool(self._sample_room) and room == self._sample_room)
 
     def _toggle_camera(self) -> None:
-        requested = not self._camera_active
+        requested = self._camera.isChecked()
         self._camera_active = requested
         self._camera.setText(
-            "■  Stop virtual camera" if requested else "●  Start virtual camera",
+            "Stop virtual camera" if requested else "Start virtual camera",
         )
         self._camera.setAccessibleName(
             "Stop virtual camera" if requested else "Start virtual camera",
@@ -434,31 +449,68 @@ class ShowPage(QWidget):
         self._camera.style().polish(self._camera)
         self.camera_changed.emit(requested)
 
-    @staticmethod
-    def _room_card(room: str) -> QWidget:
-        metadata = {
-            "Loft — North Window": "Opened just now",
-            "Studio — West Wall": "3 days ago",
-            "Living room": "Last week",
-            "Bookshelf corner": "2 weeks ago",
-        }
+    def set_live_preferences(self, *, mirrored: bool) -> None:
+        """Restore foreground presentation without emitting changes."""
+        self._mirrored.blockSignals(True)  # noqa: FBT003
+        self._mirrored.setChecked(mirrored)
+        self._mirrored.blockSignals(False)  # noqa: FBT003
+
+    def _set_live_room(self, room: str) -> None:
+        if self._room_id and self._room_id != room:
+            self._harmonization_drafts[self._room_id] = self._harmonization
+        self._room_id = room
+        self._harmonization = self._harmonization_drafts.get(
+            room,
+            HarmonizationSettings(global_harmonization=True),
+        )
+        self._harmonise_subject.blockSignals(True)  # noqa: FBT003
+        self._harmonise_subject.setChecked(self._harmonization.global_harmonization)
+        self._harmonise_subject.blockSignals(False)  # noqa: FBT003
+        self.harmonization_changed.emit(self._harmonization)
+
+    def _harmonization_control_changed(self, enabled: bool) -> None:  # noqa: FBT001
+        self._harmonization = HarmonizationSettings(global_harmonization=enabled)
+        if self._room_id:
+            self._harmonization_drafts[self._room_id] = self._harmonization
+        self.harmonization_changed.emit(self._harmonization)
+
+    def _room_card(self, room: str) -> QWidget:
         card = QWidget()
         layout = QHBoxLayout(card)
         layout.setContentsMargins(8, 7, 8, 7)
         layout.setSpacing(10)
         thumbnail = QLabel()
         thumbnail.setObjectName("roomThumbnail")
-        thumbnail.setFixedSize(82, 58)
+        thumbnail.setFixedSize(70, 48)
+        thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        thumbnail.setAccessibleName(f"{room} thumbnail")
+        self._room_thumbnails[room] = thumbnail
+        self._apply_room_thumbnail(room)
         layout.addWidget(thumbnail)
         text = QVBoxLayout()
         text.setSpacing(2)
         text.addStretch()
         text.addWidget(_label(room, object_name="roomName"))
-        text.addWidget(_label(metadata.get(room, "Ready to use"), object_name="muted"))
         text.addStretch()
         layout.addLayout(text, 1)
-        badge = _label("Ready", object_name="readyBadge")
-        badge.setFixedSize(48, 22)
-        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(badge)
         return card
+
+    def _apply_room_thumbnail(self, room: str) -> None:
+        thumbnail = self._room_thumbnails.get(room)
+        if thumbnail is None:
+            return
+        path = self._thumbnail_paths.get(room)
+        pixmap = QPixmap() if path is None else QPixmap(str(path))
+        if pixmap.isNull():
+            thumbnail.clear()
+            thumbnail.setText("⌂")
+            return
+        scaled = pixmap.scaled(
+            thumbnail.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - thumbnail.width()) // 2)
+        y = max(0, (scaled.height() - thumbnail.height()) // 2)
+        thumbnail.setText("")
+        thumbnail.setPixmap(scaled.copy(x, y, thumbnail.width(), thumbnail.height()))

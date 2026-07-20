@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -22,7 +21,6 @@ from PySide6.QtWidgets import (
 
 from better_backgrounds.desktop.pages.common import AspectRatioContainer
 from better_backgrounds.desktop.pages.common import label as _label
-from better_backgrounds.harmonization import HarmonizationSettings
 from better_backgrounds.scene import CropRegion, SceneReference, Viewpoint
 
 if TYPE_CHECKING:
@@ -37,8 +35,6 @@ class AdjustPage(QWidget):
     viewpoint_saved = Signal(str, object)
     viewpoint_previewed = Signal(object)
     snapshot_generated = Signal(str, str, object, object)
-    mirroring_changed = Signal(bool)
-    harmonization_changed = Signal(object)
 
     def __init__(
         self,
@@ -51,9 +47,6 @@ class AdjustPage(QWidget):
         self._viewpoint = Viewpoint()
         self._default_viewpoint = Viewpoint()
         self._drafts: dict[str, Viewpoint] = {}
-        self._harmonization_drafts: dict[str, HarmonizationSettings] = {}
-        self._harmonization = HarmonizationSettings(global_harmonization=True)
-        self._harmonization_controls: dict[str, QCheckBox] = {}
         self._sliders: dict[str, QSlider] = {}
         self._slider_labels: dict[str, QLabel] = {}
         self._loaded_scene_id = ""
@@ -69,19 +62,7 @@ class AdjustPage(QWidget):
         scene_layout = QVBoxLayout(scene)
         scene_layout.setContentsMargins(18, 18, 18, 18)
         scene_layout.setSpacing(12)
-        overlays = QHBoxLayout()
-        for name in ("Depth", "Confidence", "Coverage", "Subject region"):
-            chip = QPushButton(name)
-            chip.setObjectName("overlayChip")
-            chip.setCheckable(True)
-            chip.setChecked(name == "Subject region")
-            if name != "Subject region":
-                chip.setEnabled(False)
-                chip.setToolTip("Unavailable until a reliable scene-buffer pass is selected")
-            overlays.addWidget(chip)
-        overlays.addStretch()
-        overlays.addWidget(_label("RECONSTRUCTED VIEWPOINT  ·  SPLAT", object_name="feedBadge"))
-        scene_layout.addLayout(overlays)
+        scene_layout.addWidget(_label("Room view", object_name="section"))
         self._renderer = renderer_factory()
         self._renderer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._aspect_preview = AspectRatioContainer(self._renderer)
@@ -109,7 +90,7 @@ class AdjustPage(QWidget):
         reset.setObjectName("quietAction")
         reset.clicked.connect(self._reset_viewpoint)
         actions.addWidget(reset)
-        self._save = QPushButton("Save view & background")
+        self._save = QPushButton("Save changes")
         self._save.setObjectName("primary")
         self._save.setEnabled(False)
         self._save.clicked.connect(self._save_viewpoint)
@@ -149,61 +130,10 @@ class AdjustPage(QWidget):
         controls.addLayout(aspect_row)
         controls.addSpacing(6)
         controls.addWidget(_label("Depth of field", object_name="section"))
-        controls.addWidget(
-            _label(
-                "You stay in focus. Increase this to progressively soften room details by depth.",
-                object_name="muted",
-                word_wrap=True,
-            ),
-        )
-        self._blur_strength = self._add_slider(controls, "Depth-of-field blur", 0, 100, 0)
-        controls.addSpacing(6)
-        controls.addWidget(_label("Foreground", object_name="section"))
-        self._mirrored = QCheckBox("Mirror my preview")
-        self._mirrored.setChecked(True)
-        self._mirrored.setToolTip("Mirrors the webcam foreground only; the room is never mirrored")
-        self._mirrored.toggled.connect(self.mirroring_changed)
-        controls.addWidget(self._mirrored)
-        controls.addWidget(
-            _label(
-                "MatAnyone 2 owns the live matte and temporal memory. "
-                "Use Re-select person in Show if tracking is lost.",
-                object_name="muted",
-                word_wrap=True,
-            ),
-        )
-        controls.addSpacing(6)
-        controls.addWidget(_label("Harmonisation", object_name="section"))
-        controls.addWidget(
-            _label(
-                "Harmonizer uses an external non-commercial checkpoint. Global adjustments are "
-                "smoothed over time; edge cleanup and fallback are automatic.",
-                object_name="muted",
-                word_wrap=True,
-            ),
-        )
-        harmonization_components = (("global_harmonization", "Global harmonization"),)
-        for key, title in harmonization_components:
-            component = QCheckBox(title)
-            component.setObjectName(f"harmonization-{key.replace('_', '-')}")
-            component.toggled.connect(self._harmonization_control_changed)
-            self._harmonization_controls[key] = component
-            controls.addWidget(component)
-        controls.addWidget(
-            _label(
-                "Compare retains the standard exact-frame composite as its baseline.",
-                object_name="muted",
-                word_wrap=True,
-            ),
-        )
+        self._blur_strength = self._add_slider(controls, "Background blur", 0, 100, 0)
+        self._blur_strength.setToolTip("Soften the room while keeping you in focus")
         controls.addStretch()
         root.addWidget(inspector)
-
-    def set_live_preferences(self, *, mirrored: bool) -> None:
-        """Restore foreground presentation without emitting changes."""
-        self._mirrored.blockSignals(True)  # noqa: FBT003
-        self._mirrored.setChecked(mirrored)
-        self._mirrored.blockSignals(False)  # noqa: FBT003
 
     def discard_viewpoint(self, room_id: str) -> None:
         """Forget an in-memory camera draft when scene framing is rebuilt."""
@@ -248,7 +178,6 @@ class AdjustPage(QWidget):
         """Restore one room draft and load its managed scene at most once."""
         if self._room_id:
             self._drafts[self._room_id] = self._viewpoint
-            self._harmonization_drafts[self._room_id] = self._harmonization
         self._room_id = room
         self._scene = scene
         self._installed = installed
@@ -257,18 +186,12 @@ class AdjustPage(QWidget):
         self._default_viewpoint = scene.default_viewpoint if scene is not None else Viewpoint()
         self._spatial_depth_available = scene is not None
         self._viewpoint = self._drafts.get(room, viewpoint or self._default_viewpoint)
-        self._harmonization = self._harmonization_drafts.get(
-            room,
-            HarmonizationSettings(global_harmonization=True),
-        )
         if scene is not None:
             self._viewpoint = self._viewpoint.model_copy(
                 update={"scene_transform": self._default_viewpoint.scene_transform},
             )
         self._sync_controls()
         self._sync_depth_controls()
-        self._sync_harmonization_controls()
-        self.harmonization_changed.emit(self._harmonization)
 
         if scene is None:
             self._save.setEnabled(False)
@@ -432,7 +355,7 @@ class AdjustPage(QWidget):
             update: dict[str, object] = {"field_of_view": float(value)}
         elif title == "Horizon":
             update = {"horizon": value / 10}
-        elif title == "Depth-of-field blur":
+        elif title == "Background blur":
             depth_of_field = self._viewpoint.depth_of_field
             update = {
                 "depth_of_field": depth_of_field.model_copy(
@@ -462,25 +385,12 @@ class AdjustPage(QWidget):
             setter(self._viewpoint)
         self.viewpoint_previewed.emit(self._viewpoint)
 
-    def _harmonization_control_changed(self) -> None:
-        values = {key: control.isChecked() for key, control in self._harmonization_controls.items()}
-        self._harmonization = HarmonizationSettings.model_validate(values)
-        if self._room_id:
-            self._harmonization_drafts[self._room_id] = self._harmonization
-        self.harmonization_changed.emit(self._harmonization)
-
-    def _sync_harmonization_controls(self) -> None:
-        for key, control in self._harmonization_controls.items():
-            control.blockSignals(True)  # noqa: FBT003
-            control.setChecked(bool(getattr(self._harmonization, key)))
-            control.blockSignals(False)  # noqa: FBT003
-
     def _sync_controls(self) -> None:
         values = {
             "Field of view": round(self._viewpoint.field_of_view),
             "Horizon": round(self._viewpoint.horizon * 10),
             "Output crop": round(self._viewpoint.crop.left * 100),
-            "Depth-of-field blur": round(
+            "Background blur": round(
                 self._viewpoint.depth_of_field.blur_strength * 100,
             ),
         }

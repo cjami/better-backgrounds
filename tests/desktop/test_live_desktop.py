@@ -1,9 +1,9 @@
-"""Feature-first: Tests for the one retained Show and Compare live pipeline."""
+"""Feature-first: Tests for the retained Show live pipeline."""
 
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton
 
 from better_backgrounds.desktop.camera import InputCamera, InputCameraSource
 from better_backgrounds.desktop.main_window import MainWindow
@@ -22,14 +22,12 @@ class TrackingLiveRenderer(ScenePreview):
 
     camera_state_changed = Signal(str, str)
     diagnostics_changed = Signal(object)
-    harmonization_status_changed = Signal(str)
 
     def __init__(self) -> None:
         """Create empty lifecycle and presentation logs."""
         super().__init__()
         self.starts: list[tuple[str, bool]] = []
         self.stops = 0
-        self.presentations: list[tuple[str, int]] = []
         self.mirroring: list[bool] = []
         self.matting: list[str] = []
         self.harmonization: list[HarmonizationSettings] = []
@@ -42,10 +40,6 @@ class TrackingLiveRenderer(ScenePreview):
     def stop_camera(self) -> None:
         """Record prompt stream teardown."""
         self.stops += 1
-
-    def set_presentation(self, mode: str, wipe: int) -> None:
-        """Record presentation-only changes."""
-        self.presentations.append((mode, wipe))
 
     def set_mirroring(self, *, mirrored: bool) -> None:
         """Record foreground-only mirroring changes."""
@@ -122,7 +116,7 @@ def create_window(tmp_path: Path, pipeline: TrackingLiveRenderer) -> MainWindow:
 
 
 def test_adjust_suspends_live_resources_without_restarting_camera(tmp_path: Path) -> None:
-    """Yield live resources to Adjust and restore them on presentation tabs."""
+    """Yield live resources to Adjust and restore them on the other tabs."""
     application()
     pipeline = TrackingLiveRenderer()
     window = create_window(tmp_path, pipeline)
@@ -135,13 +129,12 @@ def test_adjust_suspends_live_resources_without_restarting_camera(tmp_path: Path
     assert pipeline.resource_states == [True]
     camera.click()
     window.select_tab(2)
-    window.select_tab(3)
+    window.select_tab(1)
     window.select_tab(0)
 
     assert pipeline.starts == [("camera-a", True)]
     assert pipeline.stops == 0
     assert pipeline.resource_states == [True, False, True, True]
-    assert ("compare", 52) in pipeline.presentations
     camera.click()
     assert pipeline.stops == 0
     assert virtual_states == [True, False]
@@ -162,15 +155,17 @@ def test_application_close_releases_an_active_camera(tmp_path: Path) -> None:
     assert pipeline.stops == 1
 
 
-def test_adjust_persists_and_applies_foreground_only_mirroring(tmp_path: Path) -> None:
-    """Keep mirroring in Adjust and leave the room renderer unchanged."""
+def test_show_persists_and_applies_foreground_only_mirroring(tmp_path: Path) -> None:
+    """Keep the webcam mirror setting with the live presentation controls."""
     application()
     pipeline = TrackingLiveRenderer()
     window = create_window(tmp_path, pipeline)
+    show_page = window.findChild(ShowPage)
+    assert show_page is not None
     mirror = next(
         checkbox
-        for checkbox in window.findChildren(QCheckBox)
-        if checkbox.text() == "Mirror my preview"
+        for checkbox in show_page.findChildren(QCheckBox)
+        if checkbox.text() == "Mirror webcam"
     )
 
     mirror.setChecked(False)
@@ -180,36 +175,33 @@ def test_adjust_persists_and_applies_foreground_only_mirroring(tmp_path: Path) -
 
     restored_pipeline = TrackingLiveRenderer()
     restored = create_window(tmp_path, restored_pipeline)
+    restored_show_page = restored.findChild(ShowPage)
+    assert restored_show_page is not None
     restored_mirror = next(
         checkbox
-        for checkbox in restored.findChildren(QCheckBox)
-        if checkbox.text() == "Mirror my preview"
+        for checkbox in restored_show_page.findChildren(QCheckBox)
+        if checkbox.text() == "Mirror webcam"
     )
     assert not restored_mirror.isChecked()
     restored.close()
 
 
-def test_harmonization_is_on_by_default_and_can_be_disabled(tmp_path: Path) -> None:
-    """Start with global harmonization while retaining an explicit off switch."""
+def test_harmonise_subject_is_on_by_default_in_show_and_can_be_disabled(tmp_path: Path) -> None:
+    """Keep the appearance setting beside the live webcam controls."""
     application()
     pipeline = TrackingLiveRenderer()
     window = create_window(tmp_path, pipeline)
-    controls = {checkbox.text(): checkbox for checkbox in window.findChildren(QCheckBox)}
+    show_page = window.findChild(ShowPage)
+    assert show_page is not None
+    controls = {checkbox.text(): checkbox for checkbox in show_page.findChildren(QCheckBox)}
 
-    expected = {"Global harmonization"}
+    expected = {"Harmonise subject"}
     assert expected <= controls.keys()
     assert all(controls[title].isChecked() for title in expected)
     assert "Depth-dependent effects" not in controls
     assert pipeline.harmonization[-1] == HarmonizationSettings(global_harmonization=True)
 
-    controls["Global harmonization"].setChecked(False)
+    controls["Harmonise subject"].setChecked(False)
 
     assert pipeline.harmonization[-1] == HarmonizationSettings(global_harmonization=False)
-    pipeline.harmonization_status_changed.emit("Experimental appearance preview: 18 ms/frame")
-    statuses = [
-        label
-        for label in window.findChildren(QLabel)
-        if label.accessibleName() == "Harmonisation comparison status"
-    ]
-    assert statuses[0].text() == "Experimental appearance preview: 18 ms/frame"
     window.close()

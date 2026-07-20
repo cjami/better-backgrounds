@@ -297,10 +297,11 @@ class NativeLivePreview(QWidget):
         except (OSError, RuntimeError, ValueError) as error:
             self._set_state(
                 "seed-ready",
-                f"MatAnyone 2 failed to start: {str(error)[:200]}. Retry or choose a new seed.",
+                f"The preview could not start: {str(error)[:200]}. "
+                "Try again or choose yourself again.",
             )
             return
-        self._set_state("initializing", "Warming up MatAnyone 2…")
+        self._set_state("initializing", "Preparing your preview…")
         self._tracking_started_at = time.perf_counter()
         self._first_matte_ms = 0.0
         self._person_candidates = ()
@@ -483,14 +484,14 @@ class NativeLivePreview(QWidget):
                 self._prepare_harmonizer()
             self.harmonization_status_changed.emit(
                 (
-                    "Global harmonization enabled; preparing the external checkpoint…"
+                    "Harmonise subject is getting ready…"
                     if live
-                    else "Global harmonization queued until MatAnyone startup completes."
+                    else "Harmonise subject will start when the preview is ready."
                 ),
             )
         else:
             self.harmonization_status_changed.emit(
-                "Global harmonization is off; identical comparison sides are expected.",
+                "Harmonise subject is off.",
             )
 
     def _prepare_harmonizer(self) -> None:
@@ -811,10 +812,9 @@ class NativeLivePreview(QWidget):
             self._prepare_harmonizer()
         if event.real_time_error is not None:
             self.harmonization_status_changed.emit(
-                f"Portable live path active: {event.real_time_error}",
+                "Using compatibility mode.",
             )
-        device = event.capabilities.device_type.upper()
-        self._set_state("live", f"Live · MatAnyone 2 · {device}")
+        self._set_state("live", "Camera ready")
 
     def _present_processed_frame(self, processed: ProcessedFrame) -> None:
         if processed.pipeline_revision != self._pipeline_revision:
@@ -833,12 +833,11 @@ class NativeLivePreview(QWidget):
             return
         if processed.harmonized:
             self.harmonization_status_changed.emit(
-                f"Global harmonization: {processed.harmonization_ms:.1f} ms/frame via fused CUDA.",
+                "Subject harmonised",
             )
         elif processed.harmonization_degraded:
             self.harmonization_status_changed.emit(
-                "Global harmonization fell back to the standard composite: "
-                + ", ".join(processed.harmonization_degraded),
+                "Harmonise subject is temporarily unavailable. Showing the original preview.",
             )
         now = time.monotonic()
         engine = self._engine
@@ -956,15 +955,11 @@ class NativeLivePreview(QWidget):
             return
         if composite.harmonized:
             self.harmonization_status_changed.emit(
-                f"Global harmonization: {composite.harmonization_ms:.1f} ms/frame "
-                f"via {self._surface.harmonization_backend} "
-                f"(30 FPS budget: {TARGET_FRAME_BUDGET_MS:.1f} ms).",
+                "Subject harmonised",
             )
         elif composite.harmonization_degraded:
-            detail = self._surface.harmonization_error
             self.harmonization_status_changed.emit(
-                "Global harmonization fell back to the standard composite: "
-                + (detail or ", ".join(composite.harmonization_degraded)),
+                "Harmonise subject is temporarily unavailable. Showing the original preview.",
             )
         now = time.monotonic()
         display_rate = self._display_rate.rate
