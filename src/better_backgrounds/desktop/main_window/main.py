@@ -24,6 +24,11 @@ from better_backgrounds.desktop.main_window.header import TabHeader
 from better_backgrounds.desktop.main_window.live_preview_controller import LivePreviewController
 from better_backgrounds.desktop.pages import AdjustPage, BuildPage, ShowPage
 from better_backgrounds.desktop.preview import ScenePreview
+from better_backgrounds.desktop.virtual_camera import (
+    VirtualCameraController,
+    VirtualCameraSinkFactory,
+    VirtualCameraState,
+)
 from better_backgrounds.reconstruction.sharp import SharpCheckpointInstaller
 from better_backgrounds.scene import SceneLibrary, Viewpoint
 
@@ -64,6 +69,7 @@ class MainWindow(QMainWindow):
         renderer_factory: RendererFactory | None = None,
         live_renderer_factory: RendererFactory | None = None,
         camera_source: InputCameraSource | None = None,
+        virtual_camera_sink_factory: VirtualCameraSinkFactory | None = None,
         scene_cache_root: Path | None = None,
         data_root: Path | None = None,
     ) -> None:
@@ -117,6 +123,14 @@ class MainWindow(QMainWindow):
             source,
             actual_data_root,
         )
+        self._virtual_camera_controller = VirtualCameraController(
+            self,
+            sink_factory=virtual_camera_sink_factory,
+        )
+        self._show_page.set_virtual_camera_state(
+            self._virtual_camera_controller.state.phase,
+            self._virtual_camera_controller.state.message,
+        )
         checkpoint = SharpCheckpointInstaller(cache_root.parent / "models-v1" / "sharp")
         self._build_controller = BuildController(
             self,
@@ -167,7 +181,15 @@ class MainWindow(QMainWindow):
     def _connect_views(self) -> None:
         self._header.tab_selected.connect(self.select_tab)
         self._show_page.room_selected.connect(self.select_room)
-        self._show_page.camera_changed.connect(self.virtual_camera_changed)
+        self._show_page.camera_changed.connect(self._virtual_camera_controller.request_active)
+        self._show_page.virtual_camera_quality_changed.connect(
+            self._virtual_camera_controller.select_profile,
+        )
+        self._virtual_camera_controller.state_changed.connect(self._set_virtual_camera_state)
+        self._virtual_camera_controller.active_changed.connect(self.virtual_camera_changed)
+        composite_frame = getattr(self._live_preview, "composite_frame_ready", None)
+        if composite_frame is not None:
+            composite_frame.connect(self._virtual_camera_controller.publish_frame)
         self._show_page.sample_install_requested.connect(self._install_sample)
         self._show_page.build_requested.connect(self._build_controller.open)
         self._adjust_page.viewpoint_saved.connect(self._save_viewpoint)
@@ -388,6 +410,11 @@ class MainWindow(QMainWindow):
         else:
             self._live_controller.set_resource_active(self.active_tab != ADJUST_TAB)
 
+    @Slot(object)
+    def _set_virtual_camera_state(self, state: object) -> None:
+        if isinstance(state, VirtualCameraState):
+            self._show_page.set_virtual_camera_state(state.phase, state.message)
+
     @Slot(str, str)
     def _scene_completed(self, scene_id: str, room_name: str) -> None:
         self._library.viewpoints.delete(scene_id)
@@ -398,6 +425,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         """Release camera and worker resources before closing."""
+        self._virtual_camera_controller.shutdown()
         self._live_controller.shutdown()
         self._build_controller.shutdown()
         event.accept()

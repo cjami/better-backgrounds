@@ -165,6 +165,26 @@ Harmonization must not become the default until both real SHARP and MatAnyone
 gates plus its quality, latency, and soak gates pass on each supported reference
 platform.
 
+## OBS virtual camera
+
+On Windows x64 and macOS 13+ Apple silicon, Show can publish its completed live
+composite as `OBS Virtual Camera` at 30 fps. Choose either 1080p (1920x1080) or
+720p (1280x720) before starting output; the resolution remains fixed until the
+camera is stopped. Source frames are fitted without stretching: 16:9 fills the
+canvas while 4:3 and square sources are centred with side bars. A Better
+Backgrounds waiting frame replaces the last composite after 500 ms without a
+fresh result.
+
+[OBS Studio 30 or newer](https://obsproject.com/) must be installed separately.
+On Windows, install its Virtual Camera component. On macOS, start and stop OBS
+Virtual Camera once and approve the camera extension in System Settings. OBS's
+own Virtual Camera must be stopped before Better Backgrounds starts publishing.
+
+This integration uses OBS as the camera provider, not as a scene consumer. OBS
+cannot ingest the Better Backgrounds feed and republish it through the same
+single virtual-camera output. Use `OBS Virtual Camera` directly in Zoom, Teams,
+browsers, FaceTime, QuickTime, or another camera consumer instead.
+
 Adobe PIH is available as an experimental, opt-in alternative appearance backend.
 It predicts RGB curves and a frame-local shading map at 512 px, then applies those
 parameters at the camera resolution. The checkpoint remains external. Select it
@@ -252,6 +272,11 @@ The adapted Adobe PIH inference subset is pinned to revision
 modification notes are under `src/better_backgrounds/_vendor/pih/`. The official
 PIH checkpoint is not bundled. Confirm the checkpoint's distribution and
 commercial-use terms independently before shipping it.
+
+The OBS output integration uses pyvirtualcam 0.15.0 under GPL-2.0. Its notice and
+license link are included under `src/better_backgrounds/desktop/assets/`. Because
+GPL distribution obligations may affect the complete packaged application,
+perform and record a full licensing review before distributing a build.
 
 Better Backgrounds source is available under the [MIT License](LICENSE). That
 license does not replace third-party terms. In particular, the Apple SHARP

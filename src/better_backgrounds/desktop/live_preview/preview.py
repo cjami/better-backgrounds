@@ -79,6 +79,7 @@ class NativeLivePreview(QWidget):
     comparison_frame = Signal(object)
     harmonization_status_changed = Signal(str)
     person_candidates_changed = Signal(int)
+    composite_frame_ready = Signal(object, float)
     _engine_event = Signal(object)
 
     def __init__(
@@ -104,6 +105,7 @@ class NativeLivePreview(QWidget):
         self._background_renderer = background_factory()
         self._surface = NativeCompositeSurface()
         self._surface.frame_painted.connect(self._frame_painted)
+        self._surface.composite_presented.connect(self.composite_frame_ready)
         self._surface.candidate_selected.connect(self.select_person_candidate)
         self._seed_coordinator = SeedCoordinator(self)
         self._seed_coordinator.generated.connect(self._accept_seed)

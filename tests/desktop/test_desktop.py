@@ -2,6 +2,7 @@
 
 import base64
 import sys
+import time
 from pathlib import Path
 from typing import cast
 
@@ -90,10 +91,37 @@ class SnapshotTrackingRenderer(TrackingRenderer):
         self.snapshot_requests += 1
 
 
+class PassiveVirtualCamera:
+    """Accept test frames without requiring an installed OBS camera."""
+
+    def send(self, frame: object) -> None:
+        """Accept one frame."""
+        _ = frame
+
+    def sleep_until_next_frame(self) -> None:
+        """Yield briefly so controller state changes remain observable."""
+        time.sleep(0.002)
+
+    def close(self) -> None:
+        """Release the fake output."""
+
+
 def application() -> QApplication:
     """Return the one application allowed by Qt per process."""
     existing = cast("QApplication | None", QApplication.instance())
     return existing or QApplication([])
+
+
+def wait_until(predicate, *, timeout: float = 1.0) -> None:  # noqa: ANN001
+    """Process Qt events until an asynchronous desktop state is visible."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        application().processEvents()
+        if predicate():
+            return
+        time.sleep(0.002)
+    message = "condition was not met before timeout"
+    raise AssertionError(message)
 
 
 def test_main_window_contains_three_independent_product_tabs() -> None:
@@ -420,15 +448,25 @@ def test_show_tab_has_a_clear_camera_toggle() -> None:
         command_factory=lambda _job_id, _outcome: [],
         renderer_factory=ScenePreview,
         camera_source=camera_source,
+        virtual_camera_sink_factory=lambda _profile: PassiveVirtualCamera(),
     )
     camera = window.findChild(QPushButton, "cameraToggle")
 
     assert camera is not None
     assert camera.text() == "Start virtual camera"
     camera.click()
+    wait_until(lambda: camera.text() == "Stop virtual camera")
     assert camera.text() == "Stop virtual camera"
     camera.click()
+    wait_until(lambda: camera.text() == "Start virtual camera")
     assert camera.text() == "Start virtual camera"
+    quality = next(
+        combo
+        for combo in window.findChildren(QComboBox)
+        if combo.accessibleName() == "Virtual camera output quality"
+    )
+    assert [quality.itemData(index) for index in range(quality.count())] == ["1080p", "720p"]
+    assert quality.currentData() == "1080p"
     window.close()
 
 

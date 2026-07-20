@@ -82,6 +82,7 @@ class NativeCompositeSurface(QWidget):
     """Paint the current exact-frame composite and comparison wipe."""
 
     frame_painted = Signal(float)
+    composite_presented = Signal(object, float)
     candidate_selected = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -449,6 +450,10 @@ class NativeCompositeSurface(QWidget):
         self._last_composite = composite
         self._pending_capture_at = prepared.completed.packet.captured_at
         self.update()
+        self.composite_presented.emit(
+            self._composite_pixels,
+            prepared.completed.packet.captured_at,
+        )
         return composite
 
     def present_processed(self, processed: ProcessedFrame) -> bool:
@@ -478,6 +483,7 @@ class NativeCompositeSurface(QWidget):
         )
         self._pending_capture_at = processed.packet.captured_at
         self.update()
+        self.composite_presented.emit(self._composite_pixels, processed.packet.captured_at)
         return True
 
     def set_presentation(self, mode: str, wipe: int) -> None:

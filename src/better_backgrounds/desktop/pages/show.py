@@ -40,6 +40,7 @@ class ShowPage(QWidget):
     room_selected = Signal(str)
     build_requested = Signal()
     camera_changed = Signal(bool)
+    virtual_camera_quality_changed = Signal(str)
     preview_restart_requested = Signal()
     input_camera_selected = Signal(str)
     sample_install_requested = Signal()
@@ -120,6 +121,11 @@ class ShowPage(QWidget):
         self._camera.setAccessibleName("Start virtual camera")
         self._camera.clicked.connect(self._toggle_camera)
         feed_layout.addWidget(self._camera)
+        self._camera_status = _label("", object_name="muted")
+        self._camera_status.setAccessibleName("Virtual camera status")
+        self._camera_status.setWordWrap(True)
+        self._camera_status.hide()
+        feed_layout.addWidget(self._camera_status)
         root.addWidget(feed_column, 1)
 
         sidebar = QFrame()
@@ -143,6 +149,21 @@ class ShowPage(QWidget):
         self._input_camera.setToolTip("Camera used as the foreground video input")
         self._input_camera.currentIndexChanged.connect(self._emit_input_camera)
         sidebar_layout.addWidget(self._input_camera)
+
+        virtual_quality_row = QHBoxLayout()
+        virtual_quality_row.addWidget(_label("Virtual output", object_name="muted"))
+        self._virtual_camera_quality = QComboBox()
+        self._virtual_camera_quality.setAccessibleName("Virtual camera output quality")
+        self._virtual_camera_quality.setToolTip(
+            "Output resolution is fixed while the virtual camera is running",
+        )
+        self._virtual_camera_quality.addItem("1080p", "1080p")
+        self._virtual_camera_quality.addItem("720p", "720p")
+        self._virtual_camera_quality.currentIndexChanged.connect(
+            self._emit_virtual_camera_quality,
+        )
+        virtual_quality_row.addWidget(self._virtual_camera_quality)
+        sidebar_layout.addLayout(virtual_quality_row)
 
         self._mirrored = QCheckBox("Mirror webcam")
         self._mirrored.setObjectName("mirrorWebcam")
@@ -437,17 +458,40 @@ class ShowPage(QWidget):
 
     def _toggle_camera(self) -> None:
         requested = self._camera.isChecked()
-        self._camera_active = requested
-        self._camera.setText(
-            "Stop virtual camera" if requested else "Start virtual camera",
-        )
-        self._camera.setAccessibleName(
-            "Stop virtual camera" if requested else "Start virtual camera",
-        )
-        self._camera.setProperty("active", requested)
+        self.camera_changed.emit(requested)
+
+    def _emit_virtual_camera_quality(self) -> None:
+        profile_id = self._virtual_camera_quality.currentData()
+        if isinstance(profile_id, str):
+            self.virtual_camera_quality_changed.emit(profile_id)
+
+    def set_virtual_camera_state(self, state: str, message: str = "") -> None:
+        """Reflect confirmed output state without emitting another request."""
+        checked = state in {"starting", "active"}
+        self._camera.blockSignals(True)  # noqa: FBT003
+        self._camera.setChecked(checked)
+        self._camera.blockSignals(False)  # noqa: FBT003
+        self._camera_active = state == "active"
+        if state == "starting":
+            label = "Starting virtual camera…"
+        elif state == "active":
+            label = "Stop virtual camera"
+        elif state == "stopping":
+            label = "Stopping virtual camera…"
+        else:
+            label = "Start virtual camera"
+        self._camera.setText(label)
+        self._camera.setAccessibleName(label)
+        self._camera.setEnabled(state not in {"unavailable", "starting", "stopping"})
+        self._virtual_camera_quality.setEnabled(state in {"inactive", "failed"})
+        self._camera.setProperty("active", state == "active")
         self._camera.style().unpolish(self._camera)
         self._camera.style().polish(self._camera)
-        self.camera_changed.emit(requested)
+        self._camera_status.setObjectName("danger" if state == "failed" else "muted")
+        self._camera_status.setText(message)
+        self._camera_status.setVisible(bool(message))
+        self._camera_status.style().unpolish(self._camera_status)
+        self._camera_status.style().polish(self._camera_status)
 
     def set_live_preferences(self, *, mirrored: bool) -> None:
         """Restore foreground presentation without emitting changes."""

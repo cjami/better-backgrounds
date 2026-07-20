@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 import torch
@@ -13,10 +15,21 @@ from better_backgrounds.desktop.live_preview import (
     NativeLivePreview,
     rgb_to_qimage,
 )
+from better_backgrounds.desktop.live_preview.surface import PreparedComposite
 from better_backgrounds.harmonization import HarmonizationResult, HarmonizationSettings
 from better_backgrounds.matting.accelerated import CudaLiveEngine
-from better_backgrounds.matting.compositor import background_has_content, compose_live_frame
-from better_backgrounds.matting.contracts import FramePacket, MatteResult, MattingCapabilities
+from better_backgrounds.matting.compositor import (
+    LiveComposite,
+    background_has_content,
+    compose_live_frame,
+)
+from better_backgrounds.matting.contracts import (
+    FramePacket,
+    MatteResult,
+    MattingCapabilities,
+    ProcessedFrame,
+    StageTimings,
+)
 from better_backgrounds.matting.engine import CompletedMatte, EngineReady
 
 _APPLICATION: QApplication | None = None
@@ -343,4 +356,65 @@ def test_harmonizer_preparation_waits_for_matanyone_calibration(
 
     assert preparations == ["prepared"]
     monkeypatch.setattr(preview, "_engine", None)
+    preview.close()
+
+
+def test_live_preview_emits_every_composite_accepted_by_the_show_surface() -> None:
+    """Publish both native paths and Show's immediate room recomposition."""
+    application()
+    preview = NativeLivePreview(background_factory=QWidget)
+    emitted: list[tuple[np.ndarray, float]] = []
+    preview.composite_frame_ready.connect(
+        lambda frame, captured_at: emitted.append((frame, captured_at)),
+    )
+    primary = np.array([[[10, 20, 30], [40, 50, 60]]], dtype=np.uint8)
+    mask = np.array([[255, 0]], dtype=np.uint8)
+    captured_at = time.monotonic() * 1_000.0
+    first_packet = FramePacket(1, captured_at, 2, 1, 0)
+    preview._present_processed_frame(  # noqa: SLF001
+        ProcessedFrame(
+            packet=first_packet,
+            primary=primary,
+            standard=None,
+            mask_preview=mask,
+            background_revision=0,
+            occupancy=0.5,
+            timings=StageTimings(),
+        ),
+    )
+
+    second_captured_at = captured_at + 1.0
+    second_packet = FramePacket(2, second_captured_at, 2, 1, 0)
+    matte = MatteResult(2, second_captured_at, 0, 2.0)
+    completed = CompletedMatte(second_packet, matte, primary, mask)
+    composed = np.array([[[60, 50, 40], [30, 20, 10]]], dtype=np.uint8)
+    composite = LiveComposite(
+        frame_id=2,
+        source=primary,
+        alpha=mask,
+        image=composed,
+        standard_image=composed,
+        background_revision=0,
+        harmonized=False,
+    )
+    preview._composition._ready = PreparedComposite(  # noqa: SLF001
+        completed=completed,
+        source=primary,
+        alpha=mask,
+        composite=composite,
+        compare_mode=False,
+    )
+    preview._present_pending_matte()  # noqa: SLF001
+
+    assert len(emitted) == 2
+    assert np.array_equal(emitted[0][0], primary)
+    assert emitted[0][1] == captured_at
+    assert np.array_equal(emitted[1][0], composed)
+    assert emitted[1][1] == second_captured_at
+
+    room = np.array([[[80, 90, 100], [100, 120, 140]]], dtype=np.uint8)
+    assert preview._surface.set_background(rgb_to_qimage(room))  # noqa: SLF001
+    assert len(emitted) == 3
+    assert np.array_equal(emitted[2][0][0, 0], room[0, 0])
+    assert emitted[2][1] == second_captured_at
     preview.close()

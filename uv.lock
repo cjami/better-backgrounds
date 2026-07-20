@@ -70,6 +70,7 @@ dependencies = [
     { name = "psutil" },
     { name = "pydantic" },
     { name = "pyside6" },
+    { name = "pyvirtualcam" },
     { name = "scipy" },
     { name = "timm" },
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and sys_platform != 'win32')" },
@@ -104,6 +105,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pyside6", specifier = ">=6.10.2" },
+    { name = "pyvirtualcam", specifier = "==0.15.0" },
     { name = "scipy", specifier = "==1.16.2" },
     { name = "timm", specifier = "==1.0.20" },
     { name = "torch", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and sys_platform != 'win32')", specifier = "==2.11.0" },
@@ -1385,6 +1387,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4c/81/58c70036dffeccb7fe7d79d6260c69f7a28272bbd3909c29a01ea9422744/python_discovery-1.4.4.tar.gz", hash = "sha256:5cad33982d412c1f3ffb8f9ca4ea292c9680bca3942451d30b69c37fce53a4a3", size = 72212, upload-time = "2026-07-08T23:06:50.691Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9d/ae/84bc0d2440c95772272bb6f4b3d09ccf08b2898fce89b3d4f969a9fc74e9/python_discovery-1.4.4-py3-none-any.whl", hash = "sha256:abebe9120b43453b68c908acfb1e72a19d1a959ed2cb620ad38fc57d08056dbe", size = 34181, upload-time = "2026-07-08T23:06:49.402Z" },
+]
+
+[[package]]
+name = "pyvirtualcam"
+version = "0.15.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/db/1c/be6d4ea576030a4f11cfa1c2a2fbd0ce18ec78c17ec33ef97d1c110193bb/pyvirtualcam-0.15.0-cp314-cp314-macosx_10_9_x86_64.whl", hash = "sha256:2b54ac35ce67886184030196ccf372b0ebcacf68abe56f595fadbf162ebc088a", size = 626734, upload-time = "2026-01-24T18:27:39.972Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/43/0bcab7188d05c2149fe123b361bd001bde03e03537e0114646f2ab1da50b/pyvirtualcam-0.15.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:b2247e7e5d126ddaa3c514d76ab57dd8a4b3d8e02dcd5a57bfb93537627b745a", size = 633338, upload-time = "2026-01-24T18:27:41.598Z" },
+    { url = "https://files.pythonhosted.org/packages/71/08/da942f9125d00007c9ea009a7bebd97cd69d53e81af487447e357251f2c5/pyvirtualcam-0.15.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:dcea85ca4b948851fc23620be089cd1360b457b2daa68f1ac65614e17d437db2", size = 160544, upload-time = "2026-01-24T18:27:44.33Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/ec/b3047c709aa659b171a9f82e3200c4198ef807a5e6e1bd78575e6929b8aa/pyvirtualcam-0.15.0-cp314-cp314-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:304c0ffbebd9adb99260b18b91312d7ac05135efc3edf931fbafc691f06feaff", size = 116228, upload-time = "2026-01-24T18:27:45.519Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/51/16226ecbbddf5c5813908a15287002dbb9c209793c2140780c505380b748/pyvirtualcam-0.15.0-cp314-cp314-win_amd64.whl", hash = "sha256:4fb2728b3109368bc0d189171e4e44f257bb78c33578122134c2eeb9eea089b7", size = 193689, upload-time = "2026-01-24T18:27:46.902Z" },
 ]
 
 [[package]]

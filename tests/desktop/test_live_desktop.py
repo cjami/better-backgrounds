@@ -1,5 +1,6 @@
 """Feature-first: Tests for the retained Show live pipeline."""
 
+import time
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Signal
@@ -22,6 +23,7 @@ class TrackingLiveRenderer(ScenePreview):
 
     camera_state_changed = Signal(str, str)
     diagnostics_changed = Signal(object)
+    composite_frame_ready = Signal(object, float)
 
     def __init__(self) -> None:
         """Create empty lifecycle and presentation logs."""
@@ -56,6 +58,33 @@ class TrackingLiveRenderer(ScenePreview):
     def set_resource_active(self, active: bool) -> None:  # noqa: FBT001
         """Record whether hidden live resources should remain active."""
         self.resource_states.append(active)
+
+
+class PassiveVirtualCamera:
+    """Keep a deterministic virtual output active until the controller closes it."""
+
+    def send(self, frame: object) -> None:
+        """Accept a frame without touching an operating-system camera."""
+        _ = frame
+
+    def sleep_until_next_frame(self) -> None:
+        """Yield briefly to model the backend cadence."""
+        time.sleep(0.002)
+
+    def close(self) -> None:
+        """Release the fake output."""
+
+
+def wait_until(predicate, *, timeout: float = 1.0) -> None:  # noqa: ANN001
+    """Process queued Qt events until a controller transition is visible."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        application().processEvents()
+        if predicate():
+            return
+        time.sleep(0.002)
+    message = "condition was not met before timeout"
+    raise AssertionError(message)
 
 
 def application() -> QApplication:
@@ -110,6 +139,7 @@ def create_window(tmp_path: Path, pipeline: TrackingLiveRenderer) -> MainWindow:
         renderer_factory=ScenePreview,
         live_renderer_factory=lambda: pipeline,
         camera_source=InputCameraSource(lambda: cameras),
+        virtual_camera_sink_factory=lambda _profile: PassiveVirtualCamera(),
         scene_cache_root=tmp_path / "cache",
         data_root=tmp_path / "data",
     )
@@ -128,6 +158,7 @@ def test_adjust_suspends_live_resources_without_restarting_camera(tmp_path: Path
     assert pipeline.starts == [("camera-a", True)]
     assert pipeline.resource_states == [True]
     camera.click()
+    wait_until(lambda: camera.text() == "Stop virtual camera")
     window.select_tab(2)
     window.select_tab(1)
     window.select_tab(0)
@@ -136,6 +167,7 @@ def test_adjust_suspends_live_resources_without_restarting_camera(tmp_path: Path
     assert pipeline.stops == 0
     assert pipeline.resource_states == [True, False, True, True]
     camera.click()
+    wait_until(lambda: camera.text() == "Start virtual camera")
     assert pipeline.stops == 0
     assert virtual_states == [True, False]
     window.close()
