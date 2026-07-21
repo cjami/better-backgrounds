@@ -218,45 +218,47 @@ class SharpCheckpointWorker:
         )
 
 
-def _windows_pipe_lines(stream: TextIO) -> Iterator[str]:
-    """Poll redirected stdin without holding a blocking Windows pipe read."""
-    import msvcrt  # noqa: PLC0415
-    from ctypes import wintypes  # noqa: PLC0415
+if sys.platform == "win32":
 
-    handle = wintypes.HANDLE(msvcrt.get_osfhandle(stream.fileno()))
-    peek = ctypes.WinDLL("kernel32", use_last_error=True).PeekNamedPipe
-    peek.argtypes = (
-        wintypes.HANDLE,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD),
-        ctypes.POINTER(wintypes.DWORD),
-        ctypes.POINTER(wintypes.DWORD),
-    )
-    peek.restype = wintypes.BOOL
-    pending = bytearray()
-    while True:
-        available = wintypes.DWORD()
-        if not peek(handle, None, 0, None, ctypes.byref(available), None):
-            error = ctypes.get_last_error()
-            if error == ERROR_INVALID_HANDLE:
-                yield from stream
-            return
-        if available.value == 0:
-            time.sleep(0.02)
-            continue
-        chunk = os.read(stream.fileno(), available.value)
-        if not chunk:
-            return
-        pending.extend(chunk)
-        while b"\n" in pending:
-            raw_line, _, remainder = pending.partition(b"\n")
-            pending = bytearray(remainder)
-            yield raw_line.rstrip(b"\r").decode("utf-8", errors="replace")
+    def _windows_pipe_lines(stream: TextIO) -> Iterator[str]:
+        """Poll redirected stdin without holding a blocking Windows pipe read."""
+        import msvcrt  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(stream.fileno()))
+        peek = ctypes.WinDLL("kernel32", use_last_error=True).PeekNamedPipe
+        peek.argtypes = (
+            wintypes.HANDLE,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        peek.restype = wintypes.BOOL
+        pending = bytearray()
+        while True:
+            available = wintypes.DWORD()
+            if not peek(handle, None, 0, None, ctypes.byref(available), None):
+                error = ctypes.get_last_error()
+                if error == ERROR_INVALID_HANDLE:
+                    yield from stream
+                return
+            if available.value == 0:
+                time.sleep(0.02)
+                continue
+            chunk = os.read(stream.fileno(), available.value)
+            if not chunk:
+                return
+            pending.extend(chunk)
+            while b"\n" in pending:
+                raw_line, _, remainder = pending.partition(b"\n")
+                pending = bytearray(remainder)
+                yield raw_line.rstrip(b"\r").decode("utf-8", errors="replace")
 
 
 def _control_lines(stream: TextIO) -> Iterator[str]:
-    if os.name == "nt" and not stream.isatty():
+    if sys.platform == "win32" and not stream.isatty():
         yield from _windows_pipe_lines(stream)
         return
     yield from stream
