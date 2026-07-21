@@ -45,7 +45,7 @@ jobs:
         run: uv run python -m better_backgrounds.desktop --build-smoke-test
       - name: Prepare the deployment spec for this runner
         run: uv run python packaging/configure_spec.py
-      - run: uv run pyside6-deploy -c pysidedeploy.spec --force --loglevel debug
+      - run: uv run pyside6-deploy -c pysidedeploy.spec --force
       - name: Show packaging output
         if: always()
         shell: bash

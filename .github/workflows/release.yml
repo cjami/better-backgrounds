@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: uv run python packaging/configure_spec.py
 
-      - run: uv run pyside6-deploy -c pysidedeploy.spec --force --loglevel debug
+      - run: uv run pyside6-deploy -c pysidedeploy.spec --force
 
       - name: Show packaging output
         if: always()
@@ -94,6 +94,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Better Backgrounds $TAG" \
             --notes-file packaging/RELEASE_NOTES.md \
-            --clobber 2>/dev/null \
+            --verify-tag 2>/dev/null \
             || gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file packaging/RELEASE_NOTES.md
           gh release upload "$TAG" artifacts/*.zip --repo "$GITHUB_REPOSITORY" --clobber
