@@ -43,10 +43,9 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Source smoke test
         run: uv run python -m better_backgrounds.desktop --build-smoke-test
-      - name: Select the macOS application icon
-        if: runner.os == 'macOS'
-        run: sed -i '' 's/app-icon\.ico/app-icon.icns/' pysidedeploy.spec
-      - run: uv run pyside6-deploy -c pysidedeploy.spec --force
+      - name: Prepare the deployment spec for this runner
+        run: uv run python packaging/configure_spec.py
+      - run: uv run pyside6-deploy -c pysidedeploy.spec --force --loglevel debug
       - name: Show packaging output
         if: always()
         shell: bash

@@ -38,11 +38,12 @@ jobs:
       - run: npm ci --no-audit --no-fund
 
       # The spec ships the Windows .ico; macOS bundles need the .icns instead.
-      - name: Select the macOS application icon
-        if: runner.os == 'macOS'
-        run: sed -i '' 's/app-icon\.ico/app-icon.icns/' pysidedeploy.spec
+      # pyside6-deploy also needs an interpreter path valid on this runner.
+      - name: Prepare the deployment spec for this runner
+        shell: bash
+        run: uv run python packaging/configure_spec.py
 
-      - run: uv run pyside6-deploy -c pysidedeploy.spec --force
+      - run: uv run pyside6-deploy -c pysidedeploy.spec --force --loglevel debug
 
       - name: Show packaging output
         if: always()

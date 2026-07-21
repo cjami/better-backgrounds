@@ -41,6 +41,7 @@ desktop-smoke:
 	uv run python -m better_backgrounds.desktop --build-smoke-test
 
 package-desktop:
+	uv run python packaging/configure_spec.py
 	uv run pyside6-deploy -c pysidedeploy.spec --force
 
 icons:
