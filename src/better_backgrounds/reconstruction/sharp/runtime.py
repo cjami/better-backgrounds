@@ -17,9 +17,18 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from numpy.typing import NDArray
+    from torch import Tensor
 
 SharpDevice = Literal["cuda", "mps", "cpu"]
 SharpDeviceRequest = Literal["auto", "cuda", "mps", "cpu"]
+
+
+def _ply_safe_opacities(opacities: Tensor) -> Tensor:
+    """Keep probability endpoints finite when SHARP exports them as logits."""
+    import torch  # noqa: PLC0415
+
+    epsilon = torch.finfo(opacities.dtype).eps
+    return opacities.clamp(min=epsilon, max=1.0 - epsilon)
 
 
 def ensure_vendored_sharp() -> ModuleType:
@@ -131,6 +140,13 @@ def run_sharp_inference(
             torch.eye(4, device=device),
             intrinsics,
             internal_shape,
+        )
+        gaussians = gaussian_utils.Gaussians3D(
+            mean_vectors=gaussians.mean_vectors,
+            singular_values=gaussians.singular_values,
+            quaternions=gaussians.quaternions,
+            colors=gaussians.colors,
+            opacities=_ply_safe_opacities(gaussians.opacities),
         )
     synchronize_sharp_device(device)
     inference_ms = (time.perf_counter() - started) * 1000.0

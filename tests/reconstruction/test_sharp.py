@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 from plyfile import PlyData, PlyElement
 
@@ -26,7 +27,10 @@ from better_backgrounds.reconstruction.sharp import (
     inspect_scene_image,
     validate_sharp_ply,
 )
-from better_backgrounds.reconstruction.sharp.runtime import ensure_vendored_sharp
+from better_backgrounds.reconstruction.sharp.runtime import (
+    _ply_safe_opacities,
+    ensure_vendored_sharp,
+)
 from better_backgrounds.reconstruction.sharp.worker import watch_control
 
 if TYPE_CHECKING:
@@ -57,6 +61,17 @@ def test_sharp_runtime_finds_the_package_level_vendored_module() -> None:
     assert module.__name__ == "sharp"
     assert "better_backgrounds" in str(module.__file__)
     assert "_vendor" in str(module.__file__)
+
+
+def test_sharp_runtime_keeps_exported_opacity_logits_finite() -> None:
+    """Keep fully opaque model predictions representable in the PLY logit layout."""
+    opacities = torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0], dtype=torch.float32)
+
+    safe = _ply_safe_opacities(opacities)
+    logits = torch.log(safe / (1.0 - safe))
+
+    assert torch.isfinite(logits).all()
+    assert torch.equal(safe[1:-1], opacities[1:-1])
 
 
 def write_sharp_ply(
