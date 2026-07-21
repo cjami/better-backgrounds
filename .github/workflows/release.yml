@@ -44,22 +44,31 @@ jobs:
 
       - run: uv run pyside6-deploy -c pysidedeploy.spec --force
 
+      - name: Show packaging output
+        if: always()
+        shell: bash
+        run: |
+          for dir in dist build src/better_backgrounds/desktop; do
+            echo "--- $dir ---"
+            [ -d "$dir" ] && find "$dir" -maxdepth 2 || echo "(missing)"
+          done
+
       # ditto preserves the symlinks and permission bits inside a macOS bundle
       # that a plain zip would flatten, leaving the app unlaunchable.
       - name: Archive macOS bundle
         if: runner.os == 'macOS'
         run: |
-          BUILD="$(uv run python packaging/stage_release.py)"
-          echo "Packaged build: $BUILD"
-          ditto -c -k --sequesterRsrc --keepParent "$BUILD" "${{ matrix.asset }}.zip"
+          STAGED="$(uv run python packaging/stage_release.py)"
+          echo "Staged release: $STAGED"
+          ditto -c -k --sequesterRsrc "$STAGED" "${{ matrix.asset }}.zip"
 
       - name: Archive Windows build
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $build = uv run python packaging/stage_release.py
-          Write-Host "Packaged build: $build"
-          Compress-Archive -Path "$build\*" -DestinationPath "${{ matrix.asset }}.zip"
+          $staged = uv run python packaging/stage_release.py
+          Write-Host "Staged release: $staged"
+          Compress-Archive -Path "$staged\*" -DestinationPath "${{ matrix.asset }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:

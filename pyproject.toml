@@ -49,6 +49,9 @@ dev = [
     "ty==0.0.59",
 ]
 
+[tool.uv.build-backend]
+source-exclude = ["src/better_backgrounds/desktop/deployment"]
+
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12"]
 build-backend = "uv_build"

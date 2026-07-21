@@ -1,8 +1,9 @@
 """Locate the packaged desktop build and stage its first-run helper beside it.
 
-`pyside6-deploy` places its standalone output differently per platform and Nuitka
-version, so the release workflow discovers the build instead of assuming a path.
-Prints the staged directory on success and exits non-zero if nothing was found.
+`pyside6-deploy` places its standalone output differently per platform, so the
+release workflow discovers the build by Nuitka's directory layout rather than by
+executable name. Prints the staged directory, or the trees it searched and a
+non-zero exit when nothing matched.
 """
 
 from __future__ import annotations
@@ -12,41 +13,74 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SEARCH_ROOTS = (ROOT / "dist", ROOT / "build")
-EXECUTABLES = ("BetterBackgrounds.exe", "BetterBackgrounds")
+SEARCH_ROOTS = (ROOT / "dist", ROOT / "build", ROOT / "src")
+# Nuitka standalone always emits a `<name>.dist` directory; macOS app-bundle
+# mode emits `<name>.app`. Neither depends on the configured executable name.
+BUNDLE_SUFFIXES = (".app", ".dist")
 HELPERS = {
     "win32": ROOT / "packaging/windows/FIRST-RUN.txt",
     "darwin": ROOT / "packaging/macos/Unlock and Open.command",
 }
+LISTING_DEPTH = 3
+LISTING_LIMIT = 60
 
 
 def find_build() -> Path:
-    """Return the directory that contains the packaged application."""
-    candidates: list[Path] = []
-    for root in SEARCH_ROOTS:
-        if not root.is_dir():
-            continue
-        candidates.extend(bundle.parent for bundle in root.rglob("*.app") if bundle.is_dir())
-        for name in EXECUTABLES:
-            candidates.extend(match.parent for match in root.rglob(name) if match.is_file())
+    """Return the packaged application directory produced by pyside6-deploy."""
+    candidates = [
+        path
+        for root in SEARCH_ROOTS
+        if root.is_dir()
+        for path in root.rglob("*")
+        if path.is_dir() and path.suffix in BUNDLE_SUFFIXES
+    ]
     if not candidates:
-        searched = ", ".join(str(root) for root in SEARCH_ROOTS)
-        message = f"No packaged application found under: {searched}"
-        raise SystemExit(message)
-    # Prefer the shallowest match so we stage the bundle root, not a nested helper.
-    return sorted(set(candidates), key=lambda path: len(path.parts))[0]
+        raise SystemExit(_failure_report())
+    # Prefer the shallowest match so a nested helper bundle never wins.
+    return sorted(set(candidates), key=lambda path: (len(path.parts), str(path)))[0]
+
+
+def _failure_report() -> str:
+    """Describe what actually exists so a failed run is diagnosable."""
+    lines = ["No packaged application found (looked for *.app or *.dist directories)."]
+    for root in SEARCH_ROOTS:
+        lines.append(f"\n{root}:")
+        if not root.is_dir():
+            lines.append("  <missing>")
+            continue
+        shown = 0
+        for path in sorted(root.rglob("*")):
+            if len(path.relative_to(root).parts) > LISTING_DEPTH:
+                continue
+            lines.append(f"  {path.relative_to(root)}{'/' if path.is_dir() else ''}")
+            shown += 1
+            if shown >= LISTING_LIMIT:
+                lines.append("  ... (truncated)")
+                break
+        if shown == 0:
+            lines.append("  <empty>")
+    return "\n".join(lines)
 
 
 def main() -> None:
-    """Stage the platform helper next to the packaged application."""
+    """Assemble a clean release directory holding the app and its first-run helper."""
     build = find_build()
+    staging = ROOT / "build" / "release"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    # Move rather than copy: the bundle is multi-gigabyte and the original is
+    # not needed again, so a same-filesystem rename keeps CI fast.
+    shutil.move(str(build), str(staging / build.name))
+
     helper = HELPERS.get(sys.platform)
     if helper is not None and helper.is_file():
-        destination = build / helper.name
+        destination = staging / helper.name
         shutil.copy2(helper, destination)
         if sys.platform == "darwin":
             destination.chmod(0o755)
-    print(build)  # noqa: T201
+    print(staging)  # noqa: T201
 
 
 if __name__ == "__main__":
