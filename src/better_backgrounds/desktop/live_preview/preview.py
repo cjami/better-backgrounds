@@ -20,6 +20,10 @@ from better_backgrounds.desktop.camera.capture import (
     QtCameraCapture,
     capture_profile,
 )
+from better_backgrounds.desktop.camera.devices import (
+    DEFAULT_INPUT_RESOLUTION,
+    InputResolution,
+)
 from better_backgrounds.desktop.live_preview.composition import CompositionCoordinator
 from better_backgrounds.desktop.live_preview.seed import SeedCoordinator
 from better_backgrounds.desktop.live_preview.surface import (
@@ -164,9 +168,10 @@ class NativeLivePreview(QWidget):
         self._background_refresh_ms = 0.0
         self._resource_active = True
         self._camera_device_id: str | None = None
+        self._input_resolution = DEFAULT_INPUT_RESOLUTION
         self._scene: SceneReference | None = None
         self._scene_viewpoint: Viewpoint | None = None
-        self._capture_profile = capture_profile(1280, 720, 30.0, 30.0)
+        self._capture_profile = capture_profile(1920, 1080, 30.0, 30.0)
         self._output_geometry = self._capture_profile.output_geometry(16 / 9)
         self._surface.set_output_geometry(self._output_geometry)
         self._set_renderer_output_size(self._output_geometry)
@@ -218,13 +223,20 @@ class NativeLivePreview(QWidget):
         timer.timeout.connect(callback)
         return timer
 
-    def start_camera(self, device_id: str, *, mirrored: bool) -> None:
+    def start_camera(
+        self,
+        device_id: str,
+        *,
+        mirrored: bool,
+        input_resolution: InputResolution = DEFAULT_INPUT_RESOLUTION,
+    ) -> None:
         """Open the selected Qt camera and begin one-shot target selection."""
         self._camera_capture.stop()
         self._reset_tracking()
         self.prepare_matting()
         self._mirrored = mirrored
         self._camera_device_id = device_id
+        self._input_resolution = input_resolution
         self._surface.set_mirroring(mirrored=mirrored)
         self._surface.reset_camera_harmonization()
         self._selector.reset()
@@ -233,7 +245,10 @@ class NativeLivePreview(QWidget):
         if self._resource_active:
             self._poll_timer.start()
         self._set_state("seeding", "Finding you while background removal prepares…")
-        if self._resource_active and not self._camera_capture.start(device_id):
+        if self._resource_active and not self._camera_capture.start(
+            device_id,
+            input_resolution,
+        ):
             self._poll_timer.stop()
 
     def stop_capture(self) -> None:
@@ -392,7 +407,10 @@ class NativeLivePreview(QWidget):
                 self._start_result_pump(self._engine)
             else:
                 self._poll_timer.start()
-            if not self._camera_capture.start(self._camera_device_id):
+            if not self._camera_capture.start(
+                self._camera_device_id,
+                self._input_resolution,
+            ):
                 self._poll_timer.stop()
         if self._scene is None or self._scene_viewpoint is None:
             return

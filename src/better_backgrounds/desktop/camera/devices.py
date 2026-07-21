@@ -25,6 +25,8 @@ class InputCamera:
 
 
 CameraProvider = Callable[[], Sequence[InputCamera]]
+InputResolution = Literal["1080p", "720p"]
+DEFAULT_INPUT_RESOLUTION: InputResolution = "1080p"
 
 
 class InputCameraSource(QObject):
@@ -100,6 +102,44 @@ class InputCameraSelectionStore:
     def save(self, device_id: str) -> None:
         """Atomically replace the preferred device identifier."""
         document = InputCameraSelection(device_id=device_id)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(document.model_dump_json(indent=2), encoding="utf-8")
+            temporary.replace(self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+class InputResolutionPreference(BaseModel):
+    """Validate the versioned input-resolution preference document."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    resolution: InputResolution = DEFAULT_INPUT_RESOLUTION
+
+
+class InputResolutionStore:
+    """Persist the user-selected live input resolution atomically."""
+
+    def __init__(self, path: Path) -> None:
+        """Use the provided Python-owned application-data path."""
+        self.path = path
+
+    def load(self) -> InputResolution:
+        """Return 1080p when persisted settings are absent or invalid."""
+        try:
+            document = InputResolutionPreference.model_validate_json(
+                self.path.read_text(encoding="utf-8"),
+            )
+        except OSError, ValidationError:
+            return DEFAULT_INPUT_RESOLUTION
+        return document.resolution
+
+    def save(self, resolution: InputResolution) -> None:
+        """Atomically replace the selected input resolution."""
+        document = InputResolutionPreference(resolution=resolution)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
         try:

@@ -835,6 +835,16 @@ def test_show_tab_has_a_clear_camera_toggle() -> None:
     camera.click()
     wait_until(lambda: camera.text() == "Start virtual camera")
     assert camera.text() == "Start virtual camera"
+    input_resolution = next(
+        combo
+        for combo in window.findChildren(QComboBox)
+        if combo.accessibleName() == "Input camera resolution"
+    )
+    assert [input_resolution.itemData(index) for index in range(input_resolution.count())] == [
+        "1080p",
+        "720p",
+    ]
+    assert input_resolution.currentData() == "1080p"
     quality = next(
         combo
         for combo in window.findChildren(QComboBox)

@@ -28,16 +28,22 @@ class TrackingLiveRenderer(ScenePreview):
     def __init__(self) -> None:
         """Create empty lifecycle and presentation logs."""
         super().__init__()
-        self.starts: list[tuple[str, bool]] = []
+        self.starts: list[tuple[str, bool, str]] = []
         self.stops = 0
         self.mirroring: list[bool] = []
         self.matting: list[str] = []
         self.harmonization: list[HarmonizationSettings] = []
         self.resource_states: list[bool] = []
 
-    def start_camera(self, label: str, *, mirrored: bool) -> None:
+    def start_camera(
+        self,
+        label: str,
+        *,
+        mirrored: bool,
+        input_resolution: str,
+    ) -> None:
         """Record one explicit camera start."""
-        self.starts.append((label, mirrored))
+        self.starts.append((label, mirrored, input_resolution))
 
     def stop_camera(self) -> None:
         """Record prompt stream teardown."""
@@ -155,7 +161,7 @@ def test_adjust_suspends_live_resources_without_restarting_camera(tmp_path: Path
     virtual_states: list[bool] = []
     window.virtual_camera_changed.connect(virtual_states.append)
 
-    assert pipeline.starts == [("camera-a", True)]
+    assert pipeline.starts == [("camera-a", True, "1080p")]
     assert pipeline.resource_states == [True]
     camera.click()
     wait_until(lambda: camera.text() == "Stop virtual camera")
@@ -163,7 +169,7 @@ def test_adjust_suspends_live_resources_without_restarting_camera(tmp_path: Path
     window.select_tab(1)
     window.select_tab(0)
 
-    assert pipeline.starts == [("camera-a", True)]
+    assert pipeline.starts == [("camera-a", True, "1080p")]
     assert pipeline.stops == 0
     assert pipeline.resource_states == [True, False, True, True]
     camera.click()

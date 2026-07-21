@@ -91,6 +91,7 @@ class ShowPage(QWidget):
     room_delete_requested = Signal(str)
     build_requested = Signal()
     camera_changed = Signal(bool)
+    input_resolution_changed = Signal(str)
     virtual_camera_quality_changed = Signal(str)
     preview_restart_requested = Signal()
     input_camera_selected = Signal(str)
@@ -208,6 +209,19 @@ class ShowPage(QWidget):
         self._input_camera.setToolTip("Camera used as the foreground video input")
         self._input_camera.currentIndexChanged.connect(self._emit_input_camera)
         sidebar_layout.addWidget(self._input_camera)
+
+        input_resolution_row = QHBoxLayout()
+        input_resolution_row.addWidget(_label("Input resolution", object_name="muted"))
+        self._input_resolution = QComboBox()
+        self._input_resolution.setAccessibleName("Input camera resolution")
+        self._input_resolution.setToolTip(
+            "Resolution used for camera processing, background removal, and compositing",
+        )
+        self._input_resolution.addItem("1080p", "1080p")
+        self._input_resolution.addItem("720p", "720p")
+        self._input_resolution.currentIndexChanged.connect(self._emit_input_resolution)
+        input_resolution_row.addWidget(self._input_resolution)
+        sidebar_layout.addLayout(input_resolution_row)
 
         virtual_quality_row = QHBoxLayout()
         virtual_quality_row.addWidget(_label("Virtual output", object_name="muted"))
@@ -436,6 +450,20 @@ class ShowPage(QWidget):
         device_id = self.current_input_camera_id
         if device_id is not None:
             self.input_camera_selected.emit(device_id)
+
+    def _emit_input_resolution(self, _index: int) -> None:
+        resolution = self._input_resolution.currentData()
+        if isinstance(resolution, str):
+            self.input_resolution_changed.emit(resolution)
+
+    def set_input_resolution(self, resolution: str) -> None:
+        """Restore the selected input resolution without emitting a request."""
+        index = self._input_resolution.findData(resolution)
+        if index < 0:
+            return
+        self._input_resolution.blockSignals(True)  # noqa: FBT003
+        self._input_resolution.setCurrentIndex(index)
+        self._input_resolution.blockSignals(False)  # noqa: FBT003
 
     def configure_sample(
         self,

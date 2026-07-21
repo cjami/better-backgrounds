@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from better_backgrounds.desktop.camera import InputCameraSelectionStore
+from better_backgrounds.desktop.camera import InputCameraSelectionStore, InputResolutionStore
 from better_backgrounds.desktop.camera.capture import (
     FrameRateLimiter,
     camera_format_score,
@@ -36,6 +36,27 @@ def test_invalid_input_camera_selection_is_ignored(tmp_path: Path) -> None:
     assert InputCameraSelectionStore(path).load() is None
 
 
+def test_input_resolution_round_trips_with_a_1080p_default(tmp_path: Path) -> None:
+    """Persist only an explicit user-selected live input tier."""
+    path = tmp_path / "input-resolution-v1.json"
+    store = InputResolutionStore(path)
+
+    assert store.load() == "1080p"
+
+    store.save("720p")
+
+    assert store.load() == "720p"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_invalid_input_resolution_falls_back_to_1080p(tmp_path: Path) -> None:
+    """Ignore unknown or incompatible persisted resolution data."""
+    path = tmp_path / "input-resolution-v1.json"
+    path.write_text('{"schema_version":1,"resolution":"480p"}', encoding="utf-8")
+
+    assert InputResolutionStore(path).load() == "1080p"
+
+
 def test_camera_format_prefers_native_1080p_at_the_target_frame_rate() -> None:
     """Prefer native 1080p without paying for unnecessary 4K or 60 fps capture."""
     target = camera_format_score(1920, 1080, 30.0, 30.0)
@@ -45,20 +66,12 @@ def test_camera_format_prefers_native_1080p_at_the_target_frame_rate() -> None:
     assert target < camera_format_score(1280, 720, 30.0, 30.0)
 
 
-def test_camera_format_keeps_thirty_fps_ahead_of_resolution() -> None:
-    """Fall back to 720p when a higher-resolution mode cannot approach 30 fps."""
-    assert camera_format_score(1280, 720, 30.0, 30.0) < camera_format_score(
-        3840,
-        2160,
-        15.0,
-        15.0,
-    )
-    assert camera_format_score(1280, 720, 30.0, 30.0) < camera_format_score(
-        1920,
-        1080,
-        15.0,
-        15.0,
-    )
+def test_camera_format_targets_the_selected_720p_tier() -> None:
+    """Prefer the requested native tier when the user selects 720p."""
+    target = camera_format_score(1280, 720, 30.0, 30.0, "720p")
+
+    assert target < camera_format_score(1920, 1080, 30.0, 30.0, "720p")
+    assert target < camera_format_score(960, 540, 30.0, 30.0, "720p")
 
 
 def test_capture_profile_maps_source_tiers_without_upscaling() -> None:
@@ -68,6 +81,17 @@ def test_capture_profile_maps_source_tiers_without_upscaling() -> None:
     assert capture_profile(1280, 720, 30.0, 30.0).processing_height == 720
     smaller = capture_profile(960, 540, 30.0, 30.0)
     assert (smaller.processing_width, smaller.processing_height) == (960, 540)
+
+
+def test_capture_profile_caps_processing_at_selected_720p_tier() -> None:
+    """Reduce all higher-resolution inputs when the user selects 720p."""
+    profile = capture_profile(1920, 1080, 30.0, 30.0, "720p")
+
+    assert (profile.processing_width, profile.processing_height) == (1280, 720)
+    assert (profile.output_geometry(4 / 3).width, profile.output_geometry(4 / 3).height) == (
+        960,
+        720,
+    )
 
 
 def test_output_geometry_uses_tier_height_and_requested_aspect() -> None:
@@ -117,16 +141,6 @@ def test_narrow_source_is_background_padded_without_stretching() -> None:
     assert fitted_source.shape == (4, 6, 3)
     assert np.array_equal(fitted_source[:, 1:4], source)
     assert np.count_nonzero(fitted_alpha[:, :1]) == 0
-
-
-def test_camera_format_prefers_720p_sixty_over_1080p_fifteen() -> None:
-    """Prefer a stable sampled cadence over a visibly slow high-resolution feed."""
-    assert camera_format_score(1280, 720, 60.0, 60.0) < camera_format_score(
-        1920,
-        1080,
-        15.0,
-        15.0,
-    )
 
 
 def test_camera_rate_limiter_evenly_samples_an_overproducing_backend() -> None:

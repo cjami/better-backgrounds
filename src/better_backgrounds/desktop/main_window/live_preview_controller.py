@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, Signal, Slot
 
 from better_backgrounds.desktop.camera import (
+    DEFAULT_INPUT_RESOLUTION,
     InputCamera,
     InputCameraSelectionStore,
     InputCameraSource,
+    InputResolution,
+    InputResolutionStore,
 )
 from better_backgrounds.harmonization import HarmonizationSettings
 from better_backgrounds.matting import LivePreferencesStore
@@ -44,6 +47,10 @@ class LivePreviewController(QObject):
             data_root / "input-camera-v1.json",
         )
         self._preferred_input_camera_id = self._input_camera_selection.load()
+        self._input_resolution_store = InputResolutionStore(
+            data_root / "input-resolution-v1.json",
+        )
+        self._input_resolution = self._input_resolution_store.load()
         self._live_preferences_store = LivePreferencesStore(
             data_root / "live-preferences-v1.json",
         )
@@ -53,6 +60,8 @@ class LivePreviewController(QObject):
         self._preview_started = False
         self._latest_diagnostics: object | None = None
         show_page.input_camera_selected.connect(self.select_input_camera)
+        show_page.input_resolution_changed.connect(self.change_input_resolution)
+        show_page.set_input_resolution(self._input_resolution)
         show_page.preview_restart_requested.connect(self._restart_preview)
         show_page.seed_confirmed.connect(self._confirm_person_seed)
         show_page.seed_retry_requested.connect(self._retry_person_seed)
@@ -81,6 +90,11 @@ class LivePreviewController(QObject):
     def mirrored(self) -> bool:
         """Return the persisted foreground mirroring preference."""
         return self._live_preferences.mirrored
+
+    @property
+    def input_resolution(self) -> InputResolution:
+        """Return the persisted live input resolution."""
+        return self._input_resolution
 
     def start(self) -> None:
         """Discover cameras and start the retained local preview."""
@@ -160,7 +174,11 @@ class LivePreviewController(QObject):
         self._show_page.set_camera_state("starting", "Requesting camera permission…")
         starter = getattr(self._live_preview, "start_camera", None)
         if callable(starter):
-            starter(self._selected_input_camera_id, mirrored=self._live_preferences.mirrored)
+            starter(
+                self._selected_input_camera_id,
+                mirrored=self._live_preferences.mirrored,
+                input_resolution=self._input_resolution,
+            )
 
     def _restart_preview(self) -> None:
         """Apply a device change without creating a second preview stream."""
@@ -176,7 +194,23 @@ class LivePreviewController(QObject):
         self._preview_started = True
         if callable(starter):
             self._show_page.set_camera_state("starting", "Restarting selected camera…")
-            starter(self._selected_input_camera_id, mirrored=self._live_preferences.mirrored)
+            starter(
+                self._selected_input_camera_id,
+                mirrored=self._live_preferences.mirrored,
+                input_resolution=self._input_resolution,
+            )
+
+    @Slot(str)
+    def change_input_resolution(self, resolution: str) -> None:
+        """Persist an explicit input tier and restart live processing immediately."""
+        if resolution not in {"1080p", "720p"} or resolution == self._input_resolution:
+            return
+        selected: InputResolution = "720p" if resolution == "720p" else DEFAULT_INPUT_RESOLUTION
+        self._input_resolution = selected
+        self._input_resolution_store.save(selected)
+        self._show_page.set_input_resolution(selected)
+        if self._preview_started:
+            self._restart_preview()
 
     @Slot()
     def _confirm_person_seed(self) -> None:

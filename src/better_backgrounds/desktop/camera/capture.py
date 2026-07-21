@@ -18,6 +18,11 @@ from PySide6.QtMultimedia import (
     QVideoSink,
 )
 
+from better_backgrounds.desktop.camera.devices import (
+    DEFAULT_INPUT_RESOLUTION,
+    InputResolution,
+)
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
@@ -75,16 +80,15 @@ def capture_profile(
     height: int,
     minimum_frame_rate: float,
     maximum_frame_rate: float,
+    resolution: InputResolution = DEFAULT_INPUT_RESOLUTION,
 ) -> CaptureProfile:
-    """Normalize 4K/1080p sources to 1080p and retain the 720p fallback."""
+    """Normalize capture to the user-selected tier without upscaling."""
     if width <= 0 or height <= 0:
         msg = "capture dimensions must be positive"
         raise ValueError(msg)
-    if height >= FULL_HD_HEIGHT:
-        processing_height = FULL_HD_HEIGHT
-        processing_width = round(width * processing_height / height)
-    elif height >= HD_HEIGHT:
-        processing_height = HD_HEIGHT
+    target_height = FULL_HD_HEIGHT if resolution == "1080p" else HD_HEIGHT
+    if height >= target_height:
+        processing_height = target_height
         processing_width = round(width * processing_height / height)
     else:
         processing_width, processing_height = width, height
@@ -192,17 +196,14 @@ def camera_format_score(
     height: int,
     minimum_frame_rate: float,
     maximum_frame_rate: float,
+    resolution: InputResolution = DEFAULT_INPUT_RESOLUTION,
 ) -> tuple[int, int, int, int, float, float]:
-    """Rank real-30-fps formats by 1080p, then 720p, source fidelity."""
-    if height >= FULL_HD_HEIGHT:
-        quality_tier = 0
+    """Rank formats by the requested resolution tier, then frame rate."""
+    if resolution == "1080p":
         target_width, target_height = FULL_HD_WIDTH, FULL_HD_HEIGHT
-    elif height >= HD_HEIGHT:
-        quality_tier = 1
-        target_width, target_height = HD_WIDTH, HD_HEIGHT
     else:
-        quality_tier = 2
         target_width, target_height = HD_WIDTH, HD_HEIGHT
+    height_distance = abs(height - target_height)
     resolution_distance = abs(width - target_width) + abs(height - target_height)
     below_rate_target = int(maximum_frame_rate < MINIMUM_TARGET_FRAME_RATE)
     misses_exact_rate = int(
@@ -217,10 +218,10 @@ def camera_format_score(
         )
     )
     return (
+        height_distance,
+        resolution_distance,
         below_rate_target,
         misses_exact_rate,
-        quality_tier,
-        resolution_distance,
         frame_rate_distance,
         abs(maximum_frame_rate - TARGET_FRAME_RATE),
     )
@@ -261,8 +262,12 @@ class QtCameraCapture(QObject):
         """Return the selected native and processing dimensions."""
         return self._profile
 
-    def start(self, device_id: str) -> bool:
-        """Open one current Qt device identifier at the best real-time quality tier."""
+    def start(
+        self,
+        device_id: str,
+        resolution: InputResolution = DEFAULT_INPUT_RESOLUTION,
+    ) -> bool:
+        """Open one current Qt device identifier at the selected quality tier."""
         self.stop()
         self._rate_limiter.reset()
         device = next(
@@ -286,15 +291,17 @@ class QtCameraCapture(QObject):
                     item.resolution().height(),
                     item.minFrameRate(),
                     item.maxFrameRate(),
+                    resolution,
                 ),
             )
             camera.setCameraFormat(selected_format)
-            resolution = selected_format.resolution()
+            selected_resolution = selected_format.resolution()
             self._profile = capture_profile(
-                resolution.width(),
-                resolution.height(),
+                selected_resolution.width(),
+                selected_resolution.height(),
                 selected_format.minFrameRate(),
                 selected_format.maxFrameRate(),
+                resolution,
             )
             self.profile_changed.emit(self._profile)
         else:
