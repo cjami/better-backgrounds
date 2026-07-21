@@ -37,6 +37,7 @@ from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.desktop.webview import navigation_is_allowed
 from better_backgrounds.jobs.build_session import IdleBuild
 from better_backgrounds.jobs.events import ResultEvent
+from better_backgrounds.reconstruction import SplatSelection
 from better_backgrounds.reconstruction.sharp import SceneImageSelection
 from better_backgrounds.scene import (
     Quaternion,
@@ -230,6 +231,28 @@ def test_completed_build_opens_the_show_tab(tmp_path: Path) -> None:
     assert window.active_tab == SHOW_TAB
     assert window.selected_room == "My Room"
     assert ready == [True]
+    window.close()
+
+
+def test_completed_splat_import_opens_the_adjust_tab(tmp_path: Path) -> None:
+    """Prepare an imported scene's first view before exposing it in Show."""
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        scene_cache_root=tmp_path / "cache",
+        data_root=tmp_path / "data",
+    )
+    window.select_tab(BUILD_TAB)
+    controller = window._build_controller  # noqa: SLF001
+    controller.session.select_source(SplatSelection("studio.sog", Path("studio.sog")))
+    controller.session.start("job-adjust")
+
+    controller._handle_job_event(  # noqa: SLF001
+        ResultEvent(job_id="job-adjust", scene_id="scene-adjust", message="done"),
+    )
+
+    assert window.active_tab == ADJUST_TAB
+    assert window.selected_room == "Studio"
     window.close()
 
 

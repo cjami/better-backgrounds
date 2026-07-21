@@ -76,8 +76,8 @@ class SplatImportWorker:
                     code="splat_import_failed",
                     message=str(error)[:500] or "The Gaussian scene could not be imported.",
                     recovery_action=(
-                        "Choose a compatible binary Gaussian PLY or packaged Streamed SOG "
-                        "archive and retry."
+                        "Choose a compatible Gaussian PLY, standalone SOG bundle, or packaged "
+                        "Streamed SOG archive and retry."
                     ),
                 ),
             )

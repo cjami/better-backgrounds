@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
-SPLAT_EXTENSIONS = frozenset({".ply", ".ssog", ".zip"})
+SPLAT_EXTENSIONS = frozenset({".ply", ".sog", ".ssog", ".zip"})
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | SPLAT_EXTENSIONS
 
 
@@ -127,7 +127,7 @@ class BuildPage(QWidget):
         )
         drop_layout.addWidget(
             _label(
-                "JPG  ·  JPEG  ·  PNG  ·  WEBP  ·  PLY  ·  SSOG  ·  ZIP",
+                "JPG  ·  JPEG  ·  PNG  ·  WEBP  ·  PLY  ·  SOG  ·  SSOG  ·  ZIP",
                 object_name="feedMeta",
             ),
             alignment=Qt.AlignmentFlag.AlignHCenter,

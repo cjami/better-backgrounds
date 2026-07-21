@@ -145,15 +145,24 @@ def test_build_controller_completion_retry_cancellation_and_checkpoint_continuat
     """Keep terminal and continuation transitions owned by the controller."""
     controller, page = create_controller()
     selection = SceneImageSelection("room.jpg", None)
-    completed: list[tuple[str, str]] = []
-    controller.scene_completed.connect(lambda scene_id, name: completed.append((scene_id, name)))
+    completed: list[tuple[str, str, str]] = []
+    controller.scene_completed.connect(
+        lambda scene_id, name, source_kind: completed.append((scene_id, name, source_kind)),
+    )
     controller.session.select_image(selection)
     controller.session.start("job-complete")
     controller._handle_job_event(  # noqa: SLF001
         ResultEvent(job_id="job-complete", scene_id="scene-1", message="done"),
     )
-    assert completed == [("scene-1", "Room")]
+    assert completed == [("scene-1", "Room", "image")]
     assert page.completed == "Room"
+
+    controller.session.select_source(SplatSelection("studio.sog", Path("studio.sog")))
+    controller.session.start("job-splat-complete")
+    controller._handle_job_event(  # noqa: SLF001
+        ResultEvent(job_id="job-splat-complete", scene_id="scene-2", message="done"),
+    )
+    assert completed[-1] == ("scene-2", "Studio", "splat")
 
     controller.session.select_image(selection)
     controller.session.start("job-retry")
@@ -204,11 +213,16 @@ def test_dispatch_path_routes_by_extension(monkeypatch: pytest.MonkeyPatch) -> N
 
     controller._dispatch_path(Path("lounge.JPG"))  # noqa: SLF001
     controller._dispatch_path(Path("scene.ply"))  # noqa: SLF001
+    controller._dispatch_path(Path("gallery.sog"))  # noqa: SLF001
     controller._dispatch_path(Path("museum.ssog"))  # noqa: SLF001
 
     assert [selection.source_kind for selection in images] == ["upload"]
     assert images[0].source_path == Path("lounge.JPG")
-    assert [selection.display_name for selection in splats] == ["scene.ply", "museum.ssog"]
+    assert [selection.display_name for selection in splats] == [
+        "scene.ply",
+        "gallery.sog",
+        "museum.ssog",
+    ]
 
 
 def test_captured_room_selects_camera_source(monkeypatch: pytest.MonkeyPatch) -> None:

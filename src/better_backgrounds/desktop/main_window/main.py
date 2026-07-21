@@ -495,13 +495,13 @@ class MainWindow(QMainWindow):
         box.exec()
         return box.clickedButton() is remove
 
-    @Slot(str, str)
-    def _scene_completed(self, scene_id: str, room_name: str) -> None:
+    @Slot(str, str, str)
+    def _scene_completed(self, scene_id: str, room_name: str, source_kind: str) -> None:
         self._library.viewpoints.delete(scene_id)
         self._adjust_page.discard_viewpoint(scene_id)
         self._show_page.set_rooms(self._rooms, room_name)
         self.select_room(room_name)
-        self.select_tab(SHOW_TAB)
+        self.select_tab(ADJUST_TAB if source_kind == "splat" else SHOW_TAB)
         self.room_ready.emit()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802

@@ -53,6 +53,20 @@ class StreamedSogResource:
 
 
 @dataclass(frozen=True, slots=True)
+class SogBundleInspection:
+    """Describe a safe, renderer-compatible standalone SOG bundle."""
+
+    gaussian_count: int
+    file_size: int
+    bounds_minimum: tuple[float, float, float]
+    bounds_maximum: tuple[float, float, float]
+    center_of_mass: tuple[float, float, float]
+    navigation_bounds_minimum: tuple[float, float, float]
+    navigation_bounds_maximum: tuple[float, float, float]
+    resource_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class StreamedSogInspection:
     """Describe a safe, renderer-compatible Streamed SOG archive."""
 
@@ -513,6 +527,61 @@ def _validate_sog(  # noqa: C901, PLR0912, PLR0915
 
 def _root_relative(archive_name: str, root: PurePosixPath) -> str:
     return PurePosixPath(archive_name).relative_to(root).as_posix() if root.parts else archive_name
+
+
+def inspect_sog_bundle(
+    path: Path,
+    *,
+    validate_payloads: bool = True,
+) -> SogBundleInspection:
+    """Validate one standalone SOG ZIP bundle without modifying it."""
+    if path.suffix.lower() != ".sog":
+        msg = "Choose a standalone SOG .sog bundle"
+        raise ValueError(msg)
+    if not path.is_file():
+        msg = "The selected SOG bundle does not exist"
+        raise ValueError(msg)
+    try:
+        with ZipFile(path) as archive:
+            if archive.comment:
+                msg = "Standalone SOG bundles cannot contain a ZIP comment"
+                raise ValueError(msg)
+            members = _archive_members(archive)
+            count, resources, minimum, maximum, samples = _validate_sog(
+                archive,
+                members,
+                "meta.json",
+                validate_payloads=validate_payloads,
+                sample_positions=True,
+            )
+            if count > MAX_STREAMED_GAUSSIANS:
+                msg = "SOG bundle exceeds the hundred-million-Gaussian limit"
+                raise ValueError(msg)
+            navigation_minimum = minimum
+            navigation_maximum = maximum
+            robust_bounds = _robust_sample_bounds(list(samples))
+            if robust_bounds is not None:
+                minimum, maximum = robust_bounds
+            center_of_mass = cast(
+                "tuple[float, float, float]",
+                tuple(
+                    sum(sample[axis] for sample in samples) / len(samples)
+                    for axis in range(VECTOR_DIMENSIONS)
+                ),
+            )
+    except BadZipFile as error:
+        msg = "The selected file is not a valid standalone SOG ZIP bundle"
+        raise ValueError(msg) from error
+    return SogBundleInspection(
+        gaussian_count=count,
+        file_size=path.stat().st_size,
+        bounds_minimum=minimum,
+        bounds_maximum=maximum,
+        center_of_mass=center_of_mass,
+        navigation_bounds_minimum=navigation_minimum,
+        navigation_bounds_maximum=navigation_maximum,
+        resource_count=len(resources),
+    )
 
 
 def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915

@@ -16,8 +16,10 @@ from better_backgrounds.jobs.events import JobEvent, ProgressEvent
 from better_backgrounds.reconstruction.images import sha256_file
 from better_backgrounds.reconstruction.sharp.ply import MAX_GAUSSIANS, validate_sharp_ply
 from better_backgrounds.reconstruction.ssog import (
+    SogBundleInspection,
     StreamedSogInspection,
     extract_streamed_sog,
+    inspect_sog_bundle,
     inspect_streamed_sog,
 )
 from better_backgrounds.scene import (
@@ -121,10 +123,11 @@ class SplatDiagnostics:
 
     gaussian_count: int
     file_size: int
-    layout: Literal["standard", "compressed", "sharp", "streamed-sog"]
+    layout: Literal["standard", "compressed", "sharp", "sog", "streamed-sog"]
     framing: Literal[
         "Embedded SHARP camera",
         "Automatic COLMAP framing",
+        "Automatic SOG framing",
         "Automatic streamed bounds",
     ]
     bounds_minimum: tuple[float, float, float]
@@ -139,7 +142,11 @@ class SplatDiagnostics:
     @property
     def encoding(self) -> str:
         """Return a concise user-facing encoding name."""
-        return "Streamed SOG" if self.layout == "streamed-sog" else "Binary little-endian"
+        if self.layout == "sog":
+            return "SOG bundle"
+        if self.layout == "streamed-sog":
+            return "Streamed SOG"
+        return "Binary little-endian"
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,13 +513,34 @@ def _streamed_diagnostics(inspection: StreamedSogInspection) -> SplatDiagnostics
     )
 
 
-def inspect_gaussian_scene(path: Path, *, validate_values: bool = True) -> SplatDiagnostics:
-    """Validate a supported PLY or packaged Streamed SOG scene."""
-    if path.suffix.lower() == ".ply":
-        return inspect_gaussian_ply(path, validate_values=validate_values)
-    return _streamed_diagnostics(
-        inspect_streamed_sog(path, validate_payloads=validate_values),
+def _sog_diagnostics(inspection: SogBundleInspection) -> SplatDiagnostics:
+    return SplatDiagnostics(
+        gaussian_count=inspection.gaussian_count,
+        file_size=inspection.file_size,
+        layout="sog",
+        framing="Automatic SOG framing",
+        bounds_minimum=inspection.bounds_minimum,
+        bounds_maximum=inspection.bounds_maximum,
+        center_of_mass=inspection.center_of_mass,
+        resource_count=inspection.resource_count,
+        navigation_bounds_minimum=inspection.navigation_bounds_minimum,
+        navigation_bounds_maximum=inspection.navigation_bounds_maximum,
     )
+
+
+def inspect_gaussian_scene(path: Path, *, validate_values: bool = True) -> SplatDiagnostics:
+    """Validate a supported PLY, SOG bundle, or packaged Streamed SOG scene."""
+    suffix = path.suffix.lower()
+    if suffix == ".ply":
+        return inspect_gaussian_ply(path, validate_values=validate_values)
+    if suffix == ".sog":
+        return _sog_diagnostics(inspect_sog_bundle(path, validate_payloads=validate_values))
+    if suffix in {".ssog", ".zip"}:
+        return _streamed_diagnostics(
+            inspect_streamed_sog(path, validate_payloads=validate_values),
+        )
+    msg = "Choose a Gaussian PLY, standalone SOG, or Streamed SOG archive"
+    raise ValueError(msg)
 
 
 def _generic_viewpoint(
@@ -653,6 +681,55 @@ def _streamed_viewpoint(diagnostics: SplatDiagnostics) -> Viewpoint:
     )
 
 
+def _sog_viewpoint(diagnostics: SplatDiagnostics) -> Viewpoint:
+    source_minimum = diagnostics.navigation_bounds_minimum or diagnostics.bounds_minimum
+    source_maximum = diagnostics.navigation_bounds_maximum or diagnostics.bounds_maximum
+    minimum = (-source_maximum[0], -source_maximum[1], source_minimum[2])
+    maximum = (-source_minimum[0], -source_minimum[1], source_maximum[2])
+    spans = tuple(high - low for low, high in zip(minimum, maximum, strict=True))
+    if max(spans) <= MIN_SCENE_EXTENT or any(not math.isfinite(span) for span in spans):
+        msg = "SOG scene does not contain a usable spatial extent"
+        raise ValueError(msg)
+    source_center = diagnostics.center_of_mass
+    transformed_center = (-source_center[0], -source_center[1], source_center[2])
+    position = Vector3(x=0.0, y=1.1, z=0.0)
+    translation = Vector3(
+        x=position.x - transformed_center[0],
+        y=position.y - transformed_center[1],
+        z=position.z - transformed_center[2],
+    )
+    offsets = (translation.x, translation.y, translation.z)
+    world_minimum = tuple(value + offset for value, offset in zip(minimum, offsets, strict=True))
+    world_maximum = tuple(value + offset for value, offset in zip(maximum, offsets, strict=True))
+    padding = tuple(max(0.5, span * STREAMED_NAVIGATION_PADDING) for span in spans)
+    diagonal = math.hypot(*spans)
+    return Viewpoint(
+        position=position,
+        orbit_target=Vector3(x=position.x, y=position.y, z=position.z + 1.0),
+        field_of_view=DEFAULT_FIELD_OF_VIEW,
+        horizon=0.0,
+        near_clip=0.03,
+        far_clip=min(1_000.0, max(40.0, diagonal * 8.0)),
+        aspect_ratio=DEFAULT_ASPECT_RATIO,
+        scene_transform=SceneTransform(
+            translation=translation,
+            orientation=Quaternion(z=1.0, w=0.0),
+        ),
+        safe_camera_region=CameraBounds(
+            minimum=Vector3(
+                x=world_minimum[0] - padding[0],
+                y=world_minimum[1] - padding[1],
+                z=world_minimum[2] - padding[2],
+            ),
+            maximum=Vector3(
+                x=world_maximum[0] + padding[0],
+                y=world_maximum[1] + padding[1],
+                z=world_maximum[2] + padding[2],
+            ),
+        ),
+    )
+
+
 def _sharp_viewpoint(path: Path) -> Viewpoint:
     metadata = validate_sharp_ply(path)
     width, height = metadata.image_size
@@ -688,8 +765,8 @@ class SplatSceneImporter:
     ) -> SceneReference:
         """Copy or extract, validate, frame, and publish one managed scene."""
         source = request.selection.source_path
-        if source.suffix.lower() not in {".ply", ".ssog", ".zip"}:
-            msg = "Choose a Gaussian PLY or Streamed SOG archive"
+        if source.suffix.lower() not in {".ply", ".sog", ".ssog", ".zip"}:
+            msg = "Choose a Gaussian PLY, standalone SOG, or Streamed SOG archive"
             raise ValueError(msg)
         staging = request.config.output_root / f".splat-{request.job_id}-{uuid4().hex}.part"
         try:
@@ -704,6 +781,8 @@ class SplatSceneImporter:
             )
             if source.suffix.lower() == ".ply":
                 reference = self._import_ply(request.selection, source, staging, is_cancelled)
+            elif source.suffix.lower() == ".sog":
+                reference = self._import_sog(request.selection, source, staging, is_cancelled)
             else:
                 reference = self._import_streamed_sog(
                     request.selection,
@@ -784,6 +863,33 @@ class SplatSceneImporter:
             ),
         )
 
+    def _import_sog(
+        self,
+        selection: SplatSelection,
+        source: Path,
+        staging: Path,
+        is_cancelled: Callable[[], bool],
+    ) -> SceneReference:
+        scene_path = staging / "scene.sog"
+        self._copy(source, scene_path, is_cancelled)
+        self._cancel_if_requested(is_cancelled)
+        diagnostics = _sog_diagnostics(inspect_sog_bundle(scene_path))
+        source_sha256 = sha256_file(scene_path)
+        return self._reference(
+            selection,
+            source_sha256,
+            _sog_viewpoint(diagnostics),
+            format_name="sog",
+            entrypoint="scene.sog",
+            resources=(
+                AssetResource(
+                    path="scene.sog",
+                    size=scene_path.stat().st_size,
+                    sha256=source_sha256,
+                ),
+            ),
+        )
+
     @staticmethod
     def _copy(source: Path, destination: Path, is_cancelled: Callable[[], bool]) -> None:
         with source.open("rb") as input_file, destination.open("xb") as output_file:
@@ -798,7 +904,7 @@ class SplatSceneImporter:
         source_sha256: str,
         viewpoint: Viewpoint,
         *,
-        format_name: Literal["ply", "ssog"],
+        format_name: Literal["ply", "sog", "ssog"],
         entrypoint: str,
         resources: tuple[AssetResource, ...],
     ) -> SceneReference:

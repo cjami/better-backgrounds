@@ -155,6 +155,31 @@ def _sog_metadata(count: int, *, position_limit: float = 1.0) -> dict[str, objec
     }
 
 
+def write_sog_bundle(
+    path: Path,
+    *,
+    omit: str | None = None,
+    extra: str | None = None,
+) -> None:
+    """Write a small standalone SOG bundle fixture."""
+    image = _webp()
+    members = {
+        "meta.json": json.dumps(_sog_metadata(4)).encode(),
+        "means_l.webp": image,
+        "means_u.webp": image,
+        "scales.webp": image,
+        "quats.webp": image,
+        "sh0.webp": image,
+    }
+    if omit is not None:
+        members.pop(omit)
+    if extra is not None:
+        members[extra] = b"License: CC Attribution\n" if extra == "license.txt" else image
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+
+
 def write_streamed_sog(  # noqa: C901, PLR0912, PLR0913
     path: Path,
     *,
@@ -282,6 +307,47 @@ def test_inspector_rejects_unsafe_or_unsupported_ply_data(tmp_path: Path) -> Non
     )
     with pytest.raises(ValueError, match="Gaussian count"):
         inspect_gaussian_ply(oversized)
+
+
+@pytest.mark.parametrize("extra", ["license.txt", "preview.webp"])
+def test_inspector_accepts_standalone_sog_bundle(tmp_path: Path, extra: str) -> None:
+    """Allow supplemental bundle files that PlayCanvas safely ignores."""
+    path = tmp_path / "room.sog"
+    write_sog_bundle(path, extra=extra)
+
+    diagnostics = inspect_gaussian_scene(path)
+
+    assert diagnostics.gaussian_count == 4
+    assert diagnostics.layout == "sog"
+    assert diagnostics.encoding == "SOG bundle"
+    assert diagnostics.framing == "Automatic SOG framing"
+    assert diagnostics.resource_count == 6
+    assert diagnostics.bounds_minimum == (-1.0, -1.0, -1.0)
+    assert diagnostics.bounds_maximum == (1.0, 1.0, 1.0)
+    assert diagnostics.navigation_bounds_minimum == (-1.0, -1.0, -1.0)
+    assert diagnostics.navigation_bounds_maximum == (1.0, 1.0, 1.0)
+    assert all(abs(value) < 0.01 for value in diagnostics.center_of_mass)
+
+
+@pytest.mark.parametrize(
+    ("omit", "extra", "message"),
+    [
+        ("means_l.webp", None, "missing image resource"),
+        (None, "../escaped.webp", "safe relative path"),
+    ],
+)
+def test_inspector_rejects_unsafe_or_incomplete_sog_bundle(
+    tmp_path: Path,
+    omit: str | None,
+    extra: str | None,
+    message: str,
+) -> None:
+    """Reject bundles that the renderer would inflate without a valid use."""
+    path = tmp_path / "broken.sog"
+    write_sog_bundle(path, omit=omit, extra=extra)
+
+    with pytest.raises(ValueError, match=message):
+        inspect_gaussian_scene(path)
 
 
 def test_inspector_accepts_packaged_streamed_sog_with_nested_root(tmp_path: Path) -> None:
@@ -444,6 +510,43 @@ def test_importer_adopts_streamed_sog_resources_without_touching_source(
     assert len(first.resources) == 19
     assert (scene_root / first.asset_id / "0_0" / "meta.json").is_file()
     assert (scene_root / first.asset_id / "env" / "meta.json").is_file()
+    assert source.read_bytes() == original
+    assert not list(scene_root.glob(".splat-*.part"))
+
+
+def test_importer_adopts_standalone_sog_bundle_without_touching_source(
+    tmp_path: Path,
+) -> None:
+    """Copy a validated SOG bundle intact for the renderer's bundle parser."""
+    source = tmp_path / "gallery.sog"
+    write_sog_bundle(source)
+    original = source.read_bytes()
+    scene_root = tmp_path / "scenes"
+    request = SplatImportRequest(
+        job_id="sog-import",
+        selection=SplatSelection(source.name, source),
+        config=SplatImportConfig(scene_root),
+    )
+
+    first = SplatSceneImporter().import_scene(request, lambda _event: None, lambda: False)
+    second = SplatSceneImporter().import_scene(request, lambda _event: None, lambda: False)
+
+    assert first.asset_id == second.asset_id
+    assert first.format == "sog"
+    assert first.entrypoint == "scene.sog"
+    assert len(first.resources) == 1
+    assert first.resources[0].path == "scene.sog"
+    assert first.default_viewpoint.scene_transform.orientation.z == 1
+    assert first.default_viewpoint.scene_transform.scale == 1
+    translation = first.default_viewpoint.scene_transform.translation
+    safe = first.default_viewpoint.safe_camera_region
+    assert safe.minimum.x == pytest.approx(translation.x - 1.5)
+    assert safe.minimum.y == pytest.approx(translation.y - 1.5)
+    assert safe.minimum.z == pytest.approx(translation.z - 1.5)
+    assert safe.maximum.x == pytest.approx(translation.x + 1.5)
+    assert safe.maximum.y == pytest.approx(translation.y + 1.5)
+    assert safe.maximum.z == pytest.approx(translation.z + 1.5)
+    assert (scene_root / first.asset_id / "scene.sog").read_bytes() == original
     assert source.read_bytes() == original
     assert not list(scene_root.glob(".splat-*.part"))
 

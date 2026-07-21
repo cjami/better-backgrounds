@@ -5,7 +5,7 @@ Everything runs on your machine: no account, no cloud reconstruction, no telemet
 and no webcam upload path.
 
 Start with a room photo, capture the empty room with your webcam, or import an existing
-Gaussian-splat scene as a `.ply`, `.ssog`, or compatible `.zip`.
+Gaussian-splat scene as a `.ply`, `.sog`, `.ssog`, or compatible `.zip`.
 
 ## Download
 
@@ -41,8 +41,8 @@ happens once; after that the app runs offline.
 ## Using it
 
 1. **Build** — choose or drop a JPEG, PNG, or WebP room photo; capture the empty room
-   with your webcam; or import an existing Gaussian `.ply` or Streamed SOG
-   `.ssog`/`.zip` scene. Photos and webcam captures are reconstructed into navigable
+   with your webcam; or import an existing Gaussian `.ply`, standalone `.sog`, or
+   Streamed SOG `.ssog`/`.zip` scene. Photos and webcam captures are reconstructed into navigable
    Gaussian scenes, while existing 3D scenes are imported directly.
 2. **Adjust** — drag to look around, `W`/`A`/`S`/`D` to fly, and set depth-of-field.
 3. **Show** — your matted webcam subject is composited into the room, with PIH matching

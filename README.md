@@ -3,7 +3,7 @@
 Better Backgrounds is an exploration into latest and greatest techniques to improve composited webcam footage in any way possible. It takes things even further with traversable Gaussian Splats and physically simulated Depth of Field.
 
 Create a room from a JPEG, PNG, or WebP photo, capture an empty room with your
-webcam, or import an existing Gaussian scene as a `.ply`, `.ssog`, or compatible
+webcam, or import an existing Gaussian scene as a `.ply`, `.sog`, `.ssog`, or compatible
 `.zip`. Reconstruction, rendering, camera capture, matting, and compositing all
 run locally. There are no accounts, cloud reconstruction, telemetry, or webcam
 uploads.
@@ -118,16 +118,17 @@ models and sample are available, the core workflow requires no network access.
 
 ## Importing 3D rooms
 
-The app accepts binary little-endian Gaussian `.ply` files and Streamed SOG
-`.ssog` or `.zip` packages. Standard 3DGS, PlayCanvas-compatible compressed
-PLY, and supported Streamed SOG layouts are validated and normalized before
-being copied into the local scene cache. The selected source file is left
-untouched.
+The app accepts binary little-endian Gaussian `.ply` files, standalone SOG
+`.sog` bundles, and Streamed SOG `.ssog` or `.zip` packages. Standard 3DGS,
+PlayCanvas-compatible compressed PLY, and supported SOG layouts are validated
+and normalized before being copied into the local scene cache. The selected
+source file is left untouched.
 
 Rooms can also be imported from the command line:
 
 ```text
 uv run better-backgrounds splat-import room.ply
+uv run better-backgrounds splat-import gallery.sog
 uv run better-backgrounds splat-import environment.ssog
 uv run better-backgrounds splat-import supersplat-export.zip
 ```

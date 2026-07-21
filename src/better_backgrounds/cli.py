@@ -242,9 +242,9 @@ def splat_import_command(
         typer.Option(dir_okay=False, resolve_path=True),
     ] = None,
 ) -> None:
-    """Import one local Gaussian PLY or Streamed SOG through the worker boundary."""
-    if source.suffix.lower() not in {".ply", ".ssog", ".zip"}:
-        msg = "Choose a Gaussian PLY or Streamed SOG .ssog/.zip archive."
+    """Import one local Gaussian PLY, SOG, or Streamed SOG through the worker boundary."""
+    if source.suffix.lower() not in {".ply", ".sog", ".ssog", ".zip"}:
+        msg = "Choose a Gaussian .ply, standalone .sog, or Streamed SOG .ssog/.zip archive."
         raise typer.BadParameter(msg, param_hint="source")
     cache_root, data_root = _application_roots()
     actual_job_id = job_id or uuid4().hex

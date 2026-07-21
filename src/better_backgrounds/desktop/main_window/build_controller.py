@@ -59,7 +59,7 @@ class RunnerSignals(QObject):
 class BuildController(QObject):
     """Own reconstruction state, checkpoint continuation, and worker lifetime."""
 
-    scene_completed = Signal(str, str)
+    scene_completed = Signal(str, str, str)
 
     def __init__(
         self,
@@ -148,7 +148,7 @@ class BuildController(QObject):
             self._parent,
             "Choose a room photo or Gaussian splat",
             "",
-            "Room sources (*.jpg *.jpeg *.png *.webp *.ply *.ssog *.zip);;All files (*)",
+            "Room sources (*.jpg *.jpeg *.png *.webp *.ply *.sog *.ssog *.zip);;All files (*)",
         )
         if path:
             self._dispatch_path(Path(path))
@@ -358,7 +358,8 @@ class BuildController(QObject):
                 self._room_name_for(state.selection),
             )
             self._page.set_completed(room_name)
-            self.scene_completed.emit(room_id, room_name)
+            source_kind = "splat" if isinstance(state.selection, SplatSelection) else "image"
+            self.scene_completed.emit(room_id, room_name, source_kind)
 
     def _finish_checkpoint_preparation(self, event: object) -> bool:
         if not self._preparing_checkpoint or not isinstance(event, ResultEvent):

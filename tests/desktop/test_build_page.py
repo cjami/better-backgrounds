@@ -50,7 +50,7 @@ def test_build_page_separates_file_upload_and_camera_capture() -> None:
     assert not drop_card.isAncestorOf(camera_action)
     formats = drop_card.findChild(QLabel, "feedMeta")
     assert formats is not None
-    assert formats.text() == "JPG  ·  JPEG  ·  PNG  ·  WEBP  ·  PLY  ·  SSOG  ·  ZIP"
+    assert formats.text() == "JPG  ·  JPEG  ·  PNG  ·  WEBP  ·  PLY  ·  SOG  ·  SSOG  ·  ZIP"
     assert page.acceptDrops()
     page.close()
 
@@ -60,9 +60,11 @@ def test_build_page_accepts_supported_drops_and_rejects_others() -> None:
     QApplication.instance() or QApplication([])
     photo = "C:/rooms/lounge.JPG"
     splat = "C:/rooms/scene.ply"
+    sog = "C:/rooms/gallery.sog"
     other = "C:/rooms/notes.txt"
     assert _first_supported_path(_DragStub(_mime_for(photo))) == photo
     assert _first_supported_path(_DragStub(_mime_for(splat))) == splat
+    assert _first_supported_path(_DragStub(_mime_for(sog))) == sog
     assert _first_supported_path(_DragStub(_mime_for(other))) is None
     assert _first_supported_path(_DragStub(QMimeData())) is None
     mixed = _first_supported_path(_DragStub(_mime_for(other, "C:/rooms/b.webp")))
