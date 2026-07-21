@@ -12,6 +12,7 @@ from better_backgrounds.desktop.live_preview.surface import NativeCompositeSurfa
 from better_backgrounds.matting.seed import PersonCandidate
 
 if TYPE_CHECKING:
+    from better_backgrounds.matting.contracts import MattingConfig
     from better_backgrounds.matting.engine import ProcessMattingEngine
 
 
@@ -20,19 +21,21 @@ class RecordingEngine:
 
     def __init__(self) -> None:
         """Create empty lifecycle recordings."""
-        self.preparations = 0
+        self.preparations: list[MattingConfig] = []
         self.initializations: list[tuple[np.ndarray, np.ndarray]] = []
+        self.initialization_configs: list[MattingConfig] = []
         self.resets = 0
         self.closes = 0
         self.dropped_frames = 0
 
-    def prepare(self, _config) -> None:  # noqa: ANN001
+    def prepare(self, config: MattingConfig) -> None:
         """Record model preparation."""
-        self.preparations += 1
+        self.preparations.append(config)
 
-    def initialize(self, frame, mask, _config, _pipeline) -> None:  # noqa: ANN001
+    def initialize(self, frame, mask, config, _pipeline) -> None:  # noqa: ANN001
         """Record one selected frame and mask."""
         self.initializations.append((frame, mask))
+        self.initialization_configs.append(config)
 
     def reset(self) -> None:
         """Record tracking reset without discarding the fake model."""
@@ -62,6 +65,23 @@ def candidate(candidate_id: int, left: int) -> PersonCandidate:
     return PersonCandidate(candidate_id, mask, (left, 3, 5, 14), 0.175)
 
 
+def test_live_preview_forces_highest_matting_quality() -> None:
+    """Never trade MatAnyone inference resolution for startup calibration speed."""
+    application()
+    engine = RecordingEngine()
+    preview = NativeLivePreview(
+        background_factory=QWidget,
+        engine_factory=lambda: cast("ProcessMattingEngine", engine),
+    )
+
+    preview.prepare_matting()
+
+    assert len(engine.preparations) == 1
+    assert engine.preparations[0].internal_size == 540
+    assert not engine.preparations[0].calibrate
+    preview.close()
+
+
 def test_single_person_initializes_without_confirmation() -> None:
     """Make the normal one-person webcam path zero-click."""
     application()
@@ -76,6 +96,8 @@ def test_single_person_initializes_without_confirmation() -> None:
     preview._accept_seed(frame, (candidate(1, 4),))  # noqa: SLF001
 
     assert len(engine.initializations) == 1
+    assert engine.initialization_configs[0].internal_size == 540
+    assert not engine.initialization_configs[0].calibrate
     assert preview._state == "initializing"  # noqa: SLF001
     preview.close()
 

@@ -59,9 +59,7 @@ ALPHA_MIDPOINT = 128
 MINIMUM_MATTE_OCCUPANCY = 0.01
 MAXIMUM_MATTE_OCCUPANCY = 0.95
 LOST_MATTE_LIMIT = 15
-TARGET_MATTE_FPS = 30.0
-TARGET_FRAME_BUDGET_MS = 1_000.0 / TARGET_MATTE_FPS
-MATTE_INFERENCE_BUDGET_MS = TARGET_FRAME_BUDGET_MS
+HIGHEST_QUALITY_INTERNAL_SIZE = 540
 BACKGROUND_CAPTURE_DELAY_MS = 300
 BACKGROUND_CAPTURE_RETRY_MS = 50
 BACKGROUND_CAPTURE_RETRY_LIMIT = 20
@@ -153,7 +151,7 @@ class NativeLivePreview(QWidget):
         self._pipeline_revision = 0
         self._invalid_matte_count = 0
         self._active_device = "cpu"
-        self._internal_size = 360
+        self._internal_size = HIGHEST_QUALITY_INTERNAL_SIZE
         self._harmonization_requested = False
         self._harmonization_settings = HarmonizationSettings()
         self._harmonizer_prepare_inflight = False
@@ -188,10 +186,9 @@ class NativeLivePreview(QWidget):
 
     def _matting_config(self) -> MattingConfig:
         return MattingConfig(
-            internal_size=540,
+            internal_size=HIGHEST_QUALITY_INTERNAL_SIZE,
             warmup_iterations=10,
-            calibrate=True,
-            latency_budget_ms=MATTE_INFERENCE_BUDGET_MS,
+            calibrate=False,
         )
 
     def prepare_matting(self) -> None:
