@@ -402,14 +402,12 @@ def test_adjust_debounces_automatic_saving_and_exports_the_latest_frame() -> Non
     page.snapshot_generated.connect(lambda *values: generated.append(values))
     page.set_room(scene.asset_id, scene, installed=True)
     renderer.scene_progressed.emit(100, 100)
-    slider = next(
-        control
-        for control in page.findChildren(QSlider)
-        if control.accessibleName() == "Field of view"
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"field_of_view": 50.0}),
     )
-
-    slider.setValue(50)
-    slider.setValue(55)
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"field_of_view": 55.0}),
+    )
 
     assert page._autosave_timer.isActive()  # noqa: SLF001
     assert page._autosave_timer.interval() == 500  # noqa: SLF001
@@ -453,11 +451,9 @@ def test_adjust_queues_loading_changes_and_flushes_before_releasing_renderer() -
     saved: list[Viewpoint] = []
     page.viewpoint_saved.connect(lambda _room_id, viewpoint: saved.append(viewpoint))
     page.set_room(scene.asset_id, scene, installed=True)
-    slider = next(
-        control for control in page.findChildren(QSlider) if control.accessibleName() == "Horizon"
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"horizon": 2.0}),
     )
-
-    slider.setValue(20)
     assert not page._autosave_timer.isActive()  # noqa: SLF001
     assert saved == []
 
@@ -471,8 +467,8 @@ def test_adjust_queues_loading_changes_and_flushes_before_releasing_renderer() -
     page.close()
 
 
-def test_adjust_routes_every_viewpoint_interaction_through_autosave() -> None:
-    """Treat renderer navigation and every Python-owned control as durable edits."""
+def test_adjust_keeps_navigation_simple_and_routes_edits_through_autosave() -> None:
+    """Keep only direct navigation, reset, and presentation controls in Adjust."""
     application()
     renderer = SnapshotTrackingRenderer()
     page = AdjustPage(lambda: renderer)
@@ -481,11 +477,7 @@ def test_adjust_routes_every_viewpoint_interaction_through_autosave() -> None:
     renderer.scene_progressed.emit(100, 100)
     controls = {slider.accessibleName(): slider for slider in page.findChildren(QSlider)}
     buttons = {button.text(): button for button in page.findChildren(QPushButton)}
-    aspect = next(
-        combo
-        for combo in page.findChildren(QComboBox)
-        if combo.accessibleName() == "Output aspect ratio"
-    )
+    labels = {label.text() for label in page.findChildren(QLabel)}
 
     def assert_scheduled() -> None:
         assert scene.asset_id in page._dirty_rooms  # noqa: SLF001
@@ -493,11 +485,29 @@ def test_adjust_routes_every_viewpoint_interaction_through_autosave() -> None:
         page._autosave_timer.stop()  # noqa: SLF001
         page._dirty_rooms.clear()  # noqa: SLF001
 
+    assert "Viewpoint" not in labels
+    assert not {"Eye level", "Low", "High", "Wide"} & buttons.keys()
+    assert set(controls) == {
+        "Field of view",
+        "Horizon",
+        "Output crop",
+        "Background blur",
+    }
+    aspect = next(
+        combo
+        for combo in page.findChildren(QComboBox)
+        if combo.accessibleName() == "Output aspect ratio"
+    )
+
+    controls["Field of view"].setValue(50)
+    assert_scheduled()
+    controls["Horizon"].setValue(20)
+    assert_scheduled()
     controls["Output crop"].setValue(10)
     assert_scheduled()
     aspect.setCurrentIndex(1)
     assert_scheduled()
-    buttons["Wide"].click()
+    controls["Background blur"].setValue(10)
     assert_scheduled()
     buttons["Reset view"].click()
     assert_scheduled()
@@ -518,16 +528,14 @@ def test_adjust_ignores_out_of_order_snapshot_responses() -> None:
     page.snapshot_generated.connect(lambda *values: generated.append(values))
     page.set_room(scene.asset_id, scene, installed=True)
     renderer.scene_progressed.emit(100, 100)
-    slider = next(
-        control
-        for control in page.findChildren(QSlider)
-        if control.accessibleName() == "Field of view"
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"field_of_view": 50.0}),
     )
-
-    slider.setValue(50)
     page._flush_current_autosave()  # noqa: SLF001
     stale_request = renderer.snapshot_requests[-1]
-    slider.setValue(60)
+    page._accept_renderer_viewpoint(  # noqa: SLF001
+        scene.default_viewpoint.model_copy(update={"field_of_view": 60.0}),
+    )
     page._flush_current_autosave()  # noqa: SLF001
     latest_request = renderer.snapshot_requests[-1]
     payload = base64.b64encode(b"background").decode()
@@ -552,14 +560,11 @@ def test_adjust_retries_a_failed_snapshot_once_until_the_next_edit() -> None:
     )
     page.set_room(scene.asset_id, scene, installed=True)
     renderer.scene_progressed.emit(100, 100)
-    slider = next(
-        control
-        for control in page.findChildren(QSlider)
-        if control.accessibleName() == "Field of view"
-    )
     payload = base64.b64encode(b"background").decode()
 
-    slider.setValue(50)
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"field_of_view": 50.0}),
+    )
     page._flush_current_autosave()  # noqa: SLF001
     renderer.snapshot_ready.emit(
         scene.asset_id,
@@ -581,7 +586,9 @@ def test_adjust_retries_a_failed_snapshot_once_until_the_next_edit() -> None:
     )
     assert not page._retry_timer.isActive()  # noqa: SLF001
 
-    slider.setValue(55)
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"field_of_view": 55.0}),
+    )
     assert page._autosave_timer.isActive()  # noqa: SLF001
     page.close()
 
@@ -595,13 +602,9 @@ def test_adjust_keeps_a_failed_viewpoint_write_pending() -> None:
     page.viewpoint_saved.connect(page.report_viewpoint_save_error)
     page.set_room(scene.asset_id, scene, installed=True)
     renderer.scene_progressed.emit(100, 100)
-    slider = next(
-        control
-        for control in page.findChildren(QSlider)
-        if control.accessibleName() == "Field of view"
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"field_of_view": 50.0}),
     )
-
-    slider.setValue(50)
     page._flush_current_autosave()  # noqa: SLF001
 
     assert scene.asset_id in page._dirty_rooms  # noqa: SLF001
@@ -631,12 +634,9 @@ def test_adjust_autosave_persists_viewpoint_snapshot_and_thumbnail(
     renderer.scene_progressed.emit(100, 100)
     page = window.findChild(AdjustPage)
     assert page is not None
-    slider = next(
-        control
-        for control in page.findChildren(QSlider)
-        if control.accessibleName() == "Field of view"
+    renderer.viewpoint_changed.emit(
+        scene.default_viewpoint.model_copy(update={"field_of_view": 55.0}),
     )
-    slider.setValue(55)
     page._flush_current_autosave()  # noqa: SLF001
     viewpoint = scene.default_viewpoint.model_copy(update={"field_of_view": 55.0})
     image = QImage(8, 8, QImage.Format.Format_RGB888)
@@ -675,10 +675,10 @@ def test_adjust_reloads_a_reimported_scene_from_its_new_default() -> None:
     renderer = TrackingRenderer()
     page = AdjustPage(lambda: renderer)
     scene = load_sample_manifest().scenes[0]
-    sliders = {slider.accessibleName(): slider for slider in page.findChildren(QSlider)}
-
     page.set_room(scene.asset_id, scene, installed=True)
-    sliders["Field of view"].setValue(60)
+    page._accept_renderer_viewpoint(  # noqa: SLF001
+        scene.default_viewpoint.model_copy(update={"field_of_view": 60.0}),
+    )
     page.discard_viewpoint(scene.asset_id)
     page.set_room(scene.asset_id, scene, installed=True)
 

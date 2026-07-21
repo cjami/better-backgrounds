@@ -115,17 +115,6 @@ class AdjustPage(QWidget):
         controls = QVBoxLayout(inspector)
         controls.setContentsMargins(16, 18, 16, 16)
         controls.setSpacing(7)
-        controls.addWidget(_label("Viewpoint", object_name="section"))
-        presets = QHBoxLayout()
-        for index, name in enumerate(("Eye level", "Low", "High", "Wide")):
-            preset = QPushButton(name)
-            preset.setObjectName("preset")
-            preset.setProperty("active", index == 0)
-            preset.clicked.connect(
-                lambda _checked=False, preset_name=name: self._apply_preset(preset_name),
-            )
-            presets.addWidget(preset)
-        controls.addLayout(presets)
         self._add_slider(controls, "Field of view", 24, 90, 42)
         self._add_slider(controls, "Horizon", -100, 100, -15)
         self._add_slider(controls, "Output crop", 0, 20, 0)
@@ -406,26 +395,6 @@ class AdjustPage(QWidget):
         self._retried_rooms.add(room_id)
         self._retry_timer.start(AUTOSAVE_RETRY_MS)
 
-    def _apply_preset(self, name: str) -> None:
-        default = self._default_viewpoint
-        if name == "Eye level":
-            viewpoint = default
-        elif name == "Low":
-            position = default.position.model_copy(
-                update={"y": max(default.safe_camera_region.minimum.y, default.position.y - 0.6)},
-            )
-            viewpoint = default.model_copy(update={"position": position})
-        elif name == "High":
-            position = default.position.model_copy(
-                update={"y": min(default.safe_camera_region.maximum.y, default.position.y + 0.6)},
-            )
-            viewpoint = default.model_copy(update={"position": position})
-        else:
-            viewpoint = default.model_copy(update={"field_of_view": 90.0})
-        self._viewpoint = viewpoint
-        self._sync_controls()
-        self._publish_viewpoint_change()
-
     def _add_slider(
         self,
         layout: QVBoxLayout,
@@ -467,7 +436,9 @@ class AdjustPage(QWidget):
             }
         elif title == "Output crop":
             inset = value / 100
-            update = {"crop": CropRegion(left=inset, top=inset, right=1 - inset, bottom=1 - inset)}
+            update = {
+                "crop": CropRegion(left=inset, top=inset, right=1 - inset, bottom=1 - inset),
+            }
         else:
             return
         self._viewpoint = self._viewpoint.model_copy(update=update)
@@ -516,6 +487,4 @@ class AdjustPage(QWidget):
             return f"{value}°"
         if title == "Horizon":
             return f"{value / 10:.1f}°"
-        if title == "Output crop":
-            return f"{value}%"
         return f"{value}%"

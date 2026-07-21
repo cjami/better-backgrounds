@@ -42,8 +42,6 @@ CANONICAL_HALF_EXTENT = 2.5
 DEFAULT_FIELD_OF_VIEW = 42.0
 DEFAULT_ASPECT_RATIO = 16 / 9
 STREAMED_FIELD_OF_VIEW = 80.0
-STREAMED_ENTRY_SIDE = 0.65
-STREAMED_ENTRY_DEPTH = 1.06
 STREAMED_LOOK_DISTANCE = 0.9
 STREAMED_NAVIGATION_PADDING = 0.25
 PLY_DECLARATION_PARTS = 3
@@ -131,6 +129,7 @@ class SplatDiagnostics:
     ]
     bounds_minimum: tuple[float, float, float]
     bounds_maximum: tuple[float, float, float]
+    center_of_mass: tuple[float, float, float]
     lod_levels: int = 1
     resource_count: int = 1
     total_gaussian_count: int | None = None
@@ -304,7 +303,11 @@ def _validate_standard(
     vertex: _PlyElement,
     *,
     validate_values: bool,
-) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+    tuple[float, float, float],
+]:
     properties = _property_map(vertex)
     if not _STANDARD_PROPERTIES.issubset(properties):
         msg = "Gaussian PLY is missing required 3D Gaussian properties"
@@ -341,14 +344,22 @@ def _validate_standard(
         raise ValueError(msg)
     minimum = _vector_tuple(np.quantile(positions, 0.01, axis=0))
     maximum = _vector_tuple(np.quantile(positions, 0.99, axis=0))
-    return minimum, maximum
+    center_of_mass = _vector_tuple(np.mean(positions, axis=0))
+    return minimum, maximum, center_of_mass
 
 
 def _validate_compressed(
     path: Path,
     header: _PlyHeader,
     vertex: _PlyElement,
-) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+) -> (
+    tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ]
+    | None
+):
     chunk = header.element("chunk")
     if chunk is None or header.elements[0].name != "chunk":
         return None
@@ -412,7 +423,29 @@ def _validate_compressed(
             raise ValueError(msg)
     minimum = _vector_tuple(np.quantile(minimums, 0.01, axis=0))
     maximum = _vector_tuple(np.quantile(maximums, 0.99, axis=0))
-    return minimum, maximum
+    vertices = np.memmap(
+        path,
+        dtype=_dtype(vertex),
+        mode="r",
+        offset=header.offset("vertex"),
+        shape=(vertex.count,),
+    )
+    sample_count = min(vertex.count, PLY_SAMPLE_LIMIT)
+    indices = np.linspace(0, vertex.count - 1, sample_count, dtype=np.int64)
+    packed = vertices["packed_position"][indices]
+    chunk_indices = indices // 256
+    normalized = np.column_stack(
+        (
+            (packed >> 21) / 2047,
+            ((packed >> 11) & 1023) / 1023,
+            (packed & 2047) / 2047,
+        ),
+    )
+    positions = minimums[chunk_indices] + normalized * (
+        maximums[chunk_indices] - minimums[chunk_indices]
+    )
+    center_of_mass = _vector_tuple(np.mean(positions, axis=0))
+    return minimum, maximum, center_of_mass
 
 
 def inspect_gaussian_ply(path: Path, *, validate_values: bool = True) -> SplatDiagnostics:
@@ -427,7 +460,7 @@ def inspect_gaussian_ply(path: Path, *, validate_values: bool = True) -> SplatDi
         raise ValueError(msg)
     compressed_bounds = _validate_compressed(path, header, vertex)
     if compressed_bounds is None:
-        bounds = _validate_standard(
+        minimum, maximum, center_of_mass = _validate_standard(
             path,
             header,
             vertex,
@@ -435,7 +468,7 @@ def inspect_gaussian_ply(path: Path, *, validate_values: bool = True) -> SplatDi
         )
         layout: Literal["standard", "compressed", "sharp"] = "standard"
     else:
-        bounds = compressed_bounds
+        minimum, maximum, center_of_mass = compressed_bounds
         layout = "compressed"
     framing: Literal["Embedded SHARP camera", "Automatic COLMAP framing"]
     try:
@@ -450,8 +483,9 @@ def inspect_gaussian_ply(path: Path, *, validate_values: bool = True) -> SplatDi
         file_size=path.stat().st_size,
         layout=layout,
         framing=framing,
-        bounds_minimum=bounds[0],
-        bounds_maximum=bounds[1],
+        bounds_minimum=minimum,
+        bounds_maximum=maximum,
+        center_of_mass=center_of_mass,
     )
 
 
@@ -463,6 +497,7 @@ def _streamed_diagnostics(inspection: StreamedSogInspection) -> SplatDiagnostics
         framing="Automatic streamed bounds",
         bounds_minimum=inspection.bounds_minimum,
         bounds_maximum=inspection.bounds_maximum,
+        center_of_mass=inspection.center_of_mass,
         lod_levels=inspection.lod_levels,
         resource_count=len(inspection.resources),
         total_gaussian_count=inspection.total_gaussian_count,
@@ -487,10 +522,7 @@ def _generic_viewpoint(
 ) -> Viewpoint:
     source_minimum = diagnostics.bounds_minimum
     source_maximum = diagnostics.bounds_maximum
-    source_center = tuple(
-        (minimum + maximum) / 2
-        for minimum, maximum in zip(source_minimum, source_maximum, strict=True)
-    )
+    source_center = diagnostics.center_of_mass
     half_extents = tuple(
         (maximum - minimum) / 2
         for minimum, maximum in zip(source_minimum, source_maximum, strict=True)
@@ -502,7 +534,7 @@ def _generic_viewpoint(
     scale = min(100.0, max(0.01, CANONICAL_HALF_EXTENT / maximum_extent))
     transformed_center = tuple(item * scale for item in source_center)
     orientation = Quaternion()
-    camera_direction = 1.0
+    look_direction = -1.0
     if colmap_coordinates:
         transformed_center = (
             -source_center[0] * scale,
@@ -510,7 +542,7 @@ def _generic_viewpoint(
             source_center[2] * scale,
         )
         orientation = Quaternion(z=1.0, w=0.0)
-        camera_direction = -1.0
+        look_direction = 1.0
     target = Vector3(x=0.0, y=1.1, z=0.0)
     transform = SceneTransform(
         translation=Vector3(
@@ -521,19 +553,14 @@ def _generic_viewpoint(
         orientation=orientation,
         scale=scale,
     )
-    fitted_x, fitted_y, fitted_z = (extent * scale for extent in half_extents)
-    vertical_distance = fitted_y / math.tan(math.radians(DEFAULT_FIELD_OF_VIEW / 2))
-    horizontal_fov = 2 * math.atan(
-        math.tan(math.radians(DEFAULT_FIELD_OF_VIEW / 2)) * DEFAULT_ASPECT_RATIO,
-    )
-    horizontal_distance = fitted_x / math.tan(horizontal_fov / 2)
-    distance = max(2.0, vertical_distance, horizontal_distance) + fitted_z
-    far_clip = min(1_000.0, max(40.0, distance + fitted_z * 4 + 10.0))
-    position = Vector3(x=target.x, y=target.y, z=target.z + camera_direction * distance)
+    fitted_extents = tuple(extent * scale for extent in half_extents)
+    far_clip = min(1_000.0, max(40.0, math.hypot(*fitted_extents) * 8.0))
+    position = target
+    orbit_target = Vector3(x=target.x, y=target.y, z=target.z + look_direction)
     padding = max(0.5, min(4.0, maximum_extent * scale * 0.35))
     return Viewpoint(
         position=position,
-        orbit_target=target,
+        orbit_target=orbit_target,
         field_of_view=DEFAULT_FIELD_OF_VIEW,
         horizon=0.0,
         near_clip=0.03,
@@ -576,28 +603,26 @@ def _streamed_viewpoint(diagnostics: SplatDiagnostics) -> Viewpoint:
     if any(not math.isfinite(span) or span <= MIN_SCENE_EXTENT for span in spans):
         msg = "Streamed SOG scene does not contain a usable spatial extent"
         raise ValueError(msg)
-    center = tuple((low + high) / 2 for low, high in zip(minimum, maximum, strict=True))
-    half_x, _half_y, half_z = (span / 2 for span in spans)
-    horizontal_extent = max(spans[0], spans[2])
-    ceiling_clearance = min(1.7, max(0.5, spans[1] * 0.065))
-    position = Vector3(
-        x=center[0] + half_x * STREAMED_ENTRY_SIDE,
-        y=maximum[1] - ceiling_clearance,
-        z=center[2] + half_z * STREAMED_ENTRY_DEPTH,
+    source_center_of_mass = diagnostics.center_of_mass
+    center_of_mass = (
+        -source_center_of_mass[0],
+        -source_center_of_mass[1],
+        source_center_of_mass[2],
     )
-    inward_x = center[0] - position.x
-    inward_z = center[2] - position.z
-    inward_length = math.hypot(inward_x, inward_z)
-    if inward_length <= MIN_SCENE_EXTENT:
-        inward_x, inward_z, inward_length = 0.0, -1.0, 1.0
+    horizontal_extent = max(spans[0], spans[2])
+    position = Vector3(
+        x=center_of_mass[0],
+        y=center_of_mass[1],
+        z=center_of_mass[2],
+    )
     look_distance = min(
         1.5,
         max(STREAMED_LOOK_DISTANCE, horizontal_extent * 0.08),
     )
     target = Vector3(
-        x=position.x + inward_x / inward_length * look_distance,
+        x=position.x,
         y=position.y,
-        z=position.z + inward_z / inward_length * look_distance,
+        z=position.z - look_distance,
     )
     navigation_spans = tuple(
         high - low for low, high in zip(navigation_minimum, navigation_maximum, strict=True)

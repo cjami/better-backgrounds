@@ -232,11 +232,11 @@ def write_streamed_sog(  # noqa: C901, PLR0912, PLR0913
 
 
 @pytest.mark.parametrize(
-    ("writer", "layout", "framing"),
+    ("writer", "layout", "framing", "center_of_mass"),
     [
-        (write_standard_ply, "standard", "Automatic COLMAP framing"),
-        (write_sharp_ply, "sharp", "Embedded SHARP camera"),
-        (write_compressed_ply, "compressed", "Automatic COLMAP framing"),
+        (write_standard_ply, "standard", "Automatic COLMAP framing", (0.0, 0.0, 2.5)),
+        (write_sharp_ply, "sharp", "Embedded SHARP camera", (0.0, 0.0, 2.0)),
+        (write_compressed_ply, "compressed", "Automatic COLMAP framing", (-1.0, -1.0, 2.0)),
     ],
 )
 def test_inspector_accepts_supported_gaussian_ply_layouts(
@@ -244,6 +244,7 @@ def test_inspector_accepts_supported_gaussian_ply_layouts(
     writer: Callable[[Path], None],
     layout: str,
     framing: str,
+    center_of_mass: tuple[float, float, float],
 ) -> None:
     """Accept every PLY layout the embedded PlayCanvas parser can render."""
     path = tmp_path / "scene.ply"
@@ -254,6 +255,7 @@ def test_inspector_accepts_supported_gaussian_ply_layouts(
     assert diagnostics.gaussian_count == 4
     assert diagnostics.layout == layout
     assert diagnostics.framing == framing
+    assert diagnostics.center_of_mass == pytest.approx(center_of_mass)
 
 
 def test_inspector_rejects_unsafe_or_unsupported_ply_data(tmp_path: Path) -> None:
@@ -297,6 +299,7 @@ def test_inspector_accepts_packaged_streamed_sog_with_nested_root(tmp_path: Path
     assert diagnostics.resource_count == 19
     assert diagnostics.bounds_minimum == (-1.0, -1.0, -1.0)
     assert diagnostics.bounds_maximum == (1.0, 1.0, 1.0)
+    assert all(abs(value) < 0.01 for value in diagnostics.center_of_mass)
 
 
 def test_inspector_accepts_pre_release_streamed_sog_metadata(tmp_path: Path) -> None:
@@ -395,6 +398,10 @@ def test_importer_adopts_a_deterministic_scene_without_touching_source(
     assert first.preview is None
     assert first.default_viewpoint.depth_of_field.blur_strength == 0
     assert first.default_viewpoint.scene_transform.orientation.z == 1
+    assert first.default_viewpoint.position.x == pytest.approx(0.0)
+    assert first.default_viewpoint.position.y == pytest.approx(1.1)
+    assert first.default_viewpoint.position.z == pytest.approx(0.0)
+    assert first.default_viewpoint.orbit_target.z == pytest.approx(1.0)
     assert (scene_root / first.asset_id / "scene.ply").read_bytes() == original
     assert source.read_bytes() == original
     assert not list(scene_root.glob(".splat-*.part"))
@@ -424,9 +431,13 @@ def test_importer_adopts_streamed_sog_resources_without_touching_source(
     assert first.default_viewpoint.depth_of_field.blur_strength == 0
     assert first.default_viewpoint.scene_transform.orientation.z == 1
     assert first.default_viewpoint.scene_transform.scale == 1
-    assert first.default_viewpoint.position.x == pytest.approx(0.65)
-    assert first.default_viewpoint.position.y == pytest.approx(0.5)
-    assert first.default_viewpoint.position.z == pytest.approx(1.06)
+    diagnostics = inspect_gaussian_scene(source)
+    assert first.default_viewpoint.position.x == pytest.approx(-diagnostics.center_of_mass[0])
+    assert first.default_viewpoint.position.y == pytest.approx(-diagnostics.center_of_mass[1])
+    assert first.default_viewpoint.position.z == pytest.approx(diagnostics.center_of_mass[2])
+    assert first.default_viewpoint.orbit_target.x == first.default_viewpoint.position.x
+    assert first.default_viewpoint.orbit_target.y == first.default_viewpoint.position.y
+    assert first.default_viewpoint.orbit_target.z < first.default_viewpoint.position.z
     assert first.default_viewpoint.field_of_view == 80
     assert first.default_viewpoint.safe_camera_region.minimum.x == pytest.approx(-1.5)
     assert first.default_viewpoint.safe_camera_region.maximum.z == pytest.approx(1.5)

@@ -83,6 +83,7 @@ def test_build_page_offers_and_reviews_direct_splat_imports() -> None:
             framing="Automatic COLMAP framing",
             bounds_minimum=(-1.0, -1.0, 1.0),
             bounds_maximum=(1.0, 1.0, 3.0),
+            center_of_mass=(0.0, 0.0, 2.0),
         ),
     )
 
@@ -109,6 +110,7 @@ def test_build_page_reviews_streamed_sog_environment_metadata() -> None:
             framing="Automatic streamed bounds",
             bounds_minimum=(-20.0, -3.0, -20.0),
             bounds_maximum=(20.0, 8.0, 20.0),
+            center_of_mass=(0.0, 2.0, 0.0),
             lod_levels=4,
             resource_count=97,
         ),

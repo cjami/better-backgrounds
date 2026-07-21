@@ -239,6 +239,7 @@ def test_splat_build_bypasses_checkpoint_and_uses_import_worker(
         framing="Automatic COLMAP framing",
         bounds_minimum=(-1.0, -1.0, 2.0),
         bounds_maximum=(1.0, 1.0, 3.0),
+        center_of_mass=(0.0, 0.0, 2.5),
     )
     commands: list[tuple[list[str], str]] = []
     monkeypatch.setattr(

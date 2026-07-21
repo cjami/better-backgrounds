@@ -62,6 +62,7 @@ class StreamedSogInspection:
     file_size: int
     bounds_minimum: tuple[float, float, float]
     bounds_maximum: tuple[float, float, float]
+    center_of_mass: tuple[float, float, float]
     navigation_bounds_minimum: tuple[float, float, float]
     navigation_bounds_maximum: tuple[float, float, float]
     resources: tuple[StreamedSogResource, ...]
@@ -609,6 +610,8 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
             full_detail_minimum = [math.inf] * VECTOR_DIMENSIONS
             full_detail_maximum = [-math.inf] * VECTOR_DIMENSIONS
             full_detail_samples: list[tuple[float, float, float]] = []
+            full_detail_center_sum = [0.0] * VECTOR_DIMENSIONS
+            full_detail_center_weight = 0
             for index, meta_path in enumerate(chunk_archive_paths):
                 (
                     chunk_count,
@@ -635,6 +638,7 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
                     raise ValueError(msg)
                 if index in validation.level_files[0]:
                     full_detail_samples.extend(chunk_samples)
+                    full_detail_center_weight += chunk_count
                     for axis in range(VECTOR_DIMENSIONS):
                         full_detail_minimum[axis] = min(
                             full_detail_minimum[axis],
@@ -643,6 +647,11 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
                         full_detail_maximum[axis] = max(
                             full_detail_maximum[axis],
                             chunk_maximum[axis],
+                        )
+                        full_detail_center_sum[axis] += (
+                            sum(sample[axis] for sample in chunk_samples)
+                            / len(chunk_samples)
+                            * chunk_count
                         )
                 resource_paths.extend(chunk_resources)
 
@@ -692,6 +701,10 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
                 navigation_minimum, navigation_maximum = robust_bounds
             else:
                 minimum, maximum = navigation_minimum, navigation_maximum
+            center_of_mass = cast(
+                "tuple[float, float, float]",
+                tuple(value / full_detail_center_weight for value in full_detail_center_sum),
+            )
     except BadZipFile as error:
         msg = "The selected file is not a valid Streamed SOG ZIP archive"
         raise ValueError(msg) from error
@@ -702,6 +715,7 @@ def inspect_streamed_sog(  # noqa: C901, PLR0912, PLR0915
         file_size=path.stat().st_size,
         bounds_minimum=minimum,
         bounds_maximum=maximum,
+        center_of_mass=center_of_mass,
         navigation_bounds_minimum=navigation_minimum,
         navigation_bounds_maximum=navigation_maximum,
         resources=managed_resources,
