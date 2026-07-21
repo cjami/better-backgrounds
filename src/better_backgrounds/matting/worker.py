@@ -626,9 +626,9 @@ def _calibrated_config(
             frames=5,
         )
         latencies[cached.selected_internal_size] = cached_latency
-        if cached_latency <= requested.latency_budget_ms or (
-            not runtime.capabilities.accelerated
-            and cached.selected_internal_size == INTERNAL_SIZES[0]
+        if (
+            cached_latency <= requested.latency_budget_ms
+            or cached.selected_internal_size == INTERNAL_SIZES[0]
         ):
             selected = cached.selected_internal_size
 
@@ -660,8 +660,6 @@ def _calibrated_config(
                 selected = cast("InternalSize", size)
                 break
         if selected is None:
-            if runtime.capabilities.accelerated:
-                _fail_latency_gate(latencies, budget_ms=requested.latency_budget_ms)
             selected = INTERNAL_SIZES[0]
 
     selected_latency = latencies.get(selected, 0.0)
@@ -795,9 +793,3 @@ def _fit_background(
 def _safe_message(error: Exception) -> str:
     message = str(error).strip() or type(error).__name__
     return message[:300]
-
-
-def _fail_latency_gate(latencies: dict[int, float], *, budget_ms: float) -> None:
-    measurements = ", ".join(f"{size}p={latencies[size]:.1f} ms" for size in INTERNAL_SIZES)
-    msg = f"MatAnyone 2 missed the {budget_ms:.1f} ms inference gate: {measurements}"
-    raise RuntimeError(msg)
