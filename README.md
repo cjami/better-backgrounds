@@ -9,6 +9,64 @@ webcam, or import an existing Gaussian scene as a `.ply`, `.ssog`, or compatible
 run locally. There are no accounts, cloud reconstruction, telemetry, or webcam
 uploads.
 
+## Install and run from the repository
+
+The steps below download the source code, set up the correct version of Python,
+and start the app.
+
+### Before you start
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), which
+installs Python and the app's dependencies for you.
+
+After installing it, close and reopen your terminal. On Windows, use
+**PowerShell**; on macOS or Linux, use **Terminal**. You do not need to run it as
+an administrator.
+
+The first setup downloads several gigabytes of dependencies and about 3.1 GiB
+of AI models, so allow some time and make sure you have a reliable internet
+connection and several gigabytes of free disk space. Later launches are much
+faster.
+
+### 1. Download Better Backgrounds
+
+Copy these commands into PowerShell or Terminal one line at a time:
+
+```text
+git clone https://github.com/cjami/better-backgrounds.git
+cd better-backgrounds
+```
+
+### 2. Install OBS Studio
+
+Install [OBS Studio 30 or newer](https://obsproject.com/) if it is not already
+on your computer. Better Backgrounds uses **OBS Virtual Camera** to send its
+finished video to Zoom, Teams, FaceTime, browsers, and other camera apps.
+
+On macOS, open OBS once, start and stop its Virtual Camera, and approve the
+camera extension in System Settings. This registers the virtual camera for
+other apps.
+
+### 3. Start the app
+
+```text
+uv run better-backgrounds desktop
+```
+
+This command installs the required Python version and dependencies in a separate
+project environment, then starts Better Backgrounds. It may look quiet while
+downloading the larger packages; let it finish and wait for the app to open.
+
+On the first launch, follow the setup window to accept Apple's research-only
+SHARP model license and download the three required models. Once setup is
+complete, the core app can run offline.
+
+### Hardware notes
+
+An NVIDIA graphics card with CUDA is recommended on Windows or Linux. Apple
+silicon Macs use MPS. The app can use a CPU, but live effects and room creation
+will be much slower.
+
 ## Using the app
 
 1. **Build** - add a room photo, capture the empty room with your webcam, or
@@ -21,53 +79,18 @@ In Adjust, drag to look around and use the wheel to move or zoom. Use
 `W`/`A`/`S`/`D` to fly, `Q`/`E` to move down or up, and hold Shift to
 move faster. Viewpoint changes save automatically.
 
-## Install a release build
+## Troubleshooting setup
 
-Download a Windows or macOS build from the
-[releases page](https://github.com/cjami/better-backgrounds/releases). Builds
-are not code-signed, so the first launch requires one unlock step:
-
-- **Windows:** Right-click `BetterBackgrounds.exe`, select **Properties**, tick
-  **Unblock**, and click **OK**. If SmartScreen appears, select **More info** and
-  then **Run anyway**.
-- **macOS:** Double-click **Unlock and Open.command** in the unzipped folder, or
-  run `xattr -dr com.apple.quarantine "Better Backgrounds.app"`.
-
-On first launch, the app asks you to accept the room-reconstruction model's
-research-only license and downloads the three required models (about 3.1 GiB).
-After setup, the core app can run offline.
-
-## Run from source
-
-You need Git, [uv](https://docs.astral.sh/uv/getting-started/installation/),
-Node.js 20 or newer, and GNU Make. The project uses CPython 3.14.
-
-Use the one-step setup for your platform to install dependencies, prepare the
-models, and launch the app:
-
-```bash
-./scripts/setup-and-run.sh
-```
-
-```powershell
-.\scripts\setup-and-run.ps1
-```
-
-For development, run the steps separately:
-
-```text
-make setup
-make check
-make desktop
-```
-
-`make setup` installs the locked dependencies and Git hooks without downloading
-model checkpoints. `make check` runs formatting, linting, type checks, Python and
-renderer tests, and both builds.
-
-CUDA on Windows or Linux, or MPS on Apple silicon, is recommended for model
-inference. CPU execution is supported but is not an interactive-performance
-target.
+- If `uv` is "not recognized" or "not found", close and reopen the terminal
+  after installing it. If that does not help, restart the computer.
+- Run every command from the `better-backgrounds` folder after cloning. The
+  command `cd better-backgrounds` takes you there.
+- If a download is interrupted, run the same command again. Existing completed
+  downloads are reused.
+- To check whether the models and graphics device are ready, run
+  `uv run better-backgrounds doctor`.
+- If the app reports a camera error, close other apps that may be using the
+  webcam and then restart Better Backgrounds.
 
 ## Models and offline use
 
@@ -115,18 +138,17 @@ uv run better-backgrounds splat-import supersplat-export.zip
 On Windows x64 and macOS 13+ Apple silicon, Show can publish the composite to
 `OBS Virtual Camera` at 720p or 1080p and 30 fps.
 
-Install [OBS Studio 30 or newer](https://obsproject.com/) with its Virtual Camera
-component. On macOS, start and stop OBS Virtual Camera once and approve its
-camera extension in System Settings. Stop OBS's own virtual camera before
-starting output in Better Backgrounds, then select `OBS Virtual Camera` in
-Zoom, Teams, FaceTime, a browser, or another camera app.
+Stop OBS's own virtual camera before starting output in Better Backgrounds,
+then select `OBS Virtual Camera` in Zoom, Teams, FaceTime, a browser, or another
+camera app.
 
 OBS provides the virtual camera; it cannot simultaneously consume and republish
 the Better Backgrounds feed through that same output.
 
 ## Development commands
 
-Useful focused targets include:
+Contributors also need Node.js 20 or newer and GNU Make. Install the full
+development environment with `make setup`, then use these focused targets:
 
 ```text
 make lint
@@ -135,7 +157,6 @@ make type
 make test
 make renderer-build
 make desktop-smoke
-make package-desktop
 ```
 
 The matting quality and performance benchmark emits a machine-readable report:
@@ -143,6 +164,12 @@ The matting quality and performance benchmark emits a machine-readable report:
 ```text
 uv run better-backgrounds matting-benchmark capture.mp4 --mask first-mask.png
 ```
+
+## Acknowledgements
+
+Better Backgrounds was built in one week for OpenAI Build Week with the
+assistance of GPT-5.6 Sol and Codex. Their contributions across research,
+design, and implementation were pivotal to the success of the project.
 
 ## Licensing and attribution
 
@@ -170,6 +197,5 @@ The OBS integration includes the pyvirtualcam notice under
 `src/better_backgrounds/desktop/assets/`. The optional Table Tennis Room sample
 is attributed to Ethan (`ethan3111`) under CC BY 4.0.
 
-No model weights are bundled with the source or release builds. Review all
-third-party terms and obtain any required permissions before distributing or
-using a build.
+No model weights are bundled with the source. Review all third-party terms and
+obtain any required permissions before distributing or using the application.
