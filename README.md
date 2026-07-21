@@ -1,7 +1,7 @@
 # Better Backgrounds
 
-Better Backgrounds is a cross-platform desktop app that places a live, matted
-webcam subject into a navigable room scene.
+Better Backgrounds is a desktop app that places a live, matted webcam subject
+into a navigable room scene.
 
 Create a room from a JPEG, PNG, or WebP photo, capture an empty room with your
 webcam, or import an existing Gaussian scene as a `.ply`, `.ssog`, or compatible
@@ -14,14 +14,19 @@ uploads.
 The steps below download the source code, set up the correct version of Python,
 and start the app.
 
+> [!WARNING]
+> **macOS is not currently supported.** The source-run Python process cannot
+> provide the application identity macOS needs to grant webcam permission.
+> macOS support will return once packaged `.app` releases are available.
+
 ### Before you start
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), which
 installs Python and the app's dependencies for you.
 
 After installing it, close and reopen your terminal. On Windows, use
-**PowerShell**; on macOS or Linux, use **Terminal**. You do not need to run it as
-an administrator.
+**PowerShell**; on Linux, use **Terminal**. You do not need to run it as an
+administrator.
 
 The first setup downloads several gigabytes of dependencies and about 3.1 GiB
 of AI models, so allow some time and make sure you have a reliable internet
@@ -43,10 +48,6 @@ Install [OBS Studio 30 or newer](https://obsproject.com/) if it is not already
 on your computer. Better Backgrounds uses **OBS Virtual Camera** to send its
 finished video to Zoom, Teams, FaceTime, browsers, and other camera apps.
 
-On macOS, open OBS once, start and stop its Virtual Camera, and approve the
-camera extension in System Settings. This registers the virtual camera for
-other apps.
-
 ### 3. Start the app
 
 ```text
@@ -63,9 +64,8 @@ complete, the core app can run offline.
 
 ### Hardware notes
 
-An NVIDIA graphics card with CUDA is recommended on Windows or Linux. Apple
-silicon Macs use MPS. The app can use a CPU, but live effects and room creation
-will be much slower.
+An NVIDIA graphics card with CUDA is recommended on Windows or Linux. The app
+can use a CPU, but live effects and room creation will be much slower.
 
 ## Using the app
 
@@ -135,8 +135,8 @@ uv run better-backgrounds splat-import supersplat-export.zip
 
 ## OBS virtual camera
 
-On Windows x64 and macOS 13+ Apple silicon, Show can publish the composite to
-`OBS Virtual Camera` at 720p or 1080p and 30 fps.
+On Windows x64, Show can publish the composite to `OBS Virtual Camera` at 720p
+or 1080p and 30 fps.
 
 Stop OBS's own virtual camera before starting output in Better Backgrounds,
 then select `OBS Virtual Camera` in Zoom, Teams, FaceTime, a browser, or another
