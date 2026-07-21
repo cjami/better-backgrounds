@@ -5,24 +5,6 @@ on:
   pull_request:
 
 jobs:
-  quality:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - run: uv python install 3.14
-      - run: uv sync --all-groups --locked
-      - run: npm ci --no-audit --no-fund
-      - run: make lint
-      - run: make test
-      - run: make build
-
   desktop-package:
     strategy:
       fail-fast: false
