@@ -102,8 +102,8 @@ def _make_controller(
     return controller, page, capture, active
 
 
-def test_capture_now_saves_unmirrored_frame(tmp_path: Path) -> None:
-    """Capture the retained un-mirrored frame and publish its saved path."""
+def test_capture_now_saves_mirrored_frame(tmp_path: Path) -> None:
+    """Save the room with the same familiar mirroring shown in the preview."""
     controller, page, capture, active = _make_controller(tmp_path)
     captured: list[object] = []
     controller.captured.connect(captured.append)
@@ -125,7 +125,7 @@ def test_capture_now_saves_unmirrored_frame(tmp_path: Path) -> None:
     assert isinstance(saved, Path)
     with Image.open(saved) as opened:
         stored = np.asarray(opened.convert("RGB"))
-    assert np.array_equal(stored, frame)
+    assert np.array_equal(stored, np.flip(frame, axis=1))
 
 
 def test_countdown_reaching_zero_captures(tmp_path: Path) -> None:

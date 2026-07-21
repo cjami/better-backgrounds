@@ -145,8 +145,8 @@ class RoomCaptureController(QObject):
         if not isinstance(frame, np.ndarray):
             return
         source = cast("NDArray[np.uint8]", frame)
-        self._latest_frame = source
         mirrored = np.ascontiguousarray(np.flip(source, axis=1))
+        self._latest_frame = mirrored
         height, width = mirrored.shape[:2]
         image = QImage(
             mirrored.data,
