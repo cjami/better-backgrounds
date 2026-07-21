@@ -549,7 +549,7 @@ class BuildPage(QWidget):
         self._cancel.hide()
 
     def set_completed(self, room_name: str) -> None:
-        """Keep a successful build visible without changing tabs."""
+        """Leave the finished build summary in place behind the Show tab."""
         self._progress.setRange(0, 100)
         self._progress.setValue(100)
         self._status.setText("Room ready")

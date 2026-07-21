@@ -36,6 +36,8 @@ from better_backgrounds.desktop.pages.common import AspectRatioContainer
 from better_backgrounds.desktop.preview import ScenePreview
 from better_backgrounds.desktop.webview import navigation_is_allowed
 from better_backgrounds.jobs.build_session import IdleBuild
+from better_backgrounds.jobs.events import ResultEvent
+from better_backgrounds.reconstruction.sharp import SceneImageSelection
 from better_backgrounds.scene import (
     Quaternion,
     SceneReference,
@@ -55,6 +57,7 @@ def _seed_generated_room(data_root: Path, asset_id: str, display_name: str) -> S
 
 
 TAB_COUNT = 3
+SHOW_TAB = 0
 BUILD_TAB = 1
 ADJUST_TAB = 2
 
@@ -202,6 +205,31 @@ def test_tabs_can_be_opened_in_any_order() -> None:
     window.select_tab(BUILD_TAB)
     assert window.active_tab == BUILD_TAB
     assert isinstance(window.build_session.state, IdleBuild)
+    window.close()
+
+
+def test_completed_build_opens_the_show_tab(tmp_path: Path) -> None:
+    """Reveal the finished room where it is used instead of leaving Build open."""
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        scene_cache_root=tmp_path / "cache",
+        data_root=tmp_path / "data",
+    )
+    ready: list[bool] = []
+    window.room_ready.connect(lambda: ready.append(True))
+    window.select_tab(BUILD_TAB)
+    controller = window._build_controller  # noqa: SLF001
+    controller.session.select_source(SceneImageSelection("my_room.jpg", None))
+    controller.session.start("job-show")
+
+    controller._handle_job_event(  # noqa: SLF001
+        ResultEvent(job_id="job-show", scene_id="scene-show", message="done"),
+    )
+
+    assert window.active_tab == SHOW_TAB
+    assert window.selected_room == "My Room"
+    assert ready == [True]
     window.close()
 
 

@@ -38,7 +38,8 @@ that the app runs offline.
 ## Using it
 
 1. **Build** — drop in one JPEG, PNG, or WebP photo of a room. SHARP reconstructs it into
-   a navigable Gaussian-splat scene.
+   a navigable Gaussian-splat scene. Already have a splat? Drop in a Gaussian `.ply` or a
+   Streamed SOG `.ssog`/`.zip` instead and it is imported directly, without running SHARP.
 2. **Adjust** — drag to look around, `W`/`A`/`S`/`D` to fly, and set depth-of-field.
 3. **Show** — your matted webcam subject is composited into the room, with PIH matching
    your appearance to the scene lighting.

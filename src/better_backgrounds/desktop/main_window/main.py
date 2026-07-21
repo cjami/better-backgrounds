@@ -42,6 +42,8 @@ SharpPrepareCommandFactory = Callable[[str], Sequence[str]]
 SplatCommandFactory = Callable[[str, Path], Sequence[str]]
 RendererFactory = Callable[[], QWidget]
 
+SHOW_TAB = 0
+BUILD_TAB = 1
 ADJUST_TAB = 2
 
 
@@ -141,7 +143,7 @@ class MainWindow(QMainWindow):
             sharp_command_factory,
             sharp_prepare_command_factory,
             checkpoint,
-            lambda: self.select_tab(1),
+            lambda: self.select_tab(BUILD_TAB),
             source,
             lambda: self._live_controller.selected_camera_id,
             cache_root / "captures",
@@ -499,6 +501,7 @@ class MainWindow(QMainWindow):
         self._adjust_page.discard_viewpoint(scene_id)
         self._show_page.set_rooms(self._rooms, room_name)
         self.select_room(room_name)
+        self.select_tab(SHOW_TAB)
         self.room_ready.emit()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
