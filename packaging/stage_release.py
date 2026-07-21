@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# Fixed output location so callers never need to parse this script's stdout.
+STAGING = ROOT / "build" / "release"
 SEARCH_ROOTS = (ROOT / "dist", ROOT / "build", ROOT / "src")
 # Nuitka standalone always emits a `<name>.dist` directory; macOS app-bundle
 # mode emits `<name>.app`. Neither depends on the configured executable name.
@@ -32,7 +34,10 @@ def find_build() -> Path:
         for root in SEARCH_ROOTS
         if root.is_dir()
         for path in root.rglob("*")
-        if path.is_dir() and path.suffix in BUNDLE_SUFFIXES
+        if path.is_dir()
+        and path.suffix in BUNDLE_SUFFIXES
+        # Never rediscover a previously staged copy of ourselves.
+        and STAGING not in path.parents
     ]
     if not candidates:
         raise SystemExit(_failure_report())
@@ -65,22 +70,26 @@ def _failure_report() -> str:
 def main() -> None:
     """Assemble a clean release directory holding the app and its first-run helper."""
     build = find_build()
-    staging = ROOT / "build" / "release"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    if STAGING.exists():
+        shutil.rmtree(STAGING)
+    STAGING.mkdir(parents=True)
 
     # Move rather than copy: the bundle is multi-gigabyte and the original is
     # not needed again, so a same-filesystem rename keeps CI fast.
-    shutil.move(str(build), str(staging / build.name))
+    shutil.move(str(build), str(STAGING / build.name))
 
     helper = HELPERS.get(sys.platform)
     if helper is not None and helper.is_file():
-        destination = staging / helper.name
+        destination = STAGING / helper.name
         shutil.copy2(helper, destination)
         if sys.platform == "darwin":
             destination.chmod(0o755)
-    print(staging)  # noqa: T201
+
+    staged = sorted(entry.name for entry in STAGING.iterdir())
+    if not any(Path(name).suffix in BUNDLE_SUFFIXES for name in staged):
+        message = f"Staged {STAGING} without an application bundle: {staged}"
+        raise SystemExit(message)
+    print(f"Staged into {STAGING}: {', '.join(staged)}")  # noqa: T201
 
 
 if __name__ == "__main__":

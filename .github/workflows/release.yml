@@ -54,22 +54,27 @@ jobs:
             [ -d "$dir" ] && find "$dir" -maxdepth 2 || echo "(missing)"
           done
 
+      - name: Stage the release
+        shell: bash
+        run: |
+          uv run python packaging/stage_release.py
+          find build/release -maxdepth 2
+
       # ditto preserves the symlinks and permission bits inside a macOS bundle
       # that a plain zip would flatten, leaving the app unlaunchable.
       - name: Archive macOS bundle
         if: runner.os == 'macOS'
-        run: |
-          STAGED="$(uv run python packaging/stage_release.py)"
-          echo "Staged release: $STAGED"
-          ditto -c -k --sequesterRsrc "$STAGED" "${{ matrix.asset }}.zip"
+        run: ditto -c -k --sequesterRsrc build/release "${{ matrix.asset }}.zip"
 
       - name: Archive Windows build
         if: runner.os == 'Windows'
         shell: pwsh
+        run: Compress-Archive -Path build\release\* -DestinationPath "${{ matrix.asset }}.zip"
+
+      - name: Verify the archive is not empty
+        shell: bash
         run: |
-          $staged = uv run python packaging/stage_release.py
-          Write-Host "Staged release: $staged"
-          Compress-Archive -Path "$staged\*" -DestinationPath "${{ matrix.asset }}.zip"
+          uv run python packaging/verify_archive.py "${{ matrix.asset }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
