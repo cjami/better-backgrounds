@@ -58,6 +58,7 @@ QFrame#feedSurface, QWidget#feedOverlay {{ background: transparent; border: none
 QLabel#brand {{ font-size: 17px; font-weight: 700; }}
 QLabel#title {{ font-size: 28px; font-weight: 700; }}
 QLabel#heroTitle {{ font-size: 30px; font-weight: 700; }}
+QLabel#dropTitle {{ font-size: 16px; font-weight: 650; }}
 QLabel#eyebrow {{ color: {ACCENT}; font-size: 11px; font-weight: 700; letter-spacing: 2px; }}
 QLabel#subtitle, QLabel#muted {{ color: {MUTED}; }}
 QLabel#section {{ font-size: 14px; font-weight: 650; }}
@@ -196,6 +197,23 @@ QPushButton#quietAction {{
 }}
 QPushButton#quietAction:hover {{ color: #efb968; background: #211b13; border-color: #624c2a; }}
 QPushButton#quietAction:pressed {{ color: #bf8130; background: #14110d; border-color: #382c1c; }}
+QPushButton#cameraAction {{
+    min-height: 52px;
+    color: #d7d9de;
+    background: #191a1f;
+    border-color: #3a3c44;
+    border-radius: 12px;
+    font-size: 15px;
+    font-weight: 700;
+}}
+QPushButton#cameraAction:hover {{ color: {TEXT}; background: #22242a; border-color: #555862; }}
+QPushButton#cameraAction:pressed {{
+    color: #c5c7cd;
+    background: #121317;
+    border-color: #30323a;
+    padding-top: 4px;
+    padding-bottom: 0;
+}}
 QPushButton#railAction, QPushButton#sampleAction {{
     color: {ACCENT};
     background: transparent;
@@ -212,14 +230,22 @@ QPushButton#railAction:pressed, QPushButton#sampleAction:pressed {{
     padding-top: 2px;
 }}
 QPushButton#dropAction {{
-    color: {TEXT};
-    background: transparent;
-    border: none;
+    min-height: 38px;
+    color: #1a1204;
+    background: {ACCENT};
+    border: 1px solid {ACCENT};
+    border-radius: 10px;
     font-size: 14px;
     font-weight: 700;
 }}
-QPushButton#dropAction:hover {{ color: {ACCENT}; background: #211b13; }}
-QPushButton#dropAction:pressed {{ color: #bd7f28; background: #14110d; padding-top: 4px; }}
+QPushButton#dropAction:hover {{ color: #1a1204; background: #edb45f; border-color: #edb45f; }}
+QPushButton#dropAction:pressed {{
+    color: #110c03;
+    background: #bd7f28;
+    border-color: #bd7f28;
+    padding-top: 4px;
+    padding-bottom: 0;
+}}
 QPushButton#preset {{
     min-height: 28px;
     padding: 0 11px;

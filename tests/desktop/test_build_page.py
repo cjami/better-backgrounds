@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QUrl
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
 
 from better_backgrounds.desktop.pages import BuildPage
 from better_backgrounds.desktop.pages.build import _first_supported_path
@@ -27,15 +27,30 @@ def _mime_for(*local_paths: str) -> QMimeData:
     return mime
 
 
-def test_build_page_offers_unified_upload_and_camera_capture() -> None:
-    """Replace the two source buttons with a unified file picker and capture."""
+def test_build_page_separates_file_upload_and_camera_capture() -> None:
+    """Place a large camera action beneath the file drop surface."""
     QApplication.instance() or QApplication([])
     page = BuildPage()
     buttons = {button.text(): button for button in page.findChildren(QPushButton)}
     assert "Choose a file" in buttons
-    assert "Capture from camera" in buttons
+    assert "Use webcam" in buttons
     assert "Choose a room photo" not in buttons
     assert "Import Gaussian splat" not in buttons
+
+    drop_card = page.findChild(QFrame, "dropCard")
+    camera_action = buttons["Use webcam"]
+    upload_page = page._content.widget(0)  # noqa: SLF001
+    assert upload_page is not None
+    upload_layout = upload_page.layout()
+    assert upload_layout is not None
+    assert drop_card is not None
+    assert camera_action.parentWidget() is upload_page
+    assert upload_layout.indexOf(camera_action) > upload_layout.indexOf(drop_card)
+    assert camera_action.minimumHeight() == 52
+    assert not drop_card.isAncestorOf(camera_action)
+    formats = drop_card.findChild(QLabel, "feedMeta")
+    assert formats is not None
+    assert formats.text() == "JPG  ·  JPEG  ·  PNG  ·  WEBP  ·  PLY  ·  SSOG  ·  ZIP"
     assert page.acceptDrops()
     page.close()
 

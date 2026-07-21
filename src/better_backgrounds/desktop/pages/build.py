@@ -93,54 +93,53 @@ class BuildPage(QWidget):
         layout.setSpacing(14)
         layout.addStretch()
         layout.addWidget(
-            _label("NEW ROOM", object_name="eyebrow"),
-            alignment=Qt.AlignmentFlag.AlignHCenter,
-        )
-        layout.addWidget(
             _label("Add a room", object_name="heroTitle"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
-        subtitle = _label(
-            "Choose an empty room photo, import an existing 3D room, or use your webcam.",
-            object_name="subtitle",
-            word_wrap=True,
-        )
-        subtitle.setMaximumWidth(650)
-        subtitle.setMinimumHeight(44)
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(subtitle, alignment=Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(10)
+        layout.addSpacing(12)
         drop = QFrame()
         drop.setObjectName("dropCard")
         drop.setProperty("dragActive", False)  # noqa: FBT003
-        drop.setMinimumSize(620, 200)
+        drop.setMinimumSize(620, 220)
         drop.setMaximumWidth(760)
         self._drop_card = drop
         drop_layout = QVBoxLayout(drop)
-        drop_layout.setContentsMargins(38, 28, 38, 28)
-        drop_layout.setSpacing(8)
+        drop_layout.setContentsMargins(38, 30, 38, 30)
+        drop_layout.setSpacing(12)
         drop_layout.addWidget(
             _label("↑", object_name="uploadIcon"),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
-        actions = QHBoxLayout()
-        actions.setSpacing(10)
-        actions.addStretch()
+        drop_layout.addWidget(
+            _label(
+                "Drag and drop a room photo or 3D room",
+                object_name="dropTitle",
+            ),
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
         choose = QPushButton("Choose a file")
         choose.setObjectName("dropAction")
+        choose.setMinimumWidth(180)
         choose.clicked.connect(self.file_requested)
-        actions.addWidget(choose)
-        capture = QPushButton("Capture from camera")
-        capture.setObjectName("quietAction")
-        capture.clicked.connect(self.capture_requested)
-        actions.addWidget(capture)
-        actions.addStretch()
-        drop_layout.addLayout(actions)
         drop_layout.addWidget(
-            _label("ROOM PHOTO  ·  3D ROOM", object_name="feedMeta"),
+            choose,
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
+        drop_layout.addWidget(
+            _label(
+                "JPG  ·  JPEG  ·  PNG  ·  WEBP  ·  PLY  ·  SSOG  ·  ZIP",
+                object_name="feedMeta",
+            ),
             alignment=Qt.AlignmentFlag.AlignHCenter,
         )
         layout.addWidget(drop, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(18)
+        capture = QPushButton("Use webcam")
+        capture.setObjectName("cameraAction")
+        capture.setMinimumSize(360, 52)
+        capture.setMaximumWidth(760)
+        capture.clicked.connect(self.capture_requested)
+        layout.addWidget(capture, alignment=Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch()
         self._content.addWidget(page)
 

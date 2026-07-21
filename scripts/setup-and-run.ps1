@@ -12,7 +12,7 @@ if ($missing.Count -gt 0) {
     Write-Host ""
     Write-Host "  uv    https://docs.astral.sh/uv/getting-started/installation/"
     Write-Host "  node  https://nodejs.org/ (version 20 or newer)"
-    Write-Host "  make  winget install GnuWin32.Make  (or use Git Bash with scripts/judge-setup.sh)"
+    Write-Host "  make  winget install GnuWin32.Make  (or use Git Bash with scripts/setup-and-run.sh)"
     exit 1
 }
 

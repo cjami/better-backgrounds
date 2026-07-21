@@ -4,6 +4,9 @@ Place your live webcam subject into a locally generated, navigable room scene.
 Everything runs on your machine: no account, no cloud reconstruction, no telemetry,
 and no webcam upload path.
 
+Start with a room photo, capture the empty room with your webcam, or import an existing
+Gaussian-splat scene as a `.ply`, `.ssog`, or compatible `.zip`.
+
 ## Download
 
 | Platform | File |
@@ -31,15 +34,16 @@ xattr -dr com.apple.quarantine "Better Backgrounds.app"
 
 ## First launch
 
-The app asks you to accept Apple's research-only SHARP model licence and then downloads
-its three required models (~3.1 GiB total) with a progress bar. This happens once; after
-that the app runs offline.
+The app asks you to accept the room-reconstruction model's research-only licence and
+then downloads its three required models (~3.1 GiB total) with a progress bar. This
+happens once; after that the app runs offline.
 
 ## Using it
 
-1. **Build** — drop in one JPEG, PNG, or WebP photo of a room. SHARP reconstructs it into
-   a navigable Gaussian-splat scene. Already have a splat? Drop in a Gaussian `.ply` or a
-   Streamed SOG `.ssog`/`.zip` instead and it is imported directly, without running SHARP.
+1. **Build** — choose or drop a JPEG, PNG, or WebP room photo; capture the empty room
+   with your webcam; or import an existing Gaussian `.ply` or Streamed SOG
+   `.ssog`/`.zip` scene. Photos and webcam captures are reconstructed into navigable
+   Gaussian scenes, while existing 3D scenes are imported directly.
 2. **Adjust** — drag to look around, `W`/`A`/`S`/`D` to fly, and set depth-of-field.
 3. **Show** — your matted webcam subject is composited into the room, with PIH matching
    your appearance to the scene lighting.
@@ -53,7 +57,7 @@ To use the result in Zoom, Teams, FaceTime, or a browser, install
 ```bash
 git clone https://github.com/cjami/better-backgrounds
 cd better-backgrounds
-./scripts/judge-setup.sh        # Windows: .\scripts\judge-setup.ps1
+./scripts/setup-and-run.sh      # Windows: .\scripts\setup-and-run.ps1
 ```
 
 Needs git, uv, Node.js 20+, and GNU Make.
