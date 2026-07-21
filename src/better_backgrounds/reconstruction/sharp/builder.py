@@ -45,15 +45,21 @@ from better_backgrounds.scene import (
 
 EmitEvent = Callable[[JobEvent], None]
 CancellationCheck = Callable[[], bool]
+SUPPORTED_OUTPUT_ASPECT_RATIOS = (16 / 9, 4 / 3, 1.0)
 
 
 def _sharp_viewpoint(metadata: SharpPlyMetadata) -> Viewpoint:
     width, height = metadata.image_size
+    source_aspect_ratio = width / height
+    output_aspect_ratio = min(
+        SUPPORTED_OUTPUT_ASPECT_RATIOS,
+        key=lambda candidate: abs(candidate - source_aspect_ratio),
+    )
     return Viewpoint(
         position=Vector3(x=0.0, y=0.0, z=0.0),
         orbit_target=Vector3(x=0.0, y=0.0, z=-2.0),
         field_of_view=min(max(metadata.field_of_view, 24.0), 90.0),
-        aspect_ratio=width / height,
+        aspect_ratio=output_aspect_ratio,
         horizon=0.0,
         near_clip=0.03,
         far_clip=30.0,

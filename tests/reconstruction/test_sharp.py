@@ -265,8 +265,8 @@ def test_sharp_ply_validation_rejects_wrong_encoding_and_camera(tmp_path: Path) 
 def test_scene_builder_publishes_ply_preview_and_provenance(tmp_path: Path) -> None:
     """Adopt only validated outputs and remove every job staging file."""
     source = tmp_path / "my_room.jpg"
-    image = Image.new("RGB", (320, 256), "red")
-    image.paste("blue", (160, 0, 320, 256))
+    image = Image.new("RGB", (1328, 720), "red")
+    image.paste("blue", (664, 0, 1328, 720))
     exif = Image.Exif()
     exif[274] = 2
     image.save(source, exif=exif)
@@ -288,9 +288,9 @@ def test_scene_builder_publishes_ply_preview_and_provenance(tmp_path: Path) -> N
         model_loaded()
         with Image.open(image_path) as normalized:
             normalized_rgb = np.asarray(normalized.convert("RGB"))
-            assert normalized_rgb[128, 40, 2] > normalized_rgb[128, 40, 0]
-            assert normalized_rgb[128, 280, 0] > normalized_rgb[128, 280, 2]
-        write_sharp_ply(output_path)
+            assert normalized_rgb[360, 100, 2] > normalized_rgb[360, 100, 0]
+            assert normalized_rgb[360, 1200, 0] > normalized_rgb[360, 1200, 2]
+        write_sharp_ply(output_path, image_size=(1328, 720))
         return 42.5
 
     events: list[object] = []
@@ -312,8 +312,9 @@ def test_scene_builder_publishes_ply_preview_and_provenance(tmp_path: Path) -> N
     assert reference.entrypoint == "scene.ply"
     assert reference.preview == "preview.webp"
     assert reference.provenance is not None
-    assert reference.provenance.source_size == (320, 256)
+    assert reference.provenance.source_size == (1328, 720)
     assert reference.provenance.inference_ms == 42.5
+    assert reference.default_viewpoint.aspect_ratio == 16 / 9
     assert reference.default_viewpoint.scene_transform.orientation.x == 1.0
     assert (scene_root / reference.asset_id / "scene.ply").is_file()
     assert (scene_root / reference.asset_id / "preview.webp").is_file()
