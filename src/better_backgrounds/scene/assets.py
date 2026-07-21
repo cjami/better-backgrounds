@@ -150,6 +150,13 @@ class AssetInstaller:
             raise ValueError(msg)
         return written
 
+    def remove(self, reference: SceneReference) -> None:
+        """Delete one cached scene directory and forget its verification."""
+        self._verified.pop(reference.asset_id, None)
+        target = self.root / reference.asset_id
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+
     def is_ready(self, reference: SceneReference) -> bool:
         """Return whether every cached resource matches the checked-in manifest."""
         target = self.root / reference.asset_id

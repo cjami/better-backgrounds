@@ -73,6 +73,17 @@ QLabel#feedMeta {{
 }}
 QLabel#previewNote {{ color: #e3e4e7; font-size: 14px; font-weight: 600; }}
 QLabel#roomName {{ font-weight: 650; }}
+QPushButton#roomDelete {{
+    min-height: 0;
+    padding: 0;
+    color: {MUTED};
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    font-size: 13px;
+}}
+QPushButton#roomDelete:hover {{ color: #f19a91; background: #311f22; border-color: #75464c; }}
+QPushButton#roomDelete:pressed {{ color: #cf7168; background: #191113; border-color: #482e32; }}
 QLabel#roomThumbnail {{
     background: qradialgradient(cx:0.62, cy:0.18, radius:0.78,
         stop:0 #8b8679, stop:0.34 #3b3d42, stop:1 #171a20);

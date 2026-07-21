@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -112,6 +113,12 @@ class SnapshotStore:
             manifest.model_dump_json(indent=2).encode(),
         )
         return SnapshotPaths(background=background_path)
+
+    def delete(self, asset_id: str) -> None:
+        """Remove every cached snapshot for one scene when its room is deleted."""
+        directory = self._root / asset_id
+        if directory.exists():
+            shutil.rmtree(directory, ignore_errors=True)
 
     def _directory(
         self,

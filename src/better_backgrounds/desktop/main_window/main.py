@@ -12,6 +12,7 @@ from platformdirs import user_cache_path, user_data_path
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import (
     QMainWindow,
+    QMessageBox,
     QStackedLayout,
     QStackedWidget,
     QVBoxLayout,
@@ -181,6 +182,7 @@ class MainWindow(QMainWindow):
     def _connect_views(self) -> None:
         self._header.tab_selected.connect(self.select_tab)
         self._show_page.room_selected.connect(self.select_room)
+        self._show_page.room_delete_requested.connect(self._delete_room)
         self._show_page.camera_changed.connect(self._virtual_camera_controller.request_active)
         self._show_page.virtual_camera_quality_changed.connect(
             self._virtual_camera_controller.select_profile,
@@ -421,6 +423,75 @@ class MainWindow(QMainWindow):
     def _set_virtual_camera_state(self, state: object) -> None:
         if isinstance(state, VirtualCameraState):
             self._show_page.set_virtual_camera_state(state.phase, state.message)
+
+    @Slot(str)
+    def _delete_room(self, room: str) -> None:
+        """Remove a room from the library, confirming irreversible deletions."""
+        if room not in self._rooms:
+            return
+        if self._library.is_sample(room):
+            self._remove_sample_download(room)
+            return
+        scene = self._library.scene_for_room(room)
+        if scene is None or not self._confirm_delete(room):
+            return
+        was_selected = self._selected_room == room
+        fallback = self._neighbour_room(room)
+        self._library.delete_room(room)
+        self._adjust_page.discard_viewpoint(scene.asset_id)
+        self._show_page.forget_room(room)
+        self._show_page.set_rooms(
+            self._rooms,
+            fallback if was_selected else self._selected_room,
+        )
+        if was_selected:
+            self.select_room(fallback)
+
+    def _remove_sample_download(self, room: str) -> None:
+        scene = self._library.sample_scene
+        if not self._library.assets.is_ready(scene) or not self._confirm_remove_download(room):
+            return
+        self._library.remove_sample_download()
+        self._adjust_page.discard_viewpoint(scene.asset_id)
+        self._show_page.forget_room(room)
+        self._show_page.set_sample_ready(ready=False)
+        self._show_page.set_room_thumbnail(room, None)
+        if self._selected_room == room:
+            self.select_room(room)
+
+    def _neighbour_room(self, room: str) -> str:
+        remaining = [name for name in self._rooms if name != room]
+        if not remaining:
+            return ""
+        index = self._rooms.index(room)
+        return remaining[min(index, len(remaining) - 1)]
+
+    def _confirm_delete(self, room: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Delete room")
+        box.setText(f"Delete “{room}”?")
+        box.setInformativeText(
+            "This permanently removes the reconstructed room, its saved view, and rendered "
+            "background. The original source was not kept in the app, so this cannot be undone.",
+        )
+        delete = box.addButton("Delete room", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is delete
+
+    def _confirm_remove_download(self, room: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Remove download")
+        box.setText(f"Remove the downloaded data for “{room}”?")
+        box.setInformativeText("This frees disk space. You can download the sample again anytime.")
+        remove = box.addButton("Remove download", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is remove
 
     @Slot(str, str)
     def _scene_completed(self, scene_id: str, room_name: str) -> None:

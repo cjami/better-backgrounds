@@ -16,14 +16,6 @@ if TYPE_CHECKING:
 
     from better_backgrounds.scene.models import SceneReference
 
-DEFAULT_ROOMS = (
-    "Table Tennis Room — Sample",
-    "Loft — North Window",
-    "Studio — West Wall",
-    "Living room",
-    "Bookshelf corner",
-)
-
 
 class SceneLibrary:
     """Own sample and generated scenes, stable room IDs, assets, and viewpoints."""
@@ -44,9 +36,10 @@ class SceneLibrary:
         self.viewpoints = ViewpointStore(data_root / "viewpoints-v1.json")
         self.selection = RoomSelectionStore(data_root / "selected-room-v1.json")
         generated_rooms = [scene.display_name for scene in self.generated_scenes.values()]
+        sample_name = self.sample_scene.display_name
         self.rooms = [
             *generated_rooms,
-            *[room for room in DEFAULT_ROOMS if room not in generated_rooms],
+            *([sample_name] if sample_name not in generated_rooms else []),
         ]
         self.room_ids = {room: self._initial_room_id(room) for room in self.rooms}
 
@@ -75,6 +68,32 @@ class SceneLibrary:
             self.rooms.insert(0, room_name)
         self.room_ids[room_name] = room_id
         return room_name, room_id
+
+    def is_sample(self, room: str) -> bool:
+        """Return whether a display room is the bundled downloadable sample."""
+        return room == self.sample_scene.display_name
+
+    def delete_room(self, room: str) -> SceneReference | None:
+        """Permanently remove a generated room and all of its derived state."""
+        room_id = self.room_ids.get(room)
+        scene = self.generated_scenes.get(room_id) if room_id is not None else None
+        if scene is None:
+            return None
+        self.catalogue.delete(scene.asset_id)
+        self.assets.remove(scene)
+        self.snapshots.delete(scene.asset_id)
+        self.viewpoints.delete(scene.asset_id)
+        self.resolver.unregister(scene.asset_id)
+        self.generated_scenes.pop(scene.asset_id, None)
+        self.rooms.remove(room)
+        self.room_ids.pop(room, None)
+        return scene
+
+    def remove_sample_download(self) -> None:
+        """Free the sample's cached download while keeping it re-downloadable."""
+        self.assets.remove(self.sample_scene)
+        self.snapshots.delete(self.sample_scene.asset_id)
+        self.viewpoints.delete(self.sample_scene.asset_id)
 
     @staticmethod
     def room_id(room_name: str) -> str:

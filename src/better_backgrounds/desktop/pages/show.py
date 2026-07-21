@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal
+from PySide6.QtGui import QEnterEvent, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -34,10 +35,60 @@ if TYPE_CHECKING:
     from better_backgrounds.desktop.camera import InputCamera
 
 
+class RoomCard(QWidget):
+    """One room row with a hover-revealed delete affordance."""
+
+    delete_requested = Signal(str)
+
+    def __init__(self, room: str, thumbnail: QLabel, *, removable: bool) -> None:
+        """Compose the thumbnail, name, and a delete button shown on hover."""
+        super().__init__()
+        self._room = room
+        self._removable = removable
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(10)
+        layout.addWidget(thumbnail)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addStretch()
+        text.addWidget(_label(room, object_name="roomName"))
+        text.addStretch()
+        layout.addLayout(text, 1)
+        self._delete = QPushButton("🗑")
+        self._delete.setObjectName("roomDelete")
+        self._delete.setFixedSize(26, 26)
+        self._delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._delete.setToolTip("Delete room")
+        self._delete.setAccessibleName(f"Delete {room}")
+        self._delete.clicked.connect(lambda: self.delete_requested.emit(self._room))
+        self._delete.setVisible(False)
+        layout.addWidget(self._delete)
+
+    def set_removable(self, *, removable: bool) -> None:
+        """Enable or hide the delete affordance as a room's state changes."""
+        self._removable = removable
+        if not removable:
+            self._delete.setVisible(False)
+
+    def enterEvent(self, event: QEnterEvent) -> None:  # noqa: N802
+        """Reveal the delete button while the pointer is over a removable row."""
+        if self._removable:
+            self._delete.setVisible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802
+        """Hide the delete button once the pointer leaves the row."""
+        self._delete.setVisible(False)
+        super().leaveEvent(event)
+
+
 class ShowPage(QWidget):
     """Preview and control the local composite for the selected room."""
 
     room_selected = Signal(str)
+    room_delete_requested = Signal(str)
     build_requested = Signal()
     camera_changed = Signal(bool)
     virtual_camera_quality_changed = Signal(str)
@@ -62,11 +113,13 @@ class ShowPage(QWidget):
         self._camera_active = False
         self._preview_active = False
         self._sample_room = ""
+        self._sample_ready = False
         self._room_id = ""
         self._harmonization_drafts: dict[str, HarmonizationSettings] = {}
         self._harmonization = HarmonizationSettings(global_harmonization=True)
         self._thumbnail_paths: dict[str, Path] = {}
         self._room_thumbnails: dict[str, QLabel] = {}
+        self._room_cards: dict[str, RoomCard] = {}
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -239,6 +292,8 @@ class ShowPage(QWidget):
         self._rooms.setObjectName("roomList")
         self._rooms.setAccessibleName("Available rooms")
         self._rooms.currentItemChanged.connect(self._emit_room)
+        self._rooms.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._rooms.customContextMenuRequested.connect(self._show_room_menu)
         sidebar_layout.addWidget(self._rooms, 1)
 
         self._sample_panel = QFrame()
@@ -318,12 +373,20 @@ class ShowPage(QWidget):
         self._rooms.blockSignals(True)  # noqa: FBT003
         self._rooms.clear()
         self._room_thumbnails.clear()
+        self._room_cards.clear()
         for room in rooms:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, room)
             item.setSizeHint(QSize(0, 66))
             self._rooms.addItem(item)
-            self._rooms.setItemWidget(item, self._room_card(room))
+            card = RoomCard(
+                room,
+                self._room_thumbnail_label(room),
+                removable=self._room_removable(room),
+            )
+            card.delete_requested.connect(self.room_delete_requested)
+            self._room_cards[room] = card
+            self._rooms.setItemWidget(item, card)
         self._rooms.blockSignals(False)  # noqa: FBT003
         self.set_room(target or (rooms[0] if rooms else ""))
 
@@ -399,10 +462,12 @@ class ShowPage(QWidget):
 
     def set_sample_ready(self, *, ready: bool) -> None:
         """Show whether the sample is available offline."""
+        self._sample_ready = ready
         self._sample_progress.hide()
         self._sample_status.setText("Ready offline" if ready else "Sample is not installed")
         self._sample_install.setVisible(not ready)
         self._sample_install.setEnabled(not ready)
+        self._refresh_sample_removable()
 
     def set_sample_error(self, message: str) -> None:
         """Show a recoverable sample install failure."""
@@ -524,11 +589,7 @@ class ShowPage(QWidget):
             self._harmonization_drafts[self._room_id] = self._harmonization
         self.harmonization_changed.emit(self._harmonization)
 
-    def _room_card(self, room: str) -> QWidget:
-        card = QWidget()
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(8, 7, 8, 7)
-        layout.setSpacing(10)
+    def _room_thumbnail_label(self, room: str) -> QLabel:
         thumbnail = QLabel()
         thumbnail.setObjectName("roomThumbnail")
         thumbnail.setFixedSize(70, 48)
@@ -536,14 +597,37 @@ class ShowPage(QWidget):
         thumbnail.setAccessibleName(f"{room} thumbnail")
         self._room_thumbnails[room] = thumbnail
         self._apply_room_thumbnail(room)
-        layout.addWidget(thumbnail)
-        text = QVBoxLayout()
-        text.setSpacing(2)
-        text.addStretch()
-        text.addWidget(_label(room, object_name="roomName"))
-        text.addStretch()
-        layout.addLayout(text, 1)
-        return card
+        return thumbnail
+
+    def _room_removable(self, room: str) -> bool:
+        if room == self._sample_room:
+            return self._sample_ready
+        return bool(room)
+
+    def _refresh_sample_removable(self) -> None:
+        card = self._room_cards.get(self._sample_room)
+        if card is not None:
+            card.set_removable(removable=self._sample_ready)
+
+    def _show_room_menu(self, point: QPoint) -> None:
+        item = self._rooms.itemAt(point)
+        if item is None:
+            return
+        room = str(item.data(Qt.ItemDataRole.UserRole))
+        if not self._room_removable(room):
+            return
+        menu = QMenu(self._rooms)
+        label = "Remove download" if room == self._sample_room else "Delete room…"
+        action = menu.addAction(label)
+        action.triggered.connect(lambda: self.room_delete_requested.emit(room))
+        menu.popup(self._rooms.viewport().mapToGlobal(point))
+
+    def forget_room(self, room: str) -> None:
+        """Drop cached harmonization state and imagery for a room that was removed."""
+        self._harmonization_drafts.pop(room, None)
+        self._thumbnail_paths.pop(room, None)
+        if self._room_id == room:
+            self._room_id = ""
 
     def _apply_room_thumbnail(self, room: str) -> None:
         thumbnail = self._room_thumbnails.get(room)

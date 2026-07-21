@@ -43,3 +43,7 @@ class ManagedSceneResolver:
     def register(self, reference: SceneReference) -> None:
         """Add one validated locally generated scene to the controlled index."""
         self._references[reference.asset_id] = reference
+
+    def unregister(self, asset_id: str) -> None:
+        """Drop one scene from the controlled index after its room is deleted."""
+        self._references.pop(asset_id, None)

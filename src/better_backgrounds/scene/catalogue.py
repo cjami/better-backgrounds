@@ -57,7 +57,14 @@ class SceneCatalogue:
     def save(self, reference: SceneReference) -> None:
         """Insert or replace one room without disturbing catalogue order."""
         existing = [scene for scene in self.scenes() if scene.asset_id != reference.asset_id]
-        document = SceneCatalogueDocument(scenes=(reference, *existing))
+        self._write(SceneCatalogueDocument(scenes=(reference, *existing)))
+
+    def delete(self, asset_id: str) -> None:
+        """Drop one generated room, leaving the remaining catalogue order intact."""
+        remaining = tuple(scene for scene in self.scenes() if scene.asset_id != asset_id)
+        self._write(SceneCatalogueDocument(scenes=remaining))
+
+    def _write(self, document: SceneCatalogueDocument) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
         try:

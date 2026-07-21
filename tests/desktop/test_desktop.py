@@ -43,6 +43,16 @@ from better_backgrounds.scene import (
     Viewpoint,
     load_sample_manifest,
 )
+from better_backgrounds.scene.catalogue import SceneCatalogue
+
+
+def _seed_generated_room(data_root: Path, asset_id: str, display_name: str) -> SceneReference:
+    """Persist a catalogue-backed room so relaunch and deletion can be exercised."""
+    sample = load_sample_manifest().scenes[0]
+    scene = sample.model_copy(update={"asset_id": asset_id, "display_name": display_name})
+    SceneCatalogue(data_root / "scene-catalogue-v1.json").save(scene)
+    return scene
+
 
 TAB_COUNT = 3
 BUILD_TAB = 1
@@ -250,6 +260,7 @@ def test_last_selected_room_is_restored_on_relaunch(tmp_path: Path) -> None:
     """Open the previous room directly so its cached render can be presented."""
     data_root = tmp_path / "data"
     cache_root = tmp_path / "cache"
+    _seed_generated_room(data_root, "living-room-v1", "Living room")
     window = MainWindow(
         command_factory=lambda _job_id, _outcome: [],
         renderer_factory=ScenePreview,
@@ -268,6 +279,33 @@ def test_last_selected_room_is_restored_on_relaunch(tmp_path: Path) -> None:
 
     assert restored.selected_room == "Living room"
     restored.close()
+
+
+def test_deleting_a_room_removes_it_and_selects_a_neighbour(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permanently drop a generated room and fall back to a remaining room."""
+    data_root = tmp_path / "data"
+    cache_root = tmp_path / "cache"
+    _seed_generated_room(data_root, "living-room-v1", "Living room")
+    window = MainWindow(
+        command_factory=lambda _job_id, _outcome: [],
+        renderer_factory=ScenePreview,
+        scene_cache_root=cache_root,
+        data_root=data_root,
+    )
+    window.select_room("Living room")
+    monkeypatch.setattr(window, "_confirm_delete", lambda _room: True)
+
+    window._delete_room("Living room")  # noqa: SLF001
+
+    assert "Living room" not in window._rooms  # noqa: SLF001
+    assert window._library.scene_for_room("Living room") is None  # noqa: SLF001
+    assert window.selected_room == "Table Tennis Room — Sample"
+    remaining = SceneCatalogue(data_root / "scene-catalogue-v1.json").scenes()
+    assert all(scene.asset_id != "living-room-v1" for scene in remaining)
+    window.close()
 
 
 def test_adjust_reuses_scene_and_keeps_its_room_draft() -> None:
