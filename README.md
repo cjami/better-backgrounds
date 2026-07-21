@@ -1,7 +1,6 @@
 # Better Backgrounds
 
-Better Backgrounds is a desktop app that places a live, matted webcam subject
-into a navigable room scene.
+Better Backgrounds is an exploration into latest and greatest techniques to improve composited webcam footage in any way possible. It takes things even further with traversable Gaussian Splats and physically simulated Depth of Field.
 
 Create a room from a JPEG, PNG, or WebP photo, capture an empty room with your
 webcam, or import an existing Gaussian scene as a `.ply`, `.ssog`, or compatible
@@ -98,7 +97,7 @@ All three models are required:
 
 | Model | Purpose | Download size |
 | --- | --- | ---: |
-| Room reconstruction | Convert photos into Gaussian scenes | 2.62 GiB |
+| Apple SHARP | Convert photos into Gaussian scenes | 2.62 GiB |
 | MatAnyone 2 | Live person matting | 135 MiB |
 | Adobe PIH | Appearance harmonization | 358 MiB |
 
