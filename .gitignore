@@ -79,3 +79,10 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Model checkpoints are fetched into the managed cache at first run, never committed.
+*.pth
+*.pt
+
+# Nuitka packaging output
+/build/

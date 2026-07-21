@@ -50,6 +50,9 @@ jobs:
       - name: Source smoke test
         if: runner.os != 'Linux'
         run: uv run python -m better_backgrounds.desktop --build-smoke-test
+      - name: Select the macOS application icon
+        if: runner.os == 'macOS'
+        run: sed -i '' 's/app-icon\.ico/app-icon.icns/' pysidedeploy.spec
       - run: uv run pyside6-deploy -c pysidedeploy.spec --force
       - uses: actions/upload-artifact@v4
         with:

@@ -1,4 +1,4 @@
-"""Feature-first: Verify opt-in PIH inference and exact-frame fallback behavior."""
+"""Feature-first: Verify mandatory PIH inference and exact-frame degradation behavior."""
 
 from __future__ import annotations
 
@@ -16,12 +16,9 @@ from better_backgrounds.harmonization.pih import (
     CURVE_SAMPLE_COUNT,
     DEFAULT_CURVE_STRENGTH,
     GAIN_NEW_FRAME_WEIGHT,
-    HARMONIZATION_BACKEND_ENV,
-    PIH_CHECKPOINT_ENV,
-    PIH_CURVE_STRENGTH_ENV,
     PihAppearanceHarmonizer,
     create_appearance_harmonizer,
-    pih_checkpoint_from_environment,
+    pih_checkpoint_path,
 )
 
 if TYPE_CHECKING:
@@ -149,40 +146,28 @@ def test_pih_gain_regularizer_removes_blobs_but_preserves_directional_light() ->
     assert torch.allclose(regularized_directional, directional, atol=1e-5, rtol=0.0)
 
 
-def test_pih_checkpoint_is_external_and_selects_the_available_backend(
+def test_pih_is_the_only_backend_and_uses_the_managed_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Use a prepared development checkpoint without transient shell state."""
-    development_checkpoint = tmp_path / "development" / "ckpt_g39.pth"
-    monkeypatch.setattr(
-        pih_runtime,
-        "DEVELOPMENT_PIH_CHECKPOINT",
-        development_checkpoint,
-    )
-    monkeypatch.delenv(PIH_CHECKPOINT_ENV, raising=False)
-    monkeypatch.delenv(HARMONIZATION_BACKEND_ENV, raising=False)
-    monkeypatch.delenv(PIH_CURVE_STRENGTH_ENV, raising=False)
-
-    assert pih_checkpoint_from_environment() is None
-    assert create_appearance_harmonizer().__class__.__name__ == "HarmonizerAppearanceHarmonizer"
-
-    development_checkpoint.parent.mkdir()
-    development_checkpoint.touch()
-    monkeypatch.setenv(PIH_CURVE_STRENGTH_ENV, "0.5")
+    """Always select PIH from the managed cache with no configurable alternative."""
+    managed_checkpoint = tmp_path / "models-v1" / "pih" / "ckpt_g39.pth"
+    monkeypatch.setattr(pih_runtime, "pih_checkpoint_path", lambda: managed_checkpoint)
 
     harmonizer = create_appearance_harmonizer()
+
     assert isinstance(harmonizer, PihAppearanceHarmonizer)
-    assert harmonizer.checkpoint == development_checkpoint
-    assert harmonizer.curve_strength == 0.5
-    assert PihAppearanceHarmonizer().curve_strength == DEFAULT_CURVE_STRENGTH
+    assert harmonizer.checkpoint == managed_checkpoint
+    assert harmonizer.curve_strength == DEFAULT_CURVE_STRENGTH
 
-    explicit_checkpoint = tmp_path / "explicit.pth"
-    monkeypatch.setenv(PIH_CHECKPOINT_ENV, str(explicit_checkpoint))
-    monkeypatch.setenv(HARMONIZATION_BACKEND_ENV, "pih")
 
-    assert pih_checkpoint_from_environment() == explicit_checkpoint.resolve()
-    assert PihAppearanceHarmonizer().checkpoint == explicit_checkpoint.resolve()
+def test_managed_pih_checkpoint_path_lives_in_the_shared_model_cache() -> None:
+    """Resolve the PIH checkpoint from the same managed cache the setup step fills."""
+    path = pih_checkpoint_path()
+
+    assert path.name == "ckpt_g39.pth"
+    assert path.parent.name == "pih"
+    assert path.parent.parent.name == "models-v1"
 
 
 def test_missing_pih_checkpoint_falls_back_to_standard_composite(tmp_path: Path) -> None:
@@ -202,7 +187,7 @@ def test_missing_pih_checkpoint_falls_back_to_standard_composite(tmp_path: Path)
     assert result.image is None
     assert result.degraded_components == ("pih",)
     assert harmonizer.error is not None
-    assert "not found" in harmonizer.error
+    assert "not prepared" in harmonizer.error
 
 
 def test_pih_predicts_current_frame_parameters_and_preserves_background(tmp_path: Path) -> None:

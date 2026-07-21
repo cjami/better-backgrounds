@@ -1,4 +1,4 @@
-.PHONY: setup lint format format-check type test renderer-build renderer-test build desktop desktop-smoke package-desktop check
+.PHONY: setup lint format format-check type test renderer-build renderer-test build desktop desktop-smoke package-desktop icons models check
 
 setup:
 	uv python install 3.14
@@ -42,5 +42,11 @@ desktop-smoke:
 
 package-desktop:
 	uv run pyside6-deploy -c pysidedeploy.spec --force
+
+icons:
+	uv run python packaging/build_icons.py
+
+models:
+	uv run better-backgrounds prepare-models --accept-model-license
 
 check: lint test build

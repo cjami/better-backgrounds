@@ -1,15 +1,13 @@
-"""Opt-in Adobe PIH runtime for frame-local appearance harmonization."""
+"""Mandatory Adobe PIH runtime for frame-local appearance harmonization."""
 
 from __future__ import annotations
 
 import optparse
-import os
 import pickle
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import cv2
@@ -21,21 +19,14 @@ from torch.serialization import safe_globals
 
 from better_backgrounds._vendor.pih import PihInferenceModel, apply_rgb_curves
 from better_backgrounds.harmonization import HarmonizationResult, HarmonizationSettings
-from better_backgrounds.harmonization.runtime import (
-    SESSION_TRANSITION_MS,
-    HarmonizerAppearanceHarmonizer,
-)
+from better_backgrounds.harmonization.checkpoint import PihCheckpointInstaller
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from numpy.typing import NDArray
 
-HARMONIZATION_BACKEND_ENV = "BETTER_BACKGROUNDS_HARMONIZATION_BACKEND"
-PIH_CHECKPOINT_ENV = "BETTER_BACKGROUNDS_PIH_CHECKPOINT"
-PIH_DEVICE_ENV = "BETTER_BACKGROUNDS_PIH_DEVICE"
-PIH_CURVE_STRENGTH_ENV = "BETTER_BACKGROUNDS_PIH_CURVE_STRENGTH"
-DEVELOPMENT_PIH_CHECKPOINT = (
-    Path(__file__).resolve().parents[3] / ".tools" / "pih_bench" / "ckpt_g39.pth"
-)
+SESSION_TRANSITION_MS = 750.0
 DEFAULT_CURVE_STRENGTH = 0.65
 CURVE_BLACK_LIFT_RETENTION = 0.8
 CURVE_SAMPLE_COUNT = 5
@@ -84,48 +75,14 @@ class _PihPredictor(Protocol):
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
-def pih_checkpoint_from_environment() -> Path | None:
-    """Resolve the explicitly supplied PIH checkpoint path."""
-    configured = os.environ.get(PIH_CHECKPOINT_ENV)
-    return None if not configured else Path(configured).expanduser().resolve()
+def pih_checkpoint_path() -> Path:
+    """Resolve the managed PIH checkpoint prepared during first-run setup."""
+    return PihCheckpointInstaller().checkpoint_path
 
 
-def create_appearance_harmonizer() -> HarmonizerAppearanceHarmonizer | PihAppearanceHarmonizer:
-    """Create the selected backend, preferring a prepared local PIH experiment."""
-    checkpoint = pih_checkpoint_from_environment()
-    if checkpoint is None and DEVELOPMENT_PIH_CHECKPOINT.is_file():
-        checkpoint = DEVELOPMENT_PIH_CHECKPOINT
-    configured_backend = os.environ.get(HARMONIZATION_BACKEND_ENV)
-    backend = (
-        configured_backend.strip().lower()
-        if configured_backend is not None
-        else ("pih" if checkpoint is not None else "harmonizer")
-    )
-    if backend == "harmonizer":
-        return HarmonizerAppearanceHarmonizer()
-    if backend == "pih":
-        return PihAppearanceHarmonizer(
-            checkpoint,
-            preferred_device=os.environ.get(PIH_DEVICE_ENV),
-            curve_strength=_curve_strength_from_environment(),
-        )
-    msg = f"Unsupported harmonization backend: {backend}"
-    raise ValueError(msg)
-
-
-def _curve_strength_from_environment() -> float:
-    configured = os.environ.get(PIH_CURVE_STRENGTH_ENV)
-    if configured is None:
-        return DEFAULT_CURVE_STRENGTH
-    try:
-        strength = float(configured)
-    except ValueError as error:
-        msg = f"{PIH_CURVE_STRENGTH_ENV} must be between 0 and 1"
-        raise ValueError(msg) from error
-    if not 0.0 <= strength <= 1.0:
-        msg = f"{PIH_CURVE_STRENGTH_ENV} must be between 0 and 1"
-        raise ValueError(msg)
-    return strength
+def create_appearance_harmonizer() -> PihAppearanceHarmonizer:
+    """Create the mandatory PIH appearance backend from its managed checkpoint."""
+    return PihAppearanceHarmonizer(pih_checkpoint_path())
 
 
 class PihAppearanceHarmonizer:
@@ -139,9 +96,9 @@ class PihAppearanceHarmonizer:
         curve_strength: float = DEFAULT_CURVE_STRENGTH,
         model_factory: Callable[[], nn.Module] = PihInferenceModel,
     ) -> None:
-        """Configure lazy inference from an externally supplied official checkpoint."""
+        """Configure lazy inference from the managed official checkpoint."""
         self.settings = HarmonizationSettings()
-        self.checkpoint = checkpoint or pih_checkpoint_from_environment()
+        self.checkpoint = checkpoint or pih_checkpoint_path()
         self.preferred_device = preferred_device
         if not 0.0 <= curve_strength <= 1.0:
             msg = "PIH curve strength must be between 0 and 1"
@@ -560,11 +517,11 @@ class PihAppearanceHarmonizer:
             if self._model is not None and self._device is not None:
                 return self._model, self._device
             checkpoint = self.checkpoint
-            if checkpoint is None:
-                msg = f"set {PIH_CHECKPOINT_ENV} to the external ckpt_g39.pth checkpoint"
-                raise RuntimeError(msg)
-            if not checkpoint.is_file():
-                msg = f"PIH checkpoint not found: {checkpoint}"
+            if checkpoint is None or not checkpoint.is_file():
+                msg = (
+                    "The PIH checkpoint is not prepared. Complete first-run model setup "
+                    "or run: better-backgrounds prepare-models"
+                )
                 raise RuntimeError(msg)
             device = self._select_device()
             with safe_globals([optparse.Values]):

@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to publish the release under
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            asset: BetterBackgrounds-Windows-x64
+          - os: macos-15
+            asset: BetterBackgrounds-macOS-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --all-groups --locked
+      - run: npm ci --no-audit --no-fund
+
+      # The spec ships the Windows .ico; macOS bundles need the .icns instead.
+      - name: Select the macOS application icon
+        if: runner.os == 'macOS'
+        run: sed -i '' 's/app-icon\.ico/app-icon.icns/' pysidedeploy.spec
+
+      - run: uv run pyside6-deploy -c pysidedeploy.spec --force
+
+      # ditto preserves the symlinks and permission bits inside a macOS bundle
+      # that a plain zip would flatten, leaving the app unlaunchable.
+      - name: Archive macOS bundle
+        if: runner.os == 'macOS'
+        run: |
+          BUILD="$(uv run python packaging/stage_release.py)"
+          echo "Packaged build: $BUILD"
+          ditto -c -k --sequesterRsrc --keepParent "$BUILD" "${{ matrix.asset }}.zip"
+
+      - name: Archive Windows build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $build = uv run python packaging/stage_release.py
+          Write-Host "Packaged build: $build"
+          Compress-Archive -Path "$build\*" -DestinationPath "${{ matrix.asset }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.zip
+
+  publish:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Better Backgrounds $TAG" \
+            --notes-file packaging/RELEASE_NOTES.md \
+            --clobber 2>/dev/null \
+            || gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file packaging/RELEASE_NOTES.md
+          gh release upload "$TAG" artifacts/*.zip --repo "$GITHUB_REPOSITORY" --clobber

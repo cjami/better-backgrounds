@@ -13,10 +13,11 @@ from better_backgrounds.matting import (
 )
 from better_backgrounds.matting.runtime import (
     MATANYONE2_REVISION,
+    MatAnyoneCheckpointInstaller,
     MatAnyoneRuntime,
     ensure_vendored_matanyone,
     load_matanyone_asset_manifest,
-    packaged_checkpoint_path,
+    matanyone_checkpoint_path,
 )
 
 if TYPE_CHECKING:
@@ -63,13 +64,15 @@ def test_offline_matting_runtime_and_model_match_manifest() -> None:
 
 
 def test_matanyone_runtime_checkpoint_and_license_are_pinned() -> None:
-    """Keep the sole continuous model complete and attributable offline."""
+    """Keep the sole continuous model attributable and byte-pinned before it is loaded."""
     manifest = load_matanyone_asset_manifest()
-    checkpoint = packaged_checkpoint_path()
+    installer = MatAnyoneCheckpointInstaller()
 
     assert manifest.upstream_revision == MATANYONE2_REVISION
     assert manifest.license == "S-Lab-1.0-NC"
-    assert checkpoint.stat().st_size == manifest.checkpoint.size
+    assert installer.identity.size == manifest.checkpoint.size
+    assert installer.identity.sha256 == manifest.checkpoint.sha256
+    assert matanyone_checkpoint_path(verify=False) == installer.checkpoint_path
 
 
 def test_matanyone_runtime_finds_the_package_level_vendored_module() -> None:

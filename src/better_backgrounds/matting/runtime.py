@@ -12,9 +12,18 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import cv2
 import numpy as np
+from platformdirs import user_cache_path
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
+from better_backgrounds.checkpoints import (
+    CheckpointIdentity,
+    ManagedCheckpointInstaller,
+    ResourceOpener,
+    open_managed_url,
+)
 from better_backgrounds.matting.contracts import MattingCapabilities, MattingConfig
+
+APPLICATION_NAME = "Better Backgrounds"
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -31,11 +40,12 @@ DeviceType = Literal["cuda", "mps", "cpu"]
 
 
 class CheckpointMetadata(BaseModel):
-    """Describe one immutable bundled model checkpoint."""
+    """Describe one immutable pinned model checkpoint."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     path: Literal["matanyone2.pth"]
+    url: HttpUrl
     size: int = Field(gt=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -64,20 +74,52 @@ def load_matanyone_asset_manifest() -> MatAnyoneAssetManifest:
     return MatAnyoneAssetManifest.model_validate_json(content)
 
 
-def packaged_checkpoint_path(*, verify: bool = True) -> Path:
-    """Return the filesystem checkpoint path after optional integrity checking."""
-    manifest = load_matanyone_asset_manifest()
-    resource = files("better_backgrounds").joinpath(
-        "assets",
-        "matanyone2",
-        manifest.checkpoint.path,
-    )
-    path = Path(str(resource))
+def default_matanyone_model_root() -> Path:
+    """Return the managed MatAnyone cache directory used by the app and its workers."""
+    return user_cache_path(APPLICATION_NAME, APPLICATION_NAME) / "models-v1" / "matanyone2"
+
+
+class MatAnyoneCheckpointInstaller(ManagedCheckpointInstaller):
+    """Download and atomically publish the pinned MatAnyone 2 checkpoint."""
+
+    label = "MatAnyone 2"
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        manifest: MatAnyoneAssetManifest | None = None,
+        opener: ResourceOpener = open_managed_url,
+    ) -> None:
+        """Use the managed model cache and an injectable download boundary."""
+        self.manifest = manifest or load_matanyone_asset_manifest()
+        self.license_name = self.manifest.license
+        checkpoint = self.manifest.checkpoint
+        super().__init__(
+            root if root is not None else default_matanyone_model_root(),
+            CheckpointIdentity(
+                filename=checkpoint.path,
+                url=str(checkpoint.url),
+                size=checkpoint.size,
+                sha256=checkpoint.sha256,
+            ),
+            opener=opener,
+        )
+
+
+def matanyone_checkpoint_path(*, verify: bool = True) -> Path:
+    """Return the managed checkpoint path, optionally proving it is present and intact.
+
+    ``verify=False`` resolves the location only, so callers can hand the path to a
+    worker before first-run setup has downloaded it.
+    """
+    path = MatAnyoneCheckpointInstaller().checkpoint_path
+    if not verify:
+        return path
     if not path.is_file():
-        msg = "Bundled MatAnyone 2 checkpoint is missing"
+        msg = "The MatAnyone 2 checkpoint is not prepared"
         raise FileNotFoundError(msg)
-    if verify:
-        verify_checkpoint_path(path)
+    verify_checkpoint_path(path)
     return path
 
 
@@ -90,7 +132,7 @@ def verify_checkpoint_path(path: Path) -> None:
             hasher.update(block)
     digest = hasher.hexdigest()
     if path.stat().st_size != manifest.checkpoint.size or digest != manifest.checkpoint.sha256:
-        msg = "Bundled MatAnyone 2 checkpoint failed integrity verification"
+        msg = "The MatAnyone 2 checkpoint failed integrity verification"
         raise ValueError(msg)
 
 

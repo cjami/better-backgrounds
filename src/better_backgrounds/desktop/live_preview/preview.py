@@ -42,7 +42,7 @@ from better_backgrounds.matting.engine import (
     EngineReady,
     ProcessMattingEngine,
 )
-from better_backgrounds.matting.runtime import packaged_checkpoint_path
+from better_backgrounds.matting.runtime import matanyone_checkpoint_path
 from better_backgrounds.matting.seed import PersonCandidate, StableFrameSelector
 
 if TYPE_CHECKING:
@@ -94,7 +94,7 @@ class NativeLivePreview(QWidget):
         _ = resolver
         if background_factory is None:
             background_factory = QWidget
-        checkpoint = packaged_checkpoint_path(verify=False)
+        checkpoint = matanyone_checkpoint_path(verify=False)
         self._calibration_path: Path | None = None
 
         def create_engine() -> ProcessMattingEngine:

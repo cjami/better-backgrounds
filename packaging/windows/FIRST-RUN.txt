@@ -1,0 +1,27 @@
+Better Backgrounds - first run on Windows
+=========================================
+
+1. Unblock the download (once)
+
+   This build is not code-signed, so SmartScreen warns before the first launch.
+
+   Either:
+     - Right-click BetterBackgrounds.exe > Properties > tick "Unblock" > OK
+   Or, when the blue "Windows protected your PC" dialog appears:
+     - Click "More info", then "Run anyway".
+
+2. Start BetterBackgrounds.exe
+
+   The first launch asks you to accept Apple's research-only SHARP model
+   licence and then downloads the three models the app needs
+   (about 3.1 GiB in total). This happens once. After that the app runs
+   entirely offline and nothing is ever uploaded from your machine.
+
+3. Optional: virtual camera output
+
+   To publish the composite into Zoom, Teams, or a browser, install
+   OBS Studio 30 or newer including its Virtual Camera component, then use
+   "OBS Virtual Camera" as your camera. Stop OBS's own virtual camera first.
+
+Requires Windows 10/11 x64. An NVIDIA GPU with CUDA is recommended for
+interactive frame rates; CPU works but is slower.

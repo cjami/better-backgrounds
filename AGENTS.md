@@ -16,14 +16,17 @@ src/better_backgrounds/
 ├── reconstruction/
 │   └── sharp/               SHARP contracts, checkpoints, PLY, runtime, and workers
 ├── matting/                 MatAnyone pipeline, refinement, composition, and benchmarks
-├── harmonization/           Settings, compiled filters, and learned runtime
+├── harmonization/           Settings and the mandatory PIH runtime and checkpoint
 ├── desktop/
 │   ├── camera/              Discovery, preferences, and native Qt capture
 │   ├── pages/               One module per product page plus shared widget helpers
 │   ├── live_preview/        Surface, session, seed, and composition coordination
-│   └── main_window/         Header, controllers, and window assembly
-├── assets/                  Package-level model and sample-scene assets
+│   ├── main_window/         Header, controllers, and window assembly
+│   └── first_run.py         First-run model download gate
+├── assets/                  Package-level model manifests and sample-scene assets
 ├── _vendor/                 Isolated upstream model implementations
+├── checkpoints.py           Shared managed-checkpoint download and verification
+├── model_setup.py           Mandatory-model readiness and combined preparation
 └── cli.py                   Console and spawn-safe worker commands
 
 tests/

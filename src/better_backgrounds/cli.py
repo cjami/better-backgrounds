@@ -21,7 +21,14 @@ from better_backgrounds.matting.engine import (
     EngineReady,
     ProcessMattingEngine,
 )
-from better_backgrounds.matting.runtime import packaged_checkpoint_path
+from better_backgrounds.matting.runtime import matanyone_checkpoint_path
+from better_backgrounds.model_setup import (
+    all_models_ready,
+    missing_models,
+    model_statuses,
+    prepare_models,
+    sharp_installer,
+)
 from better_backgrounds.reconstruction.sharp import (
     SHARP_BUILDER_REVISION,
     SharpCheckpointInstaller,
@@ -73,9 +80,8 @@ def _sharp_device(value: str) -> SharpDeviceRequest:
 def doctor_command(
     device: Annotated[str, typer.Option(help="SHARP device to probe.")] = "auto",
 ) -> None:
-    """Report local MatAnyone and SHARP readiness without changing caches."""
-    cache_root, _data_root = _application_roots()
-    installer = SharpCheckpointInstaller(cache_root / "models-v1" / "sharp")
+    """Report every mandatory model's readiness without changing caches."""
+    installer = sharp_installer()
     try:
         capabilities = probe_sharp_capabilities(_sharp_device(device))
         sharp_runtime: dict[str, object] = {
@@ -88,19 +94,74 @@ def doctor_command(
     typer.echo(
         json.dumps(
             {
-                "schema_version": 2,
-                "matanyone_checkpoint_ready": packaged_checkpoint_path().is_file(),
+                "schema_version": 3,
+                "models_ready": all_models_ready(),
+                "models": [
+                    {
+                        "key": status.key,
+                        "label": status.label,
+                        "ready": status.ready,
+                        "size": status.size,
+                        "license": status.license_name,
+                    }
+                    for status in model_statuses()
+                ],
                 "sharp": {
                     **sharp_runtime,
                     "builder_revision": SHARP_BUILDER_REVISION,
-                    "checkpoint_ready": installer.is_ready(),
                     "checkpoint_path": str(installer.checkpoint_path),
-                    "license": installer.manifest.license_name,
                 },
             },
             indent=2,
         )
     )
+
+
+@app.command("prepare-models")
+def prepare_models_command(
+    accept_model_license: Annotated[
+        bool,
+        typer.Option(
+            "--accept-model-license",
+            help="Accept Apple's research-only SHARP model license before download.",
+        ),
+    ] = False,
+) -> None:
+    """Download and verify every mandatory model into the managed cache."""
+    pending = missing_models()
+    if not pending:
+        typer.echo("All mandatory models are already prepared.")
+        return
+    for status in pending:
+        typer.echo(
+            f"Pending: {status.label} ({status.size / 1024**2:.0f} MiB, {status.license_name})"
+        )
+    if not accept_model_license:
+        typer.echo(
+            "\nSHARP's checkpoint is licensed only for non-commercial scientific research "
+            "and excludes product development.\nRe-run with --accept-model-license to "
+            "accept that license and download.",
+        )
+        raise typer.Exit(2)
+    last_percent = -1
+
+    def report(completed: int, total: int) -> None:
+        nonlocal last_percent
+        percent = int(completed * 100 / total) if total else 100
+        if percent != last_percent:
+            last_percent = percent
+            typer.echo(
+                f"\rDownloading models: {percent}% "
+                f"({completed / 1024**3:.2f}/{total / 1024**3:.2f} GiB)",
+                nl=False,
+            )
+
+    try:
+        prepare_models(license_accepted=True, progress=report)
+    except (OSError, RuntimeError, ValueError) as error:
+        typer.echo(f"\nModel preparation failed: {error}")
+        raise typer.Exit(1) from error
+    typer.echo("\nAll mandatory models are ready offline.")
 
 
 @app.command("prepare-sharp")
@@ -232,7 +293,7 @@ def matting_benchmark_command(
     report = run_matting_benchmark(
         frames,
         seed_mask,
-        packaged_checkpoint_path(),
+        matanyone_checkpoint_path(),
         requested_device=cast("DeviceRequest", device),
     )
     typer.echo(report.model_dump_json(indent=2))
@@ -261,7 +322,7 @@ def matting_worker_smoke_command(
                 interpolation=cv2.INTER_NEAREST,
             ),
         )
-    engine = ProcessMattingEngine(packaged_checkpoint_path())
+    engine = ProcessMattingEngine(matanyone_checkpoint_path())
     completed = 0
     ready = False
     started = time.monotonic()

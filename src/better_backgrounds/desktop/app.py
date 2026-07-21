@@ -215,6 +215,11 @@ def main() -> int:
     application.setOrganizationName("Better Backgrounds")
     application.setWindowIcon(application_icon())
     application.setStyleSheet(STYLESHEET)
+    if "--smoke-test" not in arguments and "--build-smoke-test" not in arguments:
+        from better_backgrounds.desktop.first_run import ensure_models_ready  # noqa: PLC0415
+
+        if not ensure_models_ready():
+            return 3
     startup = StartupCoordinator(application)
     startup.show()
     startup.advance("preferences", "Loading preferences and rooms")

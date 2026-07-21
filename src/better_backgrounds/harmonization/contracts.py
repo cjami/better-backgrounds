@@ -17,7 +17,7 @@ class HarmonizationSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    global_harmonization: bool = False
+    global_harmonization: bool = True
 
     @property
     def active(self) -> bool:

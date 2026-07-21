@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "model_id": "adobe-pih-g39",
+  "filename": "ckpt_g39.pth",
+  "url": "https://drive.usercontent.google.com/download?id=1seW8qSnaBOQ4_S9bQ4ThVOdeJGYJ-f74&export=download&confirm=t",
+  "size": 374960609,
+  "sha256": "72640cdc5109bcdc86c619b0e2278c8c277cccee561c7fc1ebaac233cb987149",
+  "builder_revision": "2823cccf0778c6ea213a3d366f03864ac8ab82e6",
+  "license_name": "Apache License 2.0",
+  "license_url": "https://www.apache.org/licenses/LICENSE-2.0"
+}

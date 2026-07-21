@@ -9,7 +9,22 @@ matting engine.
 
 All image inference, scene rendering, camera capture, and compositing run on the
 local machine. The application has no account, cloud reconstruction, telemetry,
-or webcam-upload path.
+or webcam-upload path. It is a non-commercial application.
+
+## Trying a release build
+
+Prebuilt Windows and macOS builds are published on the
+[releases page](https://github.com/cjami/better-backgrounds/releases). They are not
+code-signed, so each system needs one unlock step before the first launch:
+
+- **Windows** — right-click `BetterBackgrounds.exe` > Properties > tick **Unblock** > OK.
+  If SmartScreen appears instead, choose **More info** > **Run anyway**.
+- **macOS** — double-click **Unlock and Open.command** in the unzipped folder, or run
+  `xattr -dr com.apple.quarantine "Better Backgrounds.app"`.
+
+The first launch asks you to accept Apple's research-only SHARP model license and then
+downloads the three required models with a progress bar. After that the application
+runs offline.
 
 ## Requirements
 
@@ -33,9 +48,43 @@ make check
 dependencies, and installs the Git hooks. `make check` runs linting, formatting,
 type checking, Python and renderer tests, and both builds. Focused targets are
 `make lint`, `make format`, `make type`, `make test`, `make renderer-build`,
-`make desktop`, `make desktop-smoke`, and `make package-desktop`.
+`make desktop`, `make desktop-smoke`, `make icons`, `make models`, and
+`make package-desktop`.
 
-No SHARP checkpoint is downloaded during normal setup or tests.
+`scripts/judge-setup.sh` (or `scripts\judge-setup.ps1` on Windows) runs setup, model
+preparation, and launch as a single step.
+
+No model checkpoint is downloaded during normal setup or tests.
+
+## Mandatory models
+
+SHARP, MatAnyone 2, and PIH are all required. None of them is optional, configurable, or
+backed by an alternative implementation, and no checkpoint is committed to this
+repository. Each one is streamed into a managed cache, checked against a pinned size and
+SHA-256, and published atomically, so a partial or tampered download is never loaded:
+
+| Model | Role | Size | Source |
+| --- | --- | --- | --- |
+| Apple SHARP | Room reconstruction | 2.62 GiB | Apple's CDN, license-gated |
+| Adobe PIH | Appearance harmonization | 358 MiB | Adobe's published checkpoint link |
+| MatAnyone 2 | Live person matting | 135 MiB | The authors' upstream release |
+
+Every checkpoint is fetched from its original publisher; this project neither commits nor
+re-hosts any model weights.
+
+The desktop application prepares anything missing on first launch. The same work is
+available headlessly, which is what the setup scripts call:
+
+```text
+uv run better-backgrounds prepare-models --accept-model-license
+```
+
+`doctor` reports each model's readiness plus SHARP runtime and device state without
+changing any cache:
+
+```text
+uv run better-backgrounds doctor [--device auto|cuda|mps|cpu]
+```
 
 ## Creating a room with SHARP
 
@@ -46,7 +95,7 @@ when transparency will be flattened or SHARP's 30 mm default is needed.
 
 Apple's checkpoint is approximately 2.8 GB and has a research-only model
 license that excludes commercial use and product development. It is therefore
-prepared only after explicit acceptance:
+prepared only after explicit acceptance, either in the first-run setup step or with:
 
 ```text
 uv run better-backgrounds prepare-sharp --accept-model-license
@@ -55,12 +104,7 @@ uv run better-backgrounds prepare-sharp --accept-model-license
 The preparation worker streams the pinned checkpoint into staging, checks free
 space, size, and SHA-256, and publishes it atomically. Cancellation and any
 integrity failure remove the partial file. Once prepared, it is available
-offline. `doctor` is read-only and reports the MatAnyone checkpoint plus SHARP
-runtime, device, revision, checkpoint, and license state:
-
-```text
-uv run better-backgrounds doctor [--device auto|cuda|mps|cpu]
-```
+offline.
 
 One image can also be built directly through the versioned worker protocol:
 
@@ -145,25 +189,13 @@ report for a release reference machine:
 uv run better-backgrounds matting-benchmark capture.mp4 --mask first-mask.png
 ```
 
-Harmonizer appearance matching is available as one experimental, off-by-default
-stage in Adjust. The upstream non-commercial research checkpoint is not
-distributed with the application: point
-`BETTER_BACKGROUNDS_HARMONIZER_CHECKPOINT` at an external `harmonizer.pth` file
-before starting the desktop application. Harmonizer predicts six interpretable
-global adjustments from three startup samples, takes their median, and locks the
-result until the camera or background changes. The one-shot predictor runs in
-FP32 on CPU and its checkpoint preparation remains queued until MatAnyone
-finishes startup calibration. A session-compiled native renderer preserves
-Harmonizer's trained six-filter sequence on every exact frame, with a short
-automatic transition and automatic edge decontamination.
-Compare retains the standard exact-frame composite, reports measured frame cost,
-and immediately falls back to that baseline when the checkpoint or inference
-pass is unavailable.
-The superseded hand-authored effects have been removed rather than retained as
-parallel product controls.
-Harmonization must not become the default until both real SHARP and MatAnyone
-gates plus its quality, latency, and soak gates pass on each supported reference
-platform.
+Appearance harmonization is always performed by Adobe PIH; there is no alternative
+backend and no environment switch. It is enabled by default and can be turned off per
+room in Adjust. Its checkpoint preparation remains queued until MatAnyone finishes
+startup calibration. Compare retains the standard exact-frame composite and reports
+measured frame cost. A failed individual inference degrades that single frame to the
+standard composite rather than interrupting live video; this is frame-level robustness,
+not a fallback model.
 
 ## OBS virtual camera
 
@@ -185,35 +217,18 @@ cannot ingest the Better Backgrounds feed and republish it through the same
 single virtual-camera output. Use `OBS Virtual Camera` directly in Zoom, Teams,
 browsers, FaceTime, QuickTime, or another camera consumer instead.
 
-Adobe PIH is available as an experimental, opt-in alternative appearance backend.
-It predicts RGB curves and a frame-local shading map at 512 px, then applies those
-parameters at the camera resolution. The checkpoint remains external. Select it
-before starting the desktop application:
+Adobe PIH is the mandatory appearance backend. It predicts RGB curves and a frame-local
+shading map at 512 px, then applies those parameters at the camera resolution using the
+managed checkpoint prepared during first-run setup.
 
-```powershell
-$env:BETTER_BACKGROUNDS_HARMONIZATION_BACKEND = "pih"
-$env:BETTER_BACKGROUNDS_PIH_CHECKPOINT = "C:\path\to\ckpt_g39.pth"
-$env:BETTER_BACKGROUNDS_PIH_DEVICE = "cuda"
-$env:BETTER_BACKGROUNDS_PIH_CURVE_STRENGTH = "0.65"
-uv run better-backgrounds desktop
-```
-
-In a source checkout, the benchmark checkpoint at
-`.tools/pih_bench/ckpt_g39.pth` selects PIH automatically. An explicit backend
-environment setting still takes precedence.
-
-PIH defaults to CUDA, then Metal, then CPU according to availability. CPU is a
-functional fallback, not a live-performance target. The model is warmed after
-MatAnyone calibration and runs in the latest-frame composition coordinator. It takes
-five time-spaced global readings, locks the coherent prediction closest to their
-median, predicts a fresh local shading map for each frame, and stabilizes only its
-foreground-average gain. Global curves are applied at a conservative 0.65 strength
-by default; the optional environment setting accepts values from 0 to 1. Calibration
-starts only after the renderer delivers matching sharp-reference and finished-background
-snapshots. It is repeated after room or camera-angle changes rather than cached by room.
-It falls back to the standard composite on any checkpoint or inference failure.
-The original Harmonizer backend remains the default when no backend is selected
-and no development PIH checkpoint is available.
+PIH selects CUDA, then Metal, then CPU according to availability. CPU is functional but
+is not a live-performance target. The model is warmed after MatAnyone calibration and
+runs in the latest-frame composition coordinator. It takes five time-spaced global
+readings, locks the coherent prediction closest to their median, predicts a fresh local
+shading map for each frame, and stabilizes only its foreground-average gain. Global
+curves are applied at a conservative 0.65 strength. Calibration starts only after the
+renderer delivers matching sharp-reference and finished-background snapshots, and is
+repeated after room or camera-angle changes rather than cached by room.
 
 ## Scene rendering and offline behavior
 
@@ -263,26 +278,25 @@ by size and SHA-256 in `src/better_backgrounds/assets/sharp/manifest-v1.json`.
 The vendored MatAnyone 2 revision and checkpoint identity are recorded beside
 its runtime assets.
 
-The adapted Harmonizer inference subset is pinned to revision
-`48ecd70becbff50ccaf576db0e64212dbc494e26`; its provenance and modification
-notes are under `src/better_backgrounds/_vendor/harmonizer/`. Both that runtime
-and the separately supplied official checkpoint are governed by Creative
-Commons Attribution-NonCommercial-ShareAlike 4.0 terms.
-
 The adapted Adobe PIH inference subset is pinned to revision
 `2823cccf0778c6ea213a3d366f03864ac8ab82e6`; its Apache-2.0 provenance and
-modification notes are under `src/better_backgrounds/_vendor/pih/`. The official
-PIH checkpoint is not bundled. Confirm the checkpoint's distribution and
-commercial-use terms independently before shipping it.
+modification notes are under `src/better_backgrounds/_vendor/pih/`.
 
 The OBS output integration uses pyvirtualcam 0.15.0 under GPL-2.0. Its notice and
 license link are included under `src/better_backgrounds/desktop/assets/`. Because
 GPL distribution obligations may affect the complete packaged application,
 perform and record a full licensing review before distributing a build.
 
-Better Backgrounds source is available under the [MIT License](LICENSE). That
-license does not replace third-party terms. In particular, the Apple SHARP
-model license excludes commercial use and product development, and the bundled
-MatAnyone 2 model/runtime and Harmonizer terms are non-commercial. Review and
-obtain any necessary third-party permissions before distributing or using a
-build.
+Better Backgrounds source is available under the [MIT License](LICENSE), and this is a
+non-commercial application. That license does not replace third-party terms:
+
+- **Apple SHARP** — research-only; excludes commercial use and product development.
+  Downloaded from Apple's CDN after explicit acceptance.
+- **MatAnyone 2** — S-Lab 1.0 non-commercial, for both runtime and weights. Downloaded
+  from the authors' own upstream release.
+- **Adobe PIH** — Apache-2.0 runtime.
+- **pyvirtualcam** — GPL-2.0.
+
+No model weights are committed to this repository or bundled into a build; every
+checkpoint is fetched at first run against a pinned SHA-256. Review and obtain any
+necessary third-party permissions before distributing or using a build.
