@@ -66096,10 +66096,7 @@ fn prepareOutputFromGamma(gammaColor: vec3f, depth: f32) -> vec3f {
 	      });
 	      this.connectBridge();
 	      this.app.systems.gsplat.on('frame:ready', (_camera, _layer, ready, loadingCount) => {
-	        this.sceneSettled = ready && loadingCount === 0;
-	        if (this.sceneSettled) {
-	          if (this.pendingSnapshotKind) this.requestSceneFrame(1);
-	        }
+	        this.acceptGsplatFrameState(ready, loadingCount);
 	      });
 	      this.app.systems.gsplat.on('frame:request', () => this.requestSceneFrame(1));
 	    } catch (error) {
@@ -66273,6 +66270,18 @@ fn prepareOutputFromGamma(gammaColor: vec3f, depth: f32) -> vec3f {
 	    if (!this.cameraFrame) return;
 	    this.cameraFrame.enabled = false;
 	    this.restoreCameraFrameColorPipeline();
+	  }
+
+	  acceptGsplatFrameState(ready, loadingCount) {
+	    const wasSettled = this.sceneSettled;
+	    this.sceneSettled = ready && loadingCount === 0;
+	    if (!this.sceneSettled) return;
+	    if (!wasSettled && !this.cacheSceneFrames) {
+	      this.configureNormalFrame();
+	      this.requestSceneFrame(2);
+	      return;
+	    }
+	    if (this.pendingSnapshotKind) this.requestSceneFrame(1);
 	  }
 
 	  applyViewpoint(payload, rememberAsReset = false) {
@@ -66576,7 +66585,12 @@ fn prepareOutputFromGamma(gammaColor: vec3f, depth: f32) -> vec3f {
 	    const requestedStrength = blurStrengthOverride ?? settings.blur_strength;
 	    const blurStrength = Math.min(1, Math.max(0, requestedStrength));
 	    const effect = depthOfFieldForStrength(blurStrength, this.viewpoint.field_of_view);
-	    const enabled = Boolean(this.sceneEntity && blurStrength > 0 && !this.navigationInputs?.size);
+	    const enabled = Boolean(
+	      this.sceneEntity
+	      && this.sceneSettled
+	      && blurStrength > 0
+	      && !this.navigationInputs?.size
+	    );
 	    if (!enabled) {
 	      this.disableCameraFrame();
 	      return;

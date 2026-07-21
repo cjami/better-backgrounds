@@ -191,6 +191,59 @@ test('zero blur and held navigation both use direct rendering', () => {
   assert.equal(renderer.cameraFrame.enabled, false);
 });
 
+test('initial scene rendering stays direct until the splat frame has settled', () => {
+  const renderer = Object.create(SceneRenderer.prototype);
+  let enabled = true;
+  renderer.sceneEntity = {};
+  renderer.sceneSettled = false;
+  renderer.navigationInputs = new Set();
+  renderer.viewpoint = { depth_of_field: { blur_strength: 0.5 }, field_of_view: 42 };
+  renderer.cameraFrame = {
+    get enabled() { return enabled; },
+    set enabled(value) {
+      enabled = value;
+      if (value) throw new Error('depth of field was enabled before settlement');
+    },
+  };
+  renderer.restoreCameraFrameColorPipeline = () => {};
+
+  renderer.configureNormalFrame();
+
+  assert.equal(enabled, false);
+});
+
+test('the first settled interactive frame installs depth of field and replaces itself', () => {
+  const calls = [];
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.cacheSceneFrames = false;
+  renderer.sceneSettled = false;
+  renderer.pendingSnapshotKind = null;
+  renderer.configureNormalFrame = () => calls.push(['configure']);
+  renderer.requestSceneFrame = (frames) => calls.push(['request', frames]);
+
+  renderer.acceptGsplatFrameState(true, 0);
+  renderer.acceptGsplatFrameState(true, 0);
+
+  assert.deepEqual(calls, [
+    ['configure'],
+    ['request', 2],
+  ]);
+});
+
+test('a settled cached frame continues the pending snapshot without changing its effect', () => {
+  const calls = [];
+  const renderer = Object.create(SceneRenderer.prototype);
+  renderer.cacheSceneFrames = true;
+  renderer.sceneSettled = false;
+  renderer.pendingSnapshotKind = 'harmonization';
+  renderer.configureNormalFrame = () => calls.push(['configure']);
+  renderer.requestSceneFrame = (frames) => calls.push(['request', frames]);
+
+  renderer.acceptGsplatFrameState(true, 0);
+
+  assert.deepEqual(calls, [['request', 1]]);
+});
+
 test('a held pointer keeps DOF disabled through move-stop-rotate', () => {
   const renderer = Object.create(SceneRenderer.prototype);
   renderer.sceneEntity = {};
